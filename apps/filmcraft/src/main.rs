@@ -79,6 +79,8 @@ fn tell(text: &str, error: bool) {
 fn main() -> eframe::Result {
     // First, so the panic hook and every start-up record are logged (`logging`).
     let logger = logging::install();
+    // Shorts Factory's studio.* commands, before any command runs (menus, control channel).
+    filmcraft_studio::commands::register();
     // lossy, so a value that is not Unicode is reported like any other bad port instead of ignored
     let env_port = std::env::var_os("FILMCRAFT_CONTROL_PORT").map(|p| p.to_string_lossy().into_owned());
     let launch = match args::parse(env_port, std::env::args_os().skip(1)) {

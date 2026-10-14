@@ -1710,6 +1710,7 @@ dependencies = [
  "filmcraft-platform",
  "filmcraft-project",
  "filmcraft-render",
+ "filmcraft-studio",
  "filmcraft-time",
  "filmcraft-ui-egui",
  "glob",
@@ -1837,6 +1838,7 @@ dependencies = [
  "filmcraft-platform",
  "filmcraft-project",
  "filmcraft-render",
+ "filmcraft-studio",
  "filmcraft-testkit",
  "filmcraft-time",
  "serde_json",
@@ -2306,6 +2308,7 @@ version = "0.8.0"
 dependencies = [
  "chrono",
  "filmcraft-codecs",
+ "filmcraft-engine",
  "filmcraft-media",
  "filmcraft-reel",
  "iana-time-zone",

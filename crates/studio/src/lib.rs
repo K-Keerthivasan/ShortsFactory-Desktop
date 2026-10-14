@@ -13,6 +13,7 @@
 pub mod ai;
 mod clock;
 pub mod cloud;
+pub mod commands;
 pub mod data;
 pub mod instagram;
 pub mod settings;

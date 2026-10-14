@@ -20,6 +20,7 @@ type Run = fn(&mut Session, &Value) -> Result<Value>;
 type Enabled = fn(&Session) -> std::result::Result<(), String>;
 
 /// Metadata + implementation for one command.
+#[derive(Clone, Copy)]
 pub struct CommandSpec {
     pub id: &'static str,
     pub label: &'static str,
@@ -3420,6 +3421,7 @@ fn build() -> Vec<CommandSpec> {
     v.extend(crate::voiceover::commands());
     v.extend(crate::narration::commands());
     v.extend(crate::reel::commands());
+    v.extend(crate::host::specs());
     v.extend(crate::keyboard::commands());
     v.extend(crate::project_panel::commands());
     v.extend(crate::media_browser::commands());

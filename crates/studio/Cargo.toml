@@ -11,6 +11,8 @@ workspace = true
 
 [dependencies]
 filmcraft-reel = { workspace = true }
+# studio.* engine commands (menus, control channel, MCP).
+filmcraft-engine = { workspace = true }
 # FilmCraft's own demuxers check downloaded videos (no ffprobe).
 filmcraft-media = { workspace = true }
 filmcraft-codecs = { workspace = true }

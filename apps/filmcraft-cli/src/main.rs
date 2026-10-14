@@ -264,6 +264,8 @@ async fn main() {
 }
 
 async fn cli() {
+    // Shorts Factory's studio.* commands, so `mcp` and `run` offer them too.
+    filmcraft_studio::commands::register();
     // `std::env::args` panics on an argument that is not Unicode (a Linux file name in Latin-1)
     let a = Args::parse(std::env::args_os().skip(1).map(|a| a.to_string_lossy().into_owned()));
     // `--help` anywhere (`filmcraft-cli --help`, `filmcraft-cli export --help`) prints the reference:
