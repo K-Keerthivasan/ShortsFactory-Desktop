@@ -46,7 +46,7 @@ pub fn commands() -> Vec<CommandSpec> {
             "reel.new",
             "New Reel…",
             M,
-            r#"{"name":str?,"template":str?,"brand":Brand?,"channelId":n?,"card":Card?,"paths":[str]? (footage to import and build around),"seconds":f64? (length without footage)}"#,
+            r#"{"name":str?,"template":str?,"brand":Brand?,"channelId":n?,"card":Card?,"item":itemId? (project footage to build around),"paths":[str]? (a file; reused when already in the project),"seconds":f64? (length without footage)}"#,
             always,
             new_reel,
         ),
@@ -67,6 +67,8 @@ pub fn commands() -> Vec<CommandSpec> {
             set_card,
         ),
         spec("reel.setBrand", "Set Reel Brand", M, r#"{"brand":Brand,"channelId":n?,"rebuild":bool?=true}"#, has_reel, set_brand),
+        spec("reel.duplicate", "New Version of This Reel", M, r#"{"name":str?}"#, has_reel, duplicate),
+        query("reel.usesOf", "Reels Made From", r#"{"item":itemId?,"path":str?}"#, uses_of),
         spec("reel.linkPost", "Link Reel to Post", &[], r#"{"post":{"channelId":n,"storyId":n,"scriptId":n}|null}"#, has_reel, link_post),
     ]
 }
@@ -111,10 +113,15 @@ fn new_reel(s: &mut Session, p: &Value) -> Result<Value> {
         p.get("paths").and_then(Value::as_array).map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()).unwrap_or_default();
     s.edit_group("New Reel", |s| {
         let seq = s.execute("file.newSequence", json!({"name": name, "width": REEL_WIDTH, "height": REEL_HEIGHT, "fps": REEL_FPS, "video": TRACKS.len(), "audio": 2}))?;
-        let mut item = None;
-        if !paths.is_empty() {
-            let r = s.execute("file.import", json!({"paths": paths}))?;
-            item = r.get("items").and_then(Value::as_array).and_then(|a| a.first()).and_then(Value::as_u64);
+        // A project item as it is; a file already in the project is reused, never imported twice.
+        let mut item = item_p(p, "item").filter(|i| s.project.item(*i).is_some()).map(|i| i.0);
+        if item.is_none()
+            && let Some(path) = paths.first()
+        {
+            item = match existing_item(s, path) {
+                Some(i) => Some(i.0),
+                None => s.execute("file.import", json!({"paths": [path]}))?.get("items").and_then(Value::as_array).and_then(|a| a.first()).and_then(Value::as_u64),
+            };
         }
         let mut args = json!({"template": template, "brand": brand, "card": p.get("card").cloned().unwrap_or(Value::Null), "seconds": f64_p(p, "seconds").unwrap_or(15.0)});
         if let Some(i) = item {
@@ -216,29 +223,43 @@ fn apply(s: &mut Session, p: &Value) -> Result<Value> {
             .or_else(|| s.execute("file.import", json!({"paths": [path]})).ok().and_then(|r| r.get("items")?.as_array()?.first()?.as_u64()).map(ItemId)),
         None => None,
     };
-    let main = if placed.is_some() { None } else { main_clip(s, p, &reel) };
+    let before = s.history.undo.len();
     let fallback = rate.snap_nearest(Tick::from_seconds_f64(f64_p(p, "seconds").unwrap_or(15.0).clamp(1.0, 3600.0)));
+    // Footage from the project goes in with its sound: the picture on the Footage track, the
+    // linked audio on A1, placed together by the timeline's own placement.
+    let main = match placed {
+        Some(item) => {
+            s.edit("Apply Reel Template", |pr, _| ensure_tracks(pr, seq_id))?;
+            let pi = s.project.item(item).ok_or_else(|| bad("reel.apply", "no such item"))?;
+            let dur = Some(pi.duration()).filter(|d| *d > Tick::ZERO && *d < Tick::from_seconds_f64(86_400.0)).unwrap_or(fallback);
+            let (vt, at) = s
+                .active_sequence()
+                .map(|q| (q.video_tracks.get(FOOTAGE).map(|t| t.id), q.audio_tracks.first().map(|t| t.id)))
+                .ok_or(EngineError::NoSequence)?;
+            let (_, has_audio) = s.project.source_streams(item);
+            let clips = crate::commands::place_item(
+                s,
+                item,
+                TimeRange::new(Tick::ZERO, rate.snap(dur).max(rate.frame_duration())),
+                Tick::ZERO,
+                vt,
+                at.filter(|_| has_audio),
+                false,
+                "Apply Reel Template",
+                None,
+            )?;
+            let q = s.active_sequence().ok_or(EngineError::NoSequence)?;
+            clips.into_iter().find(|c| q.video_tracks.iter().any(|t| t.items.iter().any(|i| i.id == *c)))
+        }
+        None => main_clip(s, p, &reel),
+    };
     let start_at = if placed.is_some() { Tick::ZERO } else { s.playhead() };
     let reel_card = reel.card.clone();
     let reel_brand = reel.brand.clone();
     let template_id = template.clone();
     let result = s.edit("Apply Reel Template", |pr, st| {
         let pr: &mut Project = pr;
-        // The main clip: placed now, or found on the timeline.
-        let mut main_id = main;
-        if let Some(item) = placed {
-            let dur = pr.item(item).map(|i| i.duration()).filter(|d| *d > Tick::ZERO).unwrap_or(fallback);
-            let ti = pr
-                .make_track_item(item, TrackKind::Video, Tick::ZERO, TimeRange::new(Tick::ZERO, rate.snap(dur).max(rate.frame_duration())), rate)
-                .ok_or_else(|| bad("reel.apply", "that item has no picture"))?;
-            main_id = Some(ti.id);
-            ensure_tracks(pr, seq_id)?;
-            let q = pr.sequence_mut(seq_id).ok_or(EngineError::NoSequence)?;
-            let tr = q.video_tracks.get_mut(FOOTAGE).ok_or(EngineError::NoSequence)?;
-            tr.items.retain(|i| !i.range().overlaps(&ti.range()));
-            tr.items.push(ti);
-            tr.sort();
-        }
+        let main_id = main;
         ensure_tracks(pr, seq_id)?;
         let q = pr.sequence(seq_id).ok_or(EngineError::NoSequence)?;
         let found = main_id.and_then(|c| q.find_item(c).map(|(_, i)| i.clone()));
@@ -355,10 +376,9 @@ fn apply(s: &mut Session, p: &Value) -> Result<Value> {
         store(pr, seq_id, reel_value);
         Ok(())
     })?;
-    // One undo step for the whole application: the clips and the Reel info go back together.
-    let n = s.history.undo.len();
-    if n >= 2 {
-        s.history.undo.remove(n - 1);
+    // One undo step for the whole application: placement, clips and the Reel info go back together.
+    if s.history.undo.len() > before + 1 {
+        s.history.undo.truncate(before + 1);
     }
     Ok(json!({"template": reel.template, "mainClip": result.0, "clips": result.1}))
 }
@@ -493,4 +513,40 @@ fn link_post(s: &mut Session, p: &Value) -> Result<Value> {
         Ok(())
     })?;
     Ok(json!({"reel": current(s).map(|r| r.to_value())}))
+}
+
+/// The Reels (sequences) already built around a project item, or around the file at `path`.
+fn uses_of(s: &mut Session, p: &Value) -> Result<Value> {
+    let item = item_p(p, "item").or_else(|| str_p(p, "path").and_then(|path| existing_item(s, path)));
+    let Some(item) = item else { return Ok(json!({"item": Value::Null, "reels": []})) };
+    let mut out = Vec::new();
+    for (id, pi) in &s.project.items {
+        let Some(q) = pi.as_sequence() else { continue };
+        let Some(info) = for_sequence(s.project.reel.as_ref(), *id) else { continue };
+        let uses = info.main_clip.is_some_and(|c| q.find_item(ClipId(c)).is_some_and(|(_, it)| it.item == item));
+        if uses {
+            out.push(json!({"sequence": id.0, "name": pi.name, "template": info.template, "post": info.post}));
+        }
+    }
+    Ok(json!({"item": item.0, "reels": out}))
+}
+
+/// Copies the active Reel into a new sequence: same footage (no import), same cut, card and
+/// template, published as a post of its own.
+fn duplicate(s: &mut Session, p: &Value) -> Result<Value> {
+    let seq = s.state.active_sequence.ok_or(EngineError::NoSequence)?;
+    let mut reel = info(s);
+    reel.post = None;
+    let base = s.project.item(seq).map(|i| i.name.clone()).unwrap_or_else(|| "Reel".into());
+    let name = str_p(p, "name").map(str::to_string).unwrap_or_else(|| format!("{base} (version 2)"));
+    let value = reel.to_value();
+    let new = s.edit("New Version of This Reel", |pr, st| {
+        let it = pr.item(seq).cloned().ok_or(EngineError::NoSequence)?;
+        let id = pr.add_item(&name, it.label, it.kind, None);
+        store(pr, id, value);
+        st.project_selection = vec![id];
+        Ok(id)
+    })?;
+    s.execute("sequence.open", json!({"item": new.0}))?;
+    Ok(json!({"sequence": new.0, "name": name}))
 }

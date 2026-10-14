@@ -144,3 +144,45 @@ fn each_sequence_is_its_own_reel() {
     assert_eq!(crate::reel::current(&s).unwrap().template, "jkr-meme-v2");
     assert_eq!(crate::reel::for_sequence(s.project.reel.as_ref(), first).unwrap().template, "framed", "the first Reel is untouched");
 }
+
+#[test]
+fn footage_brings_its_sound_and_undoes_in_one_step() {
+    let mut s = Session::default();
+    s.execute("reel.new", json!({"name": "Sound", "template": "quoteCard", "seconds": 4})).unwrap();
+    let r = s.execute("file.importDemoFootage", json!({"scene": "OceanSunset"})).unwrap();
+    let item = r["items"].as_array().and_then(|a| a.first()).and_then(Value::as_u64).or_else(|| r["item"].as_u64()).unwrap();
+    let (_, has_audio) = s.project.source_streams(filmcraft_project::ItemId(item));
+    let before = s.history.undo.len();
+    s.execute("reel.apply", json!({"template": "quoteCard", "item": item})).unwrap();
+    assert_eq!(s.history.undo.len(), before + 1, "one undo step");
+    let q = s.active_sequence().unwrap();
+    let video = &q.video_tracks[2].items[0];
+    if has_audio {
+        let audio = q.audio_tracks[0].items.first().expect("the footage's sound is on A1");
+        assert!(video.link.is_some() && video.link == audio.link, "picture and sound are linked");
+    }
+    s.execute("edit.undo", json!({})).unwrap();
+    let q = s.active_sequence().unwrap();
+    assert!(q.video_tracks[2].items.is_empty() && q.audio_tracks.iter().all(|t| t.items.is_empty()), "footage and sound are gone together");
+}
+
+#[test]
+fn a_second_reel_reuses_the_source_and_versions_are_their_own_reels() {
+    let (mut s, r) = reel("framed");
+    let first = s.state.active_sequence.unwrap();
+    let main = s.active_sequence().unwrap().find_item(ClipId(r["mainClip"].as_u64().unwrap())).unwrap().1.item;
+    let items = s.project.items.len();
+    s.execute("reel.new", json!({"name": "Again", "item": main.0})).unwrap();
+    // Only the new sequence was added: the footage was not imported a second time.
+    assert_eq!(s.project.items.len(), items + 1);
+    let uses = s.execute("reel.usesOf", json!({"item": main.0})).unwrap();
+    assert_eq!(uses["reels"].as_array().unwrap().len(), 2);
+    s.execute("sequence.open", json!({"item": first.0})).unwrap();
+    s.execute("reel.linkPost", json!({"post": {"channelId": 1, "storyId": 5, "scriptId": 6}})).unwrap();
+    let v = s.execute("reel.duplicate", json!({})).unwrap();
+    assert_ne!(v["sequence"].as_u64(), Some(first.0));
+    let copy = crate::reel::current(&s).unwrap();
+    assert_eq!(copy.template, "framed");
+    assert!(copy.post.is_none(), "a new version publishes as its own post");
+    assert_eq!(crate::reel::for_sequence(s.project.reel.as_ref(), first).unwrap().post.map(|p| p.story_id), Some(5));
+}
