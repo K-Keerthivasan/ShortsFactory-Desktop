@@ -6,3 +6,9 @@ plan/
 .DS_Store
 .claude/worktrees/
 __pycache__/
+.env
+.env.*
+!.env.example
+/data/
+/storage/
+/secrets/

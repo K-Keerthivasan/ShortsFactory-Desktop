@@ -3578,3 +3578,12 @@
 
 # The native macOS application menu (Settings…).
 	Settings	Preferências
+
+# Shorts Factory desktop menus
+	Reel	Vídeo curto
+	Reels	Vídeos curtos
+	Reel Studio	Estúdio de vídeos curtos
+	New Reel…	Novo vídeo curto…
+	Apply Reel Template	Aplicar modelo de vídeo curto
+	Edit Reel Card	Editar cartão do vídeo curto
+	Set Reel Brand	Definir marca do vídeo curto

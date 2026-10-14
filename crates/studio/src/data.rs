@@ -80,6 +80,208 @@ pub struct Account {
 const SETTINGS_DEFAULT_PLATFORMS: &[&str] = &[];
 
 impl Studio {
+    pub fn rename_post(&self, channel: i64, story: i64, name: &str) -> Result<()> {
+        let name = name.trim();
+        if name.is_empty() || name.chars().count() > 180 {
+            return err("Use a name of 1–180 characters");
+        }
+        let mut c = self.connect()?;
+        let tx = c.transaction()?;
+        if tx.execute(
+            "UPDATE story_clusters SET canonical_story_title = ?1, updated_at = ?2 WHERE id = ?3 AND channel_id = ?4 AND status != 'REJECTED'",
+            params![name, now_iso(), story, channel],
+        )? != 1
+        {
+            return err("Post not found in this workspace");
+        }
+        self.audit(&tx, channel, "reel studio post renamed", Some(story), json!({"name": name}))?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Hide a post without deleting media, renders, scripts or publication history.
+    pub fn archive_post(&self, channel: i64, story: i64) -> Result<String> {
+        let mut c = self.connect()?;
+        let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let status: String = tx
+            .query_row("SELECT status FROM story_clusters WHERE id = ?1 AND channel_id = ?2 AND status != 'REJECTED'", params![story, channel], |r| r.get(0))
+            .optional()?
+            .ok_or_else(|| StudioError::Other("Post not found in this workspace".into()))?;
+        let active: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM renders r WHERE r.story_id = ?1 AND r.channel_id = ?2 AND (r.status IN ('QUEUED','RENDERING','RUNNING') OR EXISTS(SELECT 1 FROM publishing_jobs p WHERE p.render_id = r.id AND p.status NOT IN ('PUBLISHED','FAILED','CANCELLED'))))", params![story, channel], |r| r.get(0))?;
+        if active {
+            return err("Finish or cancel this post's active rendering/publishing jobs before archiving");
+        }
+        tx.execute("UPDATE story_clusters SET status = 'REJECTED', updated_at = ?1 WHERE id = ?2 AND channel_id = ?3", params![now_iso(), story, channel])?;
+        self.audit(&tx, channel, "reel studio post archived", Some(story), json!({"previousStatus": status}))?;
+        tx.commit()?;
+        Ok(status)
+    }
+
+    pub fn restore_post(&self, channel: i64, story: i64) -> Result<()> {
+        let mut c = self.connect()?;
+        let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let details: String = tx
+            .query_row(
+                "SELECT details FROM audit_logs WHERE channel_id = ?1 AND entity_id = ?2 AND action = 'reel studio post archived' ORDER BY id DESC LIMIT 1",
+                params![channel, story],
+                |r| r.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| StudioError::Other("No archive record found for this post".into()))?;
+        let details: Value = serde_json::from_str(&details).map_err(|e| StudioError::Other(e.to_string()))?;
+        let status = details
+            .get("previousStatus")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty() && *s != "REJECTED")
+            .ok_or_else(|| StudioError::Other("Archive record has no previous status".into()))?;
+        if tx.execute(
+            "UPDATE story_clusters SET status = ?1, updated_at = ?2 WHERE id = ?3 AND channel_id = ?4 AND status = 'REJECTED'",
+            params![status, now_iso(), story, channel],
+        )? != 1
+        {
+            return err("Archived post not found in this workspace");
+        }
+        self.audit(&tx, channel, "reel studio post restored", Some(story), json!({}))?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn set_ai_provider(&self, provider: &str) -> Result<()> {
+        if !matches!(provider, "hermes" | "ollama") {
+            return err("Choose Hermes or Ollama");
+        }
+        let mut c = self.connect()?;
+        let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let stored: Option<String> = tx.query_row("SELECT json FROM application_settings WHERE key = 'general'", [], |r| r.get(0)).optional()?;
+        let mut settings = match stored {
+            Some(text) => serde_json::from_str::<Value>(&text).map_err(|e| StudioError::Other(format!("General settings are unreadable: {e}")))?,
+            None => json!({}),
+        };
+        let Some(object) = settings.as_object_mut() else { return err("General settings must be an object") };
+        object.insert("aiProvider".into(), json!(provider));
+        tx.execute(
+            "INSERT INTO application_settings (key, json) VALUES ('general', ?1) ON CONFLICT(key) DO UPDATE SET json = excluded.json",
+            [settings.to_string()],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Discover readable videos under this workspace's assets, without following links.
+    /// Returns (added, unreadable); bounded so a malformed directory tree cannot run forever.
+    pub fn scan_media(&self, channel: i64) -> Result<(usize, usize)> {
+        let c = self.connect()?;
+        let ch = self.channel(&c, channel)?;
+        if ch.slug.is_empty() || !ch.slug.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
+            return err("Workspace has an invalid folder slug");
+        }
+        let root = self.storage.join("channels").join(&ch.slug).join("assets");
+        let mut pending = vec![(root, 0usize)];
+        let (mut added, mut unreadable, mut visited) = (0, 0, 0usize);
+        while let Some((folder, depth)) = pending.pop() {
+            if !folder.is_dir() {
+                continue;
+            }
+            for entry in std::fs::read_dir(folder)? {
+                visited = visited.saturating_add(1);
+                if visited > 10_000 {
+                    return err("Scan stopped at 10,000 entries; split this workspace's assets into smaller folders");
+                }
+                let entry = entry?;
+                let kind = entry.file_type()?;
+                if kind.is_symlink() {
+                    continue;
+                }
+                let path = entry.path();
+                if kind.is_dir() {
+                    if depth < 8 {
+                        pending.push((path, depth + 1));
+                    }
+                    continue;
+                }
+                let ext = path.extension().and_then(|s| s.to_str()).unwrap_or_default().to_ascii_lowercase();
+                if !kind.is_file() || !matches!(ext.as_str(), "mp4" | "mov" | "mkv" | "webm" | "avi" | "m4v" | "mts" | "m2ts") {
+                    continue;
+                }
+                let rel = self.relative_storage(&path)?;
+                let exists: bool =
+                    c.query_row("SELECT EXISTS(SELECT 1 FROM media_assets WHERE file_path = ?1 AND channel_id = ?2)", params![rel, channel], |r| r.get(0))?;
+                if exists {
+                    continue;
+                }
+                let Ok((duration, width, height)) = crate::probe(&path) else {
+                    unreadable += 1;
+                    continue;
+                };
+                let label = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+                c.execute("INSERT INTO media_assets (created_at, updated_at, channel_id, file_path, asset_type, label, duration, width, height, source) VALUES (?1, ?1, ?2, ?3, 'VIDEO', ?4, ?5, ?6, ?7, 'Workspace scan')", params![now_iso(), channel, rel, label, duration, width, height])?;
+                added += 1;
+            }
+        }
+        Ok((added, unreadable))
+    }
+
+    /// Create an isolated channel with settings compatible with the earlier desktop app.
+    pub fn create_workspace(&self, slug: &str, name: &str) -> Result<Channel> {
+        let name = name.trim();
+        if name.is_empty()
+            || name.chars().count() > 100
+            || slug.is_empty()
+            || slug.len() > 60
+            || slug.split('-').any(|s| s.is_empty() || !s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit()))
+        {
+            return err("Use a name of 1–100 characters and a slug with lowercase letters, digits and single hyphens (up to 60 characters)");
+        }
+        let mut c = self.connect()?;
+        let tx = c.transaction()?;
+        let now = now_iso();
+        tx.execute("INSERT INTO channels (created_at, updated_at, slug, name) VALUES (?1, ?1, ?2, ?3)", params![now, slug, name])?;
+        let id = tx.last_insert_rowid();
+        let brand = Brand { channel_name: name.into(), ..Default::default() };
+        let settings = serde_json::to_value(&brand).map_err(|e| StudioError::Other(e.to_string()))?;
+        tx.execute("INSERT INTO channel_settings (channel_id, json) VALUES (?1, ?2)", params![id, settings.to_string()])?;
+        for folder in ["articles", "assets/clips", "assets/brand", "audio", "captions", "renders", "thumbnails", "temp"] {
+            std::fs::create_dir_all(self.storage.join("channels").join(slug).join(folder))?;
+        }
+        tx.commit()?;
+        Ok(Channel { id, slug: slug.into(), name: name.into() })
+    }
+
+    /// Merge editable brand fields without replacing publishing, AI or scheduling settings.
+    pub fn save_brand(&self, channel: i64, brand: &Brand) -> Result<()> {
+        if filmcraft_reel::find(&brand.default_layout).is_none() || !brand.card_title_size.is_finite() || !(18.0..=140.0).contains(&brand.card_title_size) {
+            return err("Choose a valid template and a headline size between 18 and 140");
+        }
+        for color in [&brand.primary_color, &brand.secondary_color, &brand.background, &brand.card_background, &brand.band_color, &brand.card_text_color] {
+            if color.len() != 7 || !color.starts_with('#') || !color.bytes().skip(1).all(|b| b.is_ascii_hexdigit()) {
+                return err("Brand colours must use #RRGGBB");
+            }
+        }
+        let mut c = self.connect()?;
+        let tx = c.transaction()?;
+        self.channel(&tx, channel)?;
+        let stored: Option<String> = tx.query_row("SELECT json FROM channel_settings WHERE channel_id = ?1", [channel], |r| r.get(0)).optional()?;
+        let mut settings: Value = match stored {
+            Some(s) => serde_json::from_str(&s).map_err(|e| StudioError::Other(format!("Settings are unreadable: {e}")))?,
+            None => json!({}),
+        };
+        let Some(obj) = settings.as_object_mut() else { return err("Settings must be an object") };
+        let fields = serde_json::to_value(brand).map_err(|e| StudioError::Other(e.to_string()))?;
+        if let Some(fields) = fields.as_object() {
+            for (key, value) in fields {
+                if key != "channelName" && key != "logoPath" {
+                    obj.insert(key.clone(), value.clone());
+                }
+            }
+        }
+        tx.execute(
+            "INSERT INTO channel_settings (channel_id, json) VALUES (?1, ?2) ON CONFLICT(channel_id) DO UPDATE SET json = excluded.json",
+            params![channel, settings.to_string()],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn connect(&self) -> Result<Connection> {
         let c = Connection::open(&self.database)?;
         c.busy_timeout(std::time::Duration::from_secs(10))?;
@@ -248,13 +450,21 @@ impl Studio {
     }
     /// The channel's posts, newest first, each with its newest script and render.
     pub fn library(&self, channel: i64, limit: usize) -> Result<Vec<LibraryPost>> {
+        self.library_filtered(channel, limit, false)
+    }
+
+    pub fn archived_library(&self, channel: i64, limit: usize) -> Result<Vec<LibraryPost>> {
+        self.library_filtered(channel, limit, true)
+    }
+
+    fn library_filtered(&self, channel: i64, limit: usize, archived: bool) -> Result<Vec<LibraryPost>> {
         let c = self.connect()?;
         let mut q = c.prepare(
             "SELECT id, canonical_story_title, status, kind, created_at FROM story_clusters
-             WHERE channel_id = ?1 AND status != 'REJECTED' ORDER BY id DESC LIMIT ?2",
+             WHERE channel_id = ?1 AND ((?3 = 0 AND status != 'REJECTED') OR (?3 = 1 AND status = 'REJECTED' AND EXISTS(SELECT 1 FROM audit_logs a WHERE a.entity_id = story_clusters.id AND a.channel_id = ?1 AND a.action = 'reel studio post archived'))) ORDER BY id DESC LIMIT ?2",
         )?;
         let stories: Vec<(i64, String, String, String, String)> = q
-            .query_map(params![channel, limit as i64], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?
+            .query_map(params![channel, limit.min(10_000) as i64, archived], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?
             .collect::<std::result::Result<_, _>>()?;
         let mut out = Vec::new();
         for (story, title, status, kind, created_at) in stories {
@@ -380,6 +590,11 @@ impl Studio {
         let stamp = now_ms();
         let target = dir.join(format!("render-reelstudio-{stamp}.mp4"));
         std::fs::copy(video, &target)?;
+        // An editable native project accompanies exports from Reel Studio.
+        let project = video.with_extension("fcproj");
+        if project.is_file() {
+            std::fs::copy(project, target.with_extension("fcproj"))?;
+        }
         let thumb = match thumbnail.filter(|t| t.is_file()) {
             Some(t) => {
                 let ext = t.extension().and_then(|e| e.to_str()).unwrap_or("png");

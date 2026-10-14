@@ -2,7 +2,7 @@ use serde_json::{Value, json};
 
 use crate::Session;
 use filmcraft_project::{ClipId, ParamValue, TrackItem};
-use filmcraft_reel::{ReelInfo, TEMPLATES};
+use filmcraft_reel::TEMPLATES;
 
 /// A fresh Reel built around procedural demo footage (no media files needed).
 fn reel(template: &str) -> (Session, Value) {

@@ -83,6 +83,102 @@ fn reads_channels_brand_media_and_accounts_in_place() {
 }
 
 #[test]
+fn workspace_creation_validates_paths_and_keeps_channels_separate() {
+    let s = fixture("create-workspace");
+    for slug in ["../escape", "UPPER", "a/b", "a--b", "-bad", "bad-"] {
+        assert!(s.create_workspace(slug, "Test").is_err());
+    }
+    assert!(s.create_workspace("new", "  ").is_err());
+    let ch = s.create_workspace("new-channel", "New Channel").unwrap();
+    assert_ne!(ch.id, 1);
+    assert!(s.storage.join("channels/new-channel/assets/clips").is_dir());
+    assert_eq!(s.brand(ch.id).unwrap().channel_name, "New Channel");
+    assert!(s.accounts(ch.id).unwrap().is_empty());
+    assert!(s.create_workspace("new-channel", "Duplicate").is_err());
+}
+
+#[test]
+fn saving_brand_preserves_other_settings_and_rejects_invalid_values() {
+    let s = fixture("save-brand");
+    let before = s.settings_json(1).unwrap();
+    let mut brand = s.brand(1).unwrap();
+    brand.primary_color = "#123456".into();
+    brand.social_handle = "newhandle".into();
+    s.save_brand(1, &brand).unwrap();
+    let after = s.settings_json(1).unwrap();
+    assert_eq!(after["enabledPlatforms"], before["enabledPlatforms"]);
+    assert_eq!(after["logoAssetId"], before["logoAssetId"]);
+    assert_eq!(s.brand(1).unwrap().primary_color, "#123456");
+    brand.card_title_size = f64::NAN;
+    assert!(s.save_brand(1, &brand).is_err());
+    brand.card_title_size = 56.0;
+    brand.primary_color = "invalid".into();
+    assert!(s.save_brand(1, &brand).is_err());
+    assert_eq!(s.settings_json(1).unwrap(), after);
+}
+
+#[test]
+fn media_scan_skips_unreadable_videos_and_rejects_stored_path_traversal() {
+    let s = fixture("scan-media");
+    let dir = s.storage.join("channels/jkr/assets/clips");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("broken.mp4"), b"not video").unwrap();
+    assert_eq!(s.scan_media(1).unwrap(), (0, 1));
+    assert_eq!(s.media(1).unwrap().len(), 2);
+    s.connect().unwrap().execute("UPDATE channels SET slug = '../outside' WHERE id = 1", []).unwrap();
+    assert!(s.scan_media(1).is_err());
+}
+
+#[test]
+fn library_names_archive_and_restore_are_scoped_and_keep_files() {
+    let s = fixture("library-actions");
+    let video = s.root.join("export.mp4");
+    std::fs::write(&video, b"render").unwrap();
+    std::fs::write(video.with_extension("fcproj"), b"editable project").unwrap();
+    let (post, render) = s.send_to_library(&reel(), &video, None, None, 8.0, false).unwrap();
+    let path = s.library(1, 10).unwrap()[0].render.as_ref().unwrap().path.clone().unwrap();
+    assert_eq!(std::fs::read(path.with_extension("fcproj")).unwrap(), b"editable project");
+    assert!(s.rename_post(999, post.story_id, "Wrong workspace").is_err());
+    assert!(s.rename_post(1, post.story_id, "   ").is_err());
+    s.rename_post(1, post.story_id, "My saved Reel").unwrap();
+    assert_eq!(s.library(1, 10).unwrap()[0].title, "My saved Reel");
+    let c = s.connect().unwrap();
+    c.execute("INSERT INTO publishing_jobs (created_at, updated_at, channel_id, render_id, social_account_id, platform, status, scheduled_at) VALUES ('', '', 1, ?1, 1, 'INSTAGRAM', 'SCHEDULED', '')", [render]).unwrap();
+    assert!(s.archive_post(1, post.story_id).is_err());
+    c.execute("UPDATE publishing_jobs SET status = 'CANCELLED'", []).unwrap();
+    assert!(s.archive_post(999, post.story_id).is_err());
+    s.archive_post(1, post.story_id).unwrap();
+    assert!(s.library(1, 10).unwrap().is_empty());
+    assert_eq!(s.archived_library(1, 10).unwrap().len(), 1);
+    assert!(path.is_file() && path.with_extension("fcproj").is_file());
+    assert!(s.restore_post(999, post.story_id).is_err());
+    s.restore_post(1, post.story_id).unwrap();
+    assert_eq!(s.library(1, 10).unwrap()[0].status, "RENDERED");
+    assert!(s.archived_library(1, 10).unwrap().is_empty());
+}
+
+#[test]
+fn changing_ai_provider_preserves_scheduler_settings() {
+    let s = fixture("provider-settings");
+    let c = s.connect().unwrap();
+    c.execute(
+        "INSERT INTO application_settings (key, json) VALUES ('general', ?1)",
+        [json!({"aiProvider": "hermes", "timezone": "America/New_York", "publishCron": "* * * * *"}).to_string()],
+    )
+    .unwrap();
+    s.set_ai_provider("ollama").unwrap();
+    assert_eq!(ai::provider(&s), "ollama");
+    let saved: String = c.query_row("SELECT json FROM application_settings WHERE key = 'general'", [], |r| r.get(0)).unwrap();
+    let saved: serde_json::Value = serde_json::from_str(&saved).unwrap();
+    assert_eq!(saved["publishCron"], "* * * * *");
+    assert_eq!(saved["timezone"], "America/New_York");
+    assert!(s.set_ai_provider("invalid").is_err());
+    assert_eq!(ai::provider(&s), "ollama");
+    c.execute("UPDATE application_settings SET json = 'broken' WHERE key = 'general'", []).unwrap();
+    assert!(s.set_ai_provider("hermes").is_err());
+}
+
+#[test]
 fn a_reel_becomes_a_post_with_a_render_then_a_new_version() {
     let s = fixture("library");
     let video = s.root.join("export.mp4");

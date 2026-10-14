@@ -25,18 +25,18 @@ Supabase; temporary cloud video in Backblaze B2.
 | Feature | Status |
 |---|---|
 | Switch between JKR and K2 Digital Media | Done — Reel Studio's workspace picker reads the library's channels |
-| Create new workspaces | Planned |
+| Create new workspaces | Built — Settings ▸ New workspace; validates slug and creates isolated folders |
 | Separate assets, branding, projects and Instagram connections | Done for assets, branding and connections (library rows); projects are `.fcproj` files |
 | Apply each workspace's branding to its videos | Done — templates take the channel's colours, font, handle and logo |
-| Choose the destination Instagram account for cloud scheduling | Planned (with §10) |
+| Choose the destination Instagram account for cloud scheduling | Built — Publish ▸ Cloud scheduling |
 
 ## 2. Video assets
 
 | Feature | Status |
 |---|---|
 | Use clips and full movies from the workspace folders | Done — the panel lists the workspace's media |
-| Refresh the folder to discover new files | Planned |
-| Browse and search clips | Partial — list; search planned |
+| Refresh the folder to discover new files | Built — Create ▸ Scan workspace folders; bounded scan under workspace assets, skips unreadable videos and symbolic links |
+| Browse and search clips | Built — Create ▸ Search clips; first 40 matching library rows |
 | Preview source videos | Done — FilmCraft's Source monitor |
 | Brand assets (logos, graphics) | Done — the channel logo is placed by every template |
 | Duration and resolution | Done |
@@ -44,7 +44,7 @@ Supabase; temporary cloud video in Backblaze B2.
 
 ## 3. Download videos from links (yt-dlp, built in)
 
-MediaDock is replaced by yt-dlp driven directly by the app (Reel Studio ▸ Download from links).
+MediaDock is replaced by yt-dlp driven directly by the app (Create ▸ Download videos).
 
 | Feature | Status |
 |---|---|
@@ -79,7 +79,8 @@ MediaDock is replaced by yt-dlp driven directly by the app (Reel Studio ▸ Down
 |---|---|
 | Quote card, full bleed, headline hero, numbered point and the rest | Done — all 21 |
 | Workspace names, handles, colours | Done |
-| Template selection and visual adjustments | Done — re-apply any template; every layer is editable |
+| Template selection and visual adjustments | Built — Design has all 21 layouts with slot diagrams; every layer is editable. Original recipe variation/tuning controls are not yet ported. |
+| Edit workspace branding | Built — Settings edits handle, website, contact, font, colours, headline size, verified mark and default template; saves without replacing other settings |
 
 ## 7. Rendering and exporting
 
@@ -94,7 +95,8 @@ MediaDock is replaced by yt-dlp driven directly by the app (Reel Studio ▸ Down
 | Feature | Status |
 |---|---|
 | Drafts and finished videos, approve, publication results | Done — Reel Studio's Library section |
-| Search, name, delete, reopen for editing | Planned |
+| Search, rename, archive and restore | Built — latest 40 posts per view; archive retains files and history, with Undo and an Archived view; active jobs block archiving |
+| Reopen for editing | Built for new native exports, which save an adjacent `.fcproj`; older renders without that snapshot cannot reopen |
 | Published page | Partial — publication status shown per post |
 
 ## 9. Post directly to Instagram
@@ -136,6 +138,66 @@ Link → download → AI → render → local schedule: **Planned** (after §3).
 
 | Feature | Status |
 |---|---|
-| AI provider settings | Done — read from the library (`application_settings`, `.env`) |
+| AI provider settings | Built — Settings switches Hermes/Ollama while preserving scheduler settings; credentials remain in the existing configuration |
 | Logs, media and settings folders | Done — FilmCraft logs; the library's folders open from the panel |
 | Dashboard, system health, feed configuration | Planned |
+
+## Audit, 2026-10-14
+
+The native app does **not** yet have full parity with the Electron app. The statuses
+above distinguish implemented code from external-service acceptance testing.
+
+The original app's `src/server/routes` and `src/shared/contracts.ts` also expose
+features that this migration checklist previously underreported:
+
+| Original capability | Native status |
+|---|---|
+| Per-template tuning, five recipe variations and visual-style options | Missing dedicated controls; ordinary FilmCraft layer editing is available but does not reproduce those settings |
+| RSS feed management, polling and article extraction | Existing articles can be read; feed administration and ingestion not ported |
+| Analytics, dashboard and system/provider readiness | Not ported |
+| Backup, cleanup and asset organisation | Not ported |
+| Create/edit/remove publishing accounts | Reads existing connections; management not ported |
+| Change AI provider and scheduler configuration | Provider selector built; cron/timezone editing not ported |
+| Render naming, deletion and reopening original scripts/projects | Rename and reversible archive built; reopening supports new native snapshots, not original Electron projects; permanent deletion omitted |
+| MediaDock batch job management | Replaced by a separate yt-dlp download UI; not equivalent feature parity |
+
+### Original screen coverage
+
+Compared against every file in `desktop-app/dashboard/src/pages`:
+
+| Original screen | Native entry point | Remaining difference |
+|---|---|---|
+| Create | Reel Studio ▸ Create and Design | Full manual-post/source workflow and template tuning are incomplete |
+| Studio | FilmCraft timeline, monitors, properties and export queue | Electron editor-project round-trip is missing |
+| Assets | Create ▸ clip search and folder scan; FilmCraft media browser | Asset metadata editor, delete, use-as-logo and original folder management are missing |
+| Imports | Create ▸ Download videos | MediaDock job history, health and recovery are not equivalent |
+| Videos | Library | Rename/archive/restore built; reopening requires a native snapshot; search covers the loaded recent 40 posts |
+| Published | Library publication status | Dedicated published history/filter screen missing |
+| Publishing | Publish | Cloud actions exist; local reschedule/cancel/retry and uncertain-result reconciliation UI need work |
+| Accounts | Settings connection summary; Publish ▸ cloud accounts | Connect, test, disconnect and full account editor missing |
+| Settings | Workspace creation, brand editor and AI provider | Cron/timezone settings, approval policy and full channel settings missing |
+| Feeds | Design ▸ existing article picker | Feed CRUD, polling and extraction missing |
+| System | Settings folder shortcuts; FilmCraft logs/jobs | Original GPU diagnostics, health, job retry, cleanup and audit views missing |
+
+Reel Studio now has Create, Design, Publish, Library and Settings navigation.
+Navigation stays fixed while each page scrolls independently. Layout selection,
+extra card fields, AI assistance and captions collapse when not in use. Brand
+colours have swatches and hex inputs. Background AI and export results are tied
+to the originating project so switching Reels cannot overwrite another draft.
+Template slot diagrams indicate geometry, not a rendered preview of fonts, colours
+or motion. Actual renders for visual QA are generated by:
+
+```powershell
+cargo test -p filmcraft-engine reel_frames -- --ignored
+```
+
+They are written to `target/reel-frames/`, not committed. The audit rendered all
+21 templates at 1080×1920 using procedural Aurora footage and inspected their
+contact sheet. Empty/long/full card structural tests and the engine's template,
+card edit, undo, sequence isolation, save/open and MP4 export tests passed. This
+does not establish pixel parity with Remotion, motion fidelity at every frame,
+or suitability for every user clip/font/logo. Live Instagram, YouTube, cloud
+scheduling and real-link downloads still need service acceptance tests.
+
+Future FilmCraft patch merges are described in [UPSTREAM.md](UPSTREAM.md).
+
