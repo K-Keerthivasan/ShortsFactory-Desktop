@@ -158,7 +158,7 @@ impl Studio {
             other => Err(format!("{other} accounts cannot be checked")),
         };
         if !record {
-            return outcome.or_else(|e| err(e));
+            return outcome.map_err(StudioError::Other);
         }
         let c = self.connect()?;
         let now = crate::now_iso();
