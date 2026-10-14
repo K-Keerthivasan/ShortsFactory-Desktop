@@ -1,7 +1,7 @@
-//! Community and project links (Help menu, About dialog, header Discord button, Home screen).
+//! Project links (Help menu, About dialog, Home screen).
 //!
-//! FilmCraft is part of the ArtCraft family: the community lives on the ArtCraft Discord, every
-//! app has a page on the ArtCraft website and a public GitHub repository.
+//! Shorts Factory Desktop is made with FilmCraft, the open-source editor by the ArtCraft Team and
+//! the FilmCraft contributors; the Help menu and About credit it and link to its source.
 
 /// The app's short name, used in the website and repository URLs.
 pub const APP: &str = "filmcraft";

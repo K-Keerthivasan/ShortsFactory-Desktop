@@ -1,0 +1,28 @@
+[package]
+name = "filmcraft-studio"
+description = "Reel Studio services: the channel library, accounts and keys of the Shorts Factory data folder, AI card writing and Instagram / YouTube publishing"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+filmcraft-reel = { workspace = true }
+# FilmCraft's own demuxers check downloaded videos (no ffprobe).
+filmcraft-media = { workspace = true }
+filmcraft-codecs = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+log = { workspace = true }
+# The shared studio database is SQLite; the bundled build needs no system library.
+rusqlite = { version = "0.32", features = ["bundled"] }
+# The local IANA time zone the cloud schedules in.
+iana-time-zone = "0.1"
+# Local time for schedules typed in the panel.
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# HTTPS for the Graph API, YouTube and a local Ollama; rustls, no system OpenSSL.
+ureq = { version = "2", default-features = false, features = ["tls", "json"] }

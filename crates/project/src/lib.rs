@@ -1257,6 +1257,11 @@ pub struct Project {
     /// instructions for whoever opens it next, frame numbers and the like. Schema v15.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub notes: String,
+    /// Reel Studio: the template, channel, card and library post this project is a Reel of
+    /// (`filmcraft_reel::ReelInfo` as JSON; this crate only keeps it). Additive and optional, so
+    /// projects without it are unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reel: Option<serde_json::Value>,
 }
 
 /// How a sequence is shown in the Timeline panel: its zoom, scroll position and track heights.
@@ -1353,6 +1358,7 @@ impl Project {
             source_graphics: BTreeMap::new(),
             narrations: BTreeMap::new(),
             notes: String::new(),
+            reel: None,
         }
     }
 

@@ -44,6 +44,8 @@ filmcraft-frame = { path = "crates/frame" }
 filmcraft-media = { path = "crates/media" }
 filmcraft-codecs = { path = "crates/codecs" }
 filmcraft-project = { path = "crates/project" }
+filmcraft-reel = { path = "crates/reel" }
+filmcraft-studio = { path = "crates/studio" }
 filmcraft-edit = { path = "crates/edit" }
 filmcraft-interchange = { path = "crates/interchange" }
 filmcraft-text = { path = "crates/text" }

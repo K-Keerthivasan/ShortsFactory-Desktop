@@ -1,11 +1,16 @@
-FilmCraft
+Shorts Factory Desktop
+Made with FilmCraft.
+
+Shorts Factory Desktop is an independent fork of FilmCraft (https://github.com/storytold/filmcraft),
+the open-source, pure-Rust video editor:
 Copyright (c) 2026 ArtCraft Team and the FilmCraft contributors.
-Licensed under the MIT License or the Apache License, Version 2.0, at your option
+Shorts Factory Desktop additions: Copyright (c) 2026 the Shorts Factory Desktop contributors.
+Both are licensed under the MIT License or the Apache License, Version 2.0, at your option
 (LICENSE-MIT, LICENSE-APACHE).
 
-The ArtCraft name, wordmark and logos in docs/brand/ are trademarks of the ArtCraft Team. They are
-not open source and are not covered by the license above; their terms are in
-docs/brand/LICENSE-brand.txt.
+FilmCraft and ArtCraft are trademarks of the ArtCraft Team. This fork is not an ArtCraft product
+and does not use the ArtCraft wordmark or logos, which FilmCraft's brand terms require forks to
+remove. "Made with FilmCraft" credits the upstream project.
 
 Third-party material
 

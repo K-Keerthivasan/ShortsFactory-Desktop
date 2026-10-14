@@ -1771,6 +1771,8 @@ impl FilmcraftApp {
         self.scrub_audio(&ctx);
         // Text to Speech: a selected narration clip loads into the panel
         panels::tts::follow_selection(self);
+        // Reel Studio: background results, finished exports and due schedules
+        panels::reel::poll(self, ctx.input(|i| i.time));
         if self.ui.tts.pending.is_some() || self.ui.tts.download_job.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }

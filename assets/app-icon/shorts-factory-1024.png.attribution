@@ -1,0 +1,8 @@
+asset:        shorts-factory-1024.png
+title:        Shorts Factory Desktop app icon (a 9:16 frame holding a play head)
+author:       kkvasan, for Shorts Factory Desktop
+source:       original work (drawn in code by packaging/shorts-factory/make_icon.py)
+license:      MIT OR Apache-2.0
+license-file: assets/app-icon/LICENSE.txt
+added:        2026-10-14 by Claude (agent) for kkvasan
+notes:        Rendered by make_icon.py (supersampled shapes, no third-party artwork); resized with ffmpeg as a build-time tool only.

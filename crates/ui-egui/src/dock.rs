@@ -40,10 +40,11 @@ pub enum PanelKind {
     ReferenceMonitor,
     Timecode,
     ProjectNotes,
+    ReelStudio,
 }
 
 impl PanelKind {
-    pub const ALL: [PanelKind; 28] = [
+    pub const ALL: [PanelKind; 29] = [
         PanelKind::Project,
         PanelKind::MediaBrowser,
         PanelKind::Libraries,
@@ -72,6 +73,7 @@ impl PanelKind {
         PanelKind::ReferenceMonitor,
         PanelKind::Timecode,
         PanelKind::ProjectNotes,
+        PanelKind::ReelStudio,
     ];
     pub fn title(self) -> &'static str {
         match self {
@@ -103,6 +105,7 @@ impl PanelKind {
             PanelKind::ReferenceMonitor => "Reference Monitor",
             PanelKind::Timecode => "Timecode",
             PanelKind::ProjectNotes => "Project Notes",
+            PanelKind::ReelStudio => "Reel Studio",
         }
     }
     pub fn id(self) -> String {
@@ -177,7 +180,7 @@ fn vsplit(size: SplitSize, a: DockNode, b: DockNode) -> DockNode {
     DockNode::Split { vertical: true, size, a: Box::new(a), b: Box::new(b) }
 }
 
-pub const WORKSPACES: [&str; 9] = ["Editing", "Assembly", "Color", "Effects", "Audio", "Captions and Graphics", "Learning", "Review", "All Panels"];
+pub const WORKSPACES: [&str; 10] = ["Reels", "Editing", "Assembly", "Color", "Effects", "Audio", "Captions and Graphics", "Learning", "Review", "All Panels"];
 
 /// The user's workspaces file, beside `preferences.json` in the data directory.
 pub const WORKSPACES_FILE: &str = "workspaces.json";
@@ -313,6 +316,17 @@ pub fn workspace(name: &str) -> DockNode {
     use SplitSize::*;
     let bottom_editing = || hsplit(FixedA(64.0), tabs(&[Tools], 0), hsplit(FixedB(116.0), tabs(&[Timeline], 0), tabs(&[AudioMeters], 0)));
     match name {
+        // Shorts Factory's own: the Reel Studio beside a tall Program monitor for 9:16, the
+        // timeline across the bottom.
+        "Reels" => vsplit(
+            Ratio(0.62),
+            hsplit(
+                FixedB(400.0),
+                hsplit(Ratio(0.42), tabs(&[Project, MediaBrowser, Source, EffectControls], 0), tabs(&[Program], 0)),
+                tabs(&[ReelStudio, Properties, EssentialGraphics], 0),
+            ),
+            bottom_editing(),
+        ),
         "Assembly" => vsplit(
             Ratio(0.52),
             hsplit(

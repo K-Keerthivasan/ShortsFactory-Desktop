@@ -493,19 +493,19 @@ pub fn portable_data_dir(exe_dir: &Path) -> Option<PathBuf> {
 /// elsewhere `$XDG_DATA_HOME/filmcraft` or `~/.local/share/filmcraft`.
 pub fn default_data_dir() -> Option<PathBuf> {
     let env = |k: &str| std::env::var_os(k).filter(|v| !v.is_empty()).map(PathBuf::from);
-    if let Some(d) = env("FILMCRAFT_DATA_DIR") {
+    if let Some(d) = env("SHORTS_FACTORY_EDITOR_DATA").or_else(|| env("FILMCRAFT_DATA_DIR")) {
         return Some(d);
     }
     if let Some(d) = std::env::current_exe().ok().and_then(|exe| exe.parent().and_then(portable_data_dir)) {
         return Some(d);
     }
     if cfg!(target_os = "macos") {
-        return env("HOME").map(|h| h.join("Library/Application Support/FilmCraft"));
+        return env("HOME").map(|h| h.join("Library/Application Support/Shorts Factory Desktop/Editor"));
     }
     if cfg!(windows) {
-        return env("APPDATA").map(|h| h.join("FilmCraft"));
+        return env("APPDATA").map(|h| h.join("Shorts Factory Desktop").join("Editor"));
     }
-    env("XDG_DATA_HOME").map(|d| d.join("filmcraft")).or_else(|| env("HOME").map(|h| h.join(".local/share/filmcraft")))
+    env("XDG_DATA_HOME").map(|d| d.join("shorts-factory-desktop/editor")).or_else(|| env("HOME").map(|h| h.join(".local/share/shorts-factory-desktop/editor")))
 }
 
 pub fn unix_now() -> i64 {

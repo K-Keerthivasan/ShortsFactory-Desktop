@@ -7,7 +7,7 @@
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rerun-if-changed=../../assets/app-icon/filmcraft.ico");
+    println!("cargo:rerun-if-changed=../../assets/app-icon/shorts-factory.ico");
     println!("cargo:rerun-if-env-changed=FILMCRAFT_REQUIRE_WINRES");
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
@@ -19,12 +19,15 @@ fn main() {
 mod windows {
     pub fn embed_resources() {
         let mut res = winresource::WindowsResource::new();
-        res.set_icon("../../assets/app-icon/filmcraft.ico")
-            .set("ProductName", "FilmCraft")
-            .set("FileDescription", "FilmCraft video editor")
-            .set("LegalCopyright", "Copyright (c) the FilmCraft contributors. MIT OR Apache-2.0.")
-            .set("OriginalFilename", "filmcraft.exe")
-            .set("InternalName", "filmcraft");
+        res.set_icon("../../assets/app-icon/shorts-factory.ico")
+            .set("ProductName", "Shorts Factory Desktop")
+            .set("FileDescription", "Shorts Factory Desktop: Reel studio and video editor, made with FilmCraft")
+            .set(
+                "LegalCopyright",
+                "Shorts Factory Desktop contributors; made with FilmCraft (c) the ArtCraft Team and the FilmCraft contributors. MIT OR Apache-2.0.",
+            )
+            .set("OriginalFilename", "shorts-factory-desktop.exe")
+            .set("InternalName", "shorts-factory-desktop");
         if let Err(e) = res.compile() {
             if std::env::var_os("FILMCRAFT_REQUIRE_WINRES").is_some() {
                 panic!("embedding Windows resources failed: {e}");

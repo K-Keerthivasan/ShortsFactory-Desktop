@@ -485,6 +485,9 @@ pub struct UiState {
     /// Text to Speech panel: the script and voice settings being written or edited.
     #[serde(default)]
     pub tts: crate::panels::tts::TtsDraft,
+    /// Reel Studio panel: workspace, card and publishing choices.
+    #[serde(default)]
+    pub reel: crate::panels::reel::ReelDraft,
     /// Export mode: settings, preset, destination, range, the Preset Manager and Quick Export.
     #[serde(default)]
     pub export: crate::panels::export_mode::ExportUi,
@@ -958,9 +961,9 @@ impl Default for UiState {
             language: crate::i18n::Language::default(),
             tool: Tool::Selection,
             mode: Mode::Edit,
-            workspace: "Editing".into(),
+            workspace: "Reels".into(),
             floating: vec![],
-            dock: crate::dock::workspace("Editing"),
+            dock: crate::dock::workspace("Reels"),
             focused: PanelKind::Timeline,
             timeline: TimelineView::default(),
             program: MonitorView::default(),
@@ -983,6 +986,7 @@ impl Default for UiState {
             keyframe_selection: Vec::new(),
             essential_sound_tab: "Edit".into(),
             tts: Default::default(),
+            reel: Default::default(),
             export: Default::default(),
             text_tab: captions_tab(),
             caption_search: String::new(),

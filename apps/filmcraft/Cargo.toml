@@ -1,14 +1,19 @@
 [package]
 name = "filmcraft"
-description = "FilmCraft desktop app"
+description = "Shorts Factory Desktop: the Reel studio and video editor, made with FilmCraft"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-default-run = "filmcraft"
+default-run = "shorts-factory-desktop"
 build = "build.rs"
 
 [lints]
 workspace = true
+
+# The desktop executable. The crate keeps FilmCraft's name so the fork merges cleanly upstream.
+[[bin]]
+name = "shorts-factory-desktop"
+path = "src/main.rs"
 
 [features]
 default = []

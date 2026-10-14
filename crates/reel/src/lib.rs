@@ -1,0 +1,230 @@
+//! Reel Studio's model: a channel's **brand**, a Reel's **card** (the words it carries) and the
+//! vertical **templates** that lay both out over the footage.
+//!
+//! A template does not render anything itself. [`plan`] turns a template, a brand and a card into
+//! a [`ReelPlan`]: where the main clip sits in the 9:16 frame, what is drawn behind it, the graphic
+//! layers drawn under and over it (ordinary `graphic_text` / `graphic_shape` layers) and where the
+//! logo goes. The engine (`reel.*` commands) builds that plan into ordinary clips on ordinary
+//! tracks, so everything a template makes stays editable on the timeline like any other clip.
+//!
+//! The brand is read from the same JSON the earlier Shorts Factory app stored per channel
+//! (`channel_settings.json`), so existing channels keep their colours, font, handle and logo.
+#![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
+
+mod catalog;
+mod layers;
+
+use filmcraft_project::EffectInstance;
+use filmcraft_project::gtemplate::TemplateControl;
+use filmcraft_time::{TICKS_PER_SECOND, Tick};
+use serde::{Deserialize, Serialize};
+
+pub use catalog::{TEMPLATES, TemplateInfo, find};
+pub use layers::{Rgba, color};
+
+/// Width of every Reel, in pixels.
+pub const REEL_WIDTH: u32 = 1080;
+/// Height of every Reel, in pixels.
+pub const REEL_HEIGHT: u32 = 1920;
+/// Frame rate new Reels are made at.
+pub const REEL_FPS: f64 = 30.0;
+
+/// A channel's look. Field names match the stored channel settings, so a settings row reads
+/// straight into this; every field has a default, so a partial or older row still reads.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct Brand {
+    /// Shown on cards that carry the channel's name.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub channel_name: String,
+    pub primary_color: String,
+    pub secondary_color: String,
+    pub background: String,
+    pub card_background: String,
+    pub band_color: String,
+    pub card_text_color: String,
+    pub card_title_size: f64,
+    pub verified: bool,
+    pub font: String,
+    pub website: String,
+    pub contact_line: String,
+    pub social_handle: String,
+    pub cta: Option<String>,
+    /// The template a new Reel starts with.
+    pub default_layout: String,
+    /// The logo image, as a path the app can open (absolute, or relative to the media library).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub logo_path: Option<String>,
+}
+
+impl Default for Brand {
+    fn default() -> Self {
+        Brand {
+            channel_name: String::new(),
+            primary_color: "#ff2e3f".into(),
+            secondary_color: "#ffffff".into(),
+            background: "#0b0b0e".into(),
+            card_background: "#000000".into(),
+            band_color: "#7d1420".into(),
+            card_text_color: "#ffffff".into(),
+            card_title_size: 56.0,
+            verified: true,
+            font: "Arial".into(),
+            website: String::new(),
+            contact_line: String::new(),
+            social_handle: String::new(),
+            cta: None,
+            default_layout: "quoteCard".into(),
+            logo_path: None,
+        }
+    }
+}
+
+impl Brand {
+    /// Reads a stored channel settings JSON. Unknown fields are ignored; bad colours fall back
+    /// when drawn, never here, so a damaged row still opens.
+    pub fn from_settings_json(json: &str) -> Result<Brand, String> {
+        serde_json::from_str(json).map_err(|e| format!("channel settings are not readable: {e}"))
+    }
+    /// The handle as shown on a card (`@name`), or the website when there is no handle.
+    pub fn handle_line(&self) -> String {
+        let h = self.social_handle.trim();
+        if h.is_empty() {
+            self.website.trim().to_string()
+        } else if h.starts_with('@') {
+            h.to_string()
+        } else {
+            format!("@{h}")
+        }
+    }
+}
+
+/// The words a Reel carries.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct Card {
+    pub title: String,
+    pub caption: String,
+    pub attribution: String,
+    /// The pill some templates carry ("01", "LEVEL UP").
+    pub badge: String,
+    /// Up to four supporting lines (numbered and brief templates).
+    pub bullets: Vec<String>,
+    /// The closing line of templates with an end state; empty uses the brand's call to action.
+    pub cta: String,
+    /// What the post says on Instagram (not drawn on the video).
+    pub instagram_caption: String,
+    pub hashtags: Vec<String>,
+}
+
+/// The library post a project publishes as (rows of the shared studio database).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PostLink {
+    pub channel_id: i64,
+    pub story_id: i64,
+    pub script_id: i64,
+}
+
+/// What a project knows about being a Reel, kept in `Project::reel`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ReelInfo {
+    pub template: String,
+    pub channel_id: Option<i64>,
+    pub brand: Brand,
+    pub card: Card,
+    /// The footage clip the template is built around (a `ClipId`).
+    pub main_clip: Option<u64>,
+    pub post: Option<PostLink>,
+}
+
+impl ReelInfo {
+    /// Reads `Project::reel`; a missing or damaged value is no Reel rather than an error.
+    pub fn from_value(v: Option<&serde_json::Value>) -> Option<ReelInfo> {
+        v.and_then(|v| serde_json::from_value(v.clone()).ok())
+    }
+    pub fn to_value(&self) -> serde_json::Value {
+        serde_json::to_value(self).unwrap_or(serde_json::Value::Null)
+    }
+}
+
+/// A rectangle of the 1080×1920 frame, in pixels.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Rect {
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+}
+
+impl Rect {
+    pub const fn new(x: f64, y: f64, w: f64, h: f64) -> Rect {
+        Rect { x, y, w, h }
+    }
+    pub const FULL: Rect = Rect::new(0.0, 0.0, REEL_WIDTH as f64, REEL_HEIGHT as f64);
+    pub fn center(&self) -> (f64, f64) {
+        (self.x + self.w / 2.0, self.y + self.h / 2.0)
+    }
+}
+
+/// How the main clip fills its slot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Fit {
+    /// Fill the slot, cropping what overflows.
+    Cover,
+    /// Show the whole picture inside the slot.
+    Contain,
+}
+
+/// What is drawn behind everything, across the whole frame.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub enum Backdrop {
+    /// Nothing: the under layers (or black) show.
+    None,
+    /// A blown-up, blurred and darkened copy of the main clip.
+    BlurredClip { blur: f64, brightness: f64, saturation: f64 },
+}
+
+/// Where the channel logo goes: its centre and the size of its longer side.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LogoSpot {
+    pub center: (f64, f64),
+    pub size: f64,
+    /// Opacity, 0..100.
+    pub opacity: f64,
+}
+
+/// A template applied to a brand and a card: everything the engine needs to build the Reel.
+#[derive(Clone, Debug)]
+pub struct ReelPlan {
+    pub template: &'static str,
+    pub slot: Rect,
+    pub fit: Fit,
+    pub backdrop: Backdrop,
+    /// Graphic layers under the clip (card colour, bands, gradients), back to front.
+    pub under: Vec<EffectInstance>,
+    /// Graphic layers over the clip (scrims, frames, words, decorations), back to front.
+    pub over: Vec<EffectInstance>,
+    /// The card fields and colours exposed as template properties of the over graphic.
+    pub controls: Vec<TemplateControl>,
+    pub logo: Option<LogoSpot>,
+}
+
+/// Seconds as ticks, for template timing.
+pub fn secs(s: f64) -> Tick {
+    if !s.is_finite() {
+        return Tick::ZERO;
+    }
+    Tick((s * TICKS_PER_SECOND as f64).round() as i64)
+}
+
+/// Lays out `template` for `brand` and `card` over a Reel of `seconds`.
+pub fn plan(template: &str, brand: &Brand, card: &Card, seconds: f64) -> Result<ReelPlan, String> {
+    let info = find(template).ok_or_else(|| format!("unknown Reel template `{template}`"))?;
+    let seconds = if seconds.is_finite() && seconds > 0.0 { seconds.min(86_400.0) } else { 30.0 };
+    Ok((info.build)(&layers::Ctx::new(info.id, brand, card, seconds)))
+}
+
+#[cfg(test)]
+mod tests;
