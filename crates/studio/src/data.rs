@@ -282,6 +282,50 @@ impl Studio {
         Ok(())
     }
 
+    /// Makes an image the workspace's logo: copies it into the workspace's brand folder, adds it
+    /// to the library as a LOGO asset (once) and points the channel's settings at it.
+    pub fn set_logo(&self, channel: i64, file: &Path) -> Result<i64> {
+        let ext = file.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).unwrap_or_default();
+        if !["png", "jpg", "jpeg", "webp"].contains(&ext.as_str()) || !file.is_file() {
+            return err("Choose a PNG, JPEG or WebP image");
+        }
+        let mut c = self.connect()?;
+        let ch = self.channel(&c, channel)?;
+        let dir = self.storage.join("channels").join(&ch.slug).join("assets").join("brand");
+        std::fs::create_dir_all(&dir)?;
+        let name: String = file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| format!("logo.{ext}"));
+        let target = dir.join(&name);
+        if std::fs::canonicalize(file).ok() != std::fs::canonicalize(&target).ok() {
+            std::fs::copy(file, &target)?;
+        }
+        let rel = self.relative_storage(&target)?;
+        let tx = c.transaction()?;
+        let now = now_iso();
+        let existing: Option<i64> =
+            tx.query_row("SELECT id FROM media_assets WHERE file_path = ?1 AND channel_id = ?2", params![rel, channel], |r| r.get(0)).optional()?;
+        let id = match existing {
+            Some(id) => id,
+            None => {
+                tx.execute(
+                    "INSERT INTO media_assets (created_at, updated_at, channel_id, file_path, asset_type, label, tags) VALUES (?1, ?1, ?2, ?3, 'LOGO', ?4, '[\"logo\"]')",
+                    params![now, channel, rel, name],
+                )?;
+                tx.last_insert_rowid()
+            }
+        };
+        let stored: Option<String> = tx.query_row("SELECT json FROM channel_settings WHERE channel_id = ?1", [channel], |r| r.get(0)).optional()?;
+        let mut settings: Value = stored.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_else(|| json!({}));
+        let Some(obj) = settings.as_object_mut() else { return err("Settings must be an object") };
+        obj.insert("logoAssetId".into(), json!(id));
+        tx.execute(
+            "INSERT INTO channel_settings (channel_id, json) VALUES (?1, ?2) ON CONFLICT(channel_id) DO UPDATE SET json = excluded.json",
+            params![channel, settings.to_string()],
+        )?;
+        self.audit(&tx, channel, "logo changed", Some(id), json!({"file": rel}))?;
+        tx.commit()?;
+        Ok(id)
+    }
+
     pub fn connect(&self) -> Result<Connection> {
         let c = Connection::open(&self.database)?;
         c.busy_timeout(std::time::Duration::from_secs(10))?;

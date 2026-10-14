@@ -327,3 +327,15 @@ fn ytdlp_formats_follow_the_options() {
     let custom = ytdlp::Options { format: "18".into(), ..Default::default() };
     assert_eq!(ytdlp::format_for(&custom, true), "18");
 }
+
+#[test]
+fn a_logo_is_copied_registered_once_and_used_by_the_brand() {
+    let s = fixture("logo");
+    let img = s.root.join("New Logo.png");
+    std::fs::write(&img, b"png").unwrap();
+    let id = s.set_logo(1, &img).unwrap();
+    assert_eq!(s.set_logo(1, &img).unwrap(), id, "setting the same logo again reuses its row");
+    let b = s.brand(1).unwrap();
+    assert!(b.logo_path.as_deref().is_some_and(|p| p.ends_with("New Logo.png")));
+    assert!(s.set_logo(1, &s.root.join("notes.txt")).is_err());
+}
