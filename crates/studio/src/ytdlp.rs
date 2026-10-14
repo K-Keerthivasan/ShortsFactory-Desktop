@@ -199,7 +199,7 @@ fn step(studio: &Studio, channel: i64, job: &mut Import, update: &dyn Fn(&Import
     if !o.rate_limit.is_empty() && !o.rate_limit.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.') {
         return err("rate limit looks like 5M or 500K");
     }
-    if job.asset_id.is_none() {
+    if job.file.is_none() {
         if job.metadata.is_none() {
             set(job, "Reading the link");
             job.metadata = Some(analyze(studio, &job.url, &o)?);
@@ -210,7 +210,8 @@ fn step(studio: &Studio, channel: i64, job: &mut Import, update: &dyn Fn(&Import
         }
         job.title = meta.get("title").and_then(Value::as_str).unwrap_or("Imported video").chars().take(200).collect();
         let (slug,): (String,) = studio.connect()?.query_row("SELECT slug FROM channels WHERE id = ?1", [channel], |r| Ok((r.get(0)?,)))?;
-        let dir = studio.storage.join("channels").join(&slug).join("assets").join("clips");
+        // The chosen downloads folder, else the workspace's clips folder.
+        let dir = studio.app_settings().download_dir.unwrap_or_else(|| studio.storage.join("channels").join(&slug).join("assets").join("clips"));
         std::fs::create_dir_all(&dir)?;
         let stem = format!("import-{}", now_ms());
         let work = studio.root.join("Editor").join("downloads");
@@ -296,15 +297,18 @@ fn step(studio: &Studio, channel: i64, job: &mut Import, update: &dyn Fn(&Import
             std::fs::copy(&downloaded, &file)?;
             let _ = std::fs::remove_file(&downloaded);
         }
-        let rel = studio.relative_storage(&file)?;
-        let c = studio.connect()?;
-        let now = crate::now_iso();
-        c.execute(
-            "INSERT INTO media_assets (created_at, updated_at, channel_id, file_path, asset_type, label, tags, duration, width, height, source, source_url, license_notes)
-             VALUES (?1, ?1, ?2, ?3, 'VIDEO', ?4, '[]', ?5, ?6, ?7, 'yt-dlp', ?8, 'Imported by workspace owner')",
-            rusqlite::params![now, channel, rel, job.title, duration, w, h, job.url],
-        )?;
-        job.asset_id = Some(c.last_insert_rowid());
+        // Files inside the library's storage join the workspace's media; a folder elsewhere keeps
+        // them out of the library, ready to open as a Reel from the Downloads panel.
+        if let Ok(rel) = studio.relative_storage(&file) {
+            let c = studio.connect()?;
+            let now = crate::now_iso();
+            c.execute(
+                "INSERT INTO media_assets (created_at, updated_at, channel_id, file_path, asset_type, label, tags, duration, width, height, source, source_url, license_notes)
+                 VALUES (?1, ?1, ?2, ?3, 'VIDEO', ?4, '[]', ?5, ?6, ?7, 'yt-dlp', ?8, 'Imported by workspace owner')",
+                rusqlite::params![now, channel, rel, job.title, duration, w, h, job.url],
+            )?;
+            job.asset_id = Some(c.last_insert_rowid());
+        }
         job.file = Some(file);
         job.duration = Some(duration);
     }

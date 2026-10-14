@@ -108,6 +108,8 @@ pub const UI_COMMANDS: &[UiCommand] = &[
     uic!("view.theme.light", "Light", ["View", "Appearance"], None),
     uic!("view.appearanceMode.next", "Next Appearance Mode", ["View", "Appearance"], None),
     uic!("window.workspace.reels", "Reels", ["Window", "Workspaces"], Some("Alt+Shift+7")),
+    uic!("reel.pluginSettings", "Plugin Settings…", ["File", "Project Settings"], None),
+    uic!("reel.connectionCheck", "Check Connections", ["Reel"], None),
     uic!("window.workspace.editing", "Editing", ["Window", "Workspaces"], Some("Alt+Shift+1")),
     uic!("window.workspace.assembly", "Assembly", ["Window", "Workspaces"], Some("Alt+Shift+2")),
     uic!("window.workspace.color", "Color", ["Window", "Workspaces"], Some("Alt+Shift+3")),
@@ -279,6 +281,9 @@ pub fn invoke(app: &mut FilmcraftApp, ctx: &egui::Context, id: &str, mut params:
         if let Err(e) = &r {
             app.ui.status = e.clone();
         }
+        return r;
+    }
+    if let Some(r) = crate::panels::reel::route(app, ctx, id, &params) {
         return r;
     }
     if let Some(r) = crate::panels::voiceover::route(app, ctx, id, &params) {

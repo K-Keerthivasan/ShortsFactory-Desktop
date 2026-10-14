@@ -18,7 +18,20 @@ pub fn iso(ms: i64) -> String {
 
 /// Parses `YYYY-MM-DDTHH:MM[:SS[.mmm]][Z]` (UTC) to Unix milliseconds.
 pub fn parse_iso(s: &str) -> Option<i64> {
-    let s = s.trim().trim_end_matches('Z');
+    // A trailing `Z` or `±HH:MM` offset (Postgres writes `+00:00`) is applied; none means UTC.
+    let s = s.trim();
+    let (s, offset_ms) = match s.strip_suffix('Z').or_else(|| s.strip_suffix('z')) {
+        Some(rest) => (rest, 0),
+        None => match s.get(s.len().saturating_sub(6)..).filter(|t| s.len() > 10 && (t.starts_with('+') || t.starts_with('-')) && t.get(3..4) == Some(":")) {
+            Some(tail) => {
+                let sign = if tail.starts_with('-') { -1 } else { 1 };
+                let h: i64 = tail.get(1..3)?.parse().ok()?;
+                let m: i64 = tail.get(4..6)?.parse().ok()?;
+                (s.get(..s.len() - 6)?, sign * (h * 3_600_000 + m * 60_000))
+            }
+            None => (s, 0),
+        },
+    };
     let (date, time) = s.split_once('T').unwrap_or((s, "00:00"));
     let mut d = date.split('-').map(|x| x.parse::<i64>().ok());
     let (y, m, dd) = (d.next()??, d.next()??, d.next()??);
@@ -29,7 +42,7 @@ pub fn parse_iso(s: &str) -> Option<i64> {
     if !(1..=12).contains(&m) || !(1..=31).contains(&dd) || !(0..24).contains(&h) || !(0..60).contains(&mi) || !(0.0..61.0).contains(&sec) {
         return None;
     }
-    Some(days_from_civil(y, m, dd) * 86_400_000 + h * 3_600_000 + mi * 60_000 + (sec * 1000.0).round() as i64)
+    Some(days_from_civil(y, m, dd) * 86_400_000 + h * 3_600_000 + mi * 60_000 + (sec * 1000.0).round() as i64 - offset_ms)
 }
 
 pub fn now_ms() -> i64 {

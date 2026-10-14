@@ -106,6 +106,9 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, p: PanelKind, rect: Rect)
         PanelKind::TextToSpeech => tts::show(app, ui, rect),
         PanelKind::ProjectNotes => notes::show(app, ui, rect),
         PanelKind::ReelStudio => reel::show(app, ui, rect),
+        PanelKind::Create => reel::show_create(app, ui, rect),
+        PanelKind::Design => reel::show_design(app, ui, rect),
+        PanelKind::Downloads => reel::show_downloads(app, ui, rect),
         other => crate::dock::placeholder(ui, rect, &app.tokens, &tlf!("{panel} — coming in a later milestone", panel = crate::i18n::t(other.title()))),
     }
 }

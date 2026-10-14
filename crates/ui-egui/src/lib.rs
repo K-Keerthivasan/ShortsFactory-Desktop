@@ -1773,6 +1773,7 @@ impl FilmcraftApp {
         panels::tts::follow_selection(self);
         // Reel Studio: background results, finished exports and due schedules
         panels::reel::poll(self, ctx.input(|i| i.time));
+        panels::reel::overlays(self, &ctx);
         if self.ui.tts.pending.is_some() || self.ui.tts.download_job.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }

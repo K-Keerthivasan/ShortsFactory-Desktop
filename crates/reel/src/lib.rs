@@ -136,6 +136,8 @@ pub struct ReelInfo {
     pub card: Card,
     /// The footage clip the template is built around (a `ClipId`).
     pub main_clip: Option<u64>,
+    /// "reel" (1080×1920, the default) or "post" (1080×1350).
+    pub format: String,
     pub post: Option<PostLink>,
 }
 
@@ -228,3 +230,53 @@ pub fn plan(template: &str, brand: &Brand, card: &Card, seconds: f64) -> Result<
 
 #[cfg(test)]
 mod tests;
+
+/// Height of a Post (4:5).
+pub const POST_HEIGHT: u32 = 1350;
+
+/// Frame size for a format id ("post" is 1080×1350; anything else a 1080×1920 Reel).
+pub fn frame_for(format: &str) -> (u32, u32) {
+    if format == "post" { (REEL_WIDTH, POST_HEIGHT) } else { (REEL_WIDTH, REEL_HEIGHT) }
+}
+
+/// Lays out `template` for a frame `height` pixels tall (1080 wide). The templates are designed
+/// for 1920; a shorter frame (a 4:5 Post) gets the same design with every vertical position,
+/// slot, pin and animation scaled to fit and the type a little smaller.
+pub fn plan_for(template: &str, brand: &Brand, card: &Card, seconds: f64, height: u32) -> Result<ReelPlan, String> {
+    let mut p = plan(template, brand, card, seconds)?;
+    if height == REEL_HEIGHT || height == 0 {
+        return Ok(p);
+    }
+    let k = f64::from(height) / f64::from(REEL_HEIGHT);
+    let type_k = k.sqrt();
+    p.slot = Rect::new(p.slot.x, p.slot.y * k, p.slot.w, p.slot.h * k);
+    if let Some(l) = p.logo.as_mut() {
+        l.center.1 *= k;
+        l.size *= type_k;
+    }
+    for e in p.under.iter_mut().chain(p.over.iter_mut()) {
+        let text = e.effect == filmcraft_project::graphic::TEXT_LAYER;
+        for (id, param) in e.params.iter_mut() {
+            match id.as_str() {
+                "position" | "anchor" => param.map_values(|v| match v {
+                    filmcraft_project::ParamValue::Vec2(q) => filmcraft_project::ParamValue::Vec2(filmcraft_geom::Vec2::new(q.x, q.y * k)),
+                    o => o,
+                }),
+                "size" if text => param.map_values(|v| match v {
+                    filmcraft_project::ParamValue::Float(f) => filmcraft_project::ParamValue::Float((f * type_k).round()),
+                    o => o,
+                }),
+                "size" => param.map_values(|v| match v {
+                    filmcraft_project::ParamValue::Vec2(q) => filmcraft_project::ParamValue::Vec2(filmcraft_geom::Vec2::new(q.x, (q.y * k).max(1.0))),
+                    o => o,
+                }),
+                _ => {}
+            }
+        }
+        if let Some(pin) = e.layer.as_mut().and_then(|l| l.pin.as_mut()) {
+            pin.offsets[1] *= k;
+            pin.offsets[3] *= k;
+        }
+    }
+    Ok(p)
+}

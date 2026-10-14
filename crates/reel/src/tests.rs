@@ -83,3 +83,13 @@ fn long_reels_switch_the_design_headline_to_the_call_to_action() {
     assert_eq!(text.keyframes.len(), 2);
     assert_eq!(text.keyframes[1].value, filmcraft_project::ParamValue::Text("Follow for more".into()));
 }
+
+#[test]
+fn every_template_fits_a_post() {
+    for t in TEMPLATES {
+        let p = plan_for(t.id, &Brand::default(), &full_card(), 20.0, POST_HEIGHT).unwrap_or_else(|e| panic!("{e}"));
+        assert!(p.slot.y + p.slot.h <= f64::from(POST_HEIGHT) + 1e-6, "{} slot leaves the 4:5 frame", t.id);
+    }
+    assert_eq!(frame_for("post"), (1080, 1350));
+    assert_eq!(frame_for("reel"), (1080, 1920));
+}

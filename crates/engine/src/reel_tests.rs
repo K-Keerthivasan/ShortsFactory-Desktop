@@ -186,3 +186,13 @@ fn a_second_reel_reuses_the_source_and_versions_are_their_own_reels() {
     assert!(copy.post.is_none(), "a new version publishes as its own post");
     assert_eq!(crate::reel::for_sequence(s.project.reel.as_ref(), first).unwrap().post.map(|p| p.story_id), Some(5));
 }
+
+#[test]
+fn a_post_is_a_4_by_5_sequence_with_the_template_fitted() {
+    let mut s = Session::default();
+    s.execute("reel.new", json!({"name": "Post", "format": "post", "template": "quoteCard", "seconds": 4, "card": {"title": "A post"}})).unwrap();
+    let q = s.active_sequence().unwrap();
+    assert_eq!((q.settings.width, q.settings.height), (1080, 1350));
+    assert_eq!(crate::reel::current(&s).unwrap().format, "post");
+    s.execute("reel.apply", json!({"template": "jkr-cinematic-v2"})).unwrap();
+}

@@ -159,6 +159,8 @@ fn sync_sequence(app: &mut FilmcraftApp) {
 }
 
 pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
+    // Shorts Factory: Library and Publish are tabs of Export, beside the file export.
+    let Some(rect) = crate::panels::reel::export_tabs(app, ui, rect) else { return };
     let t = app.tokens;
     let left = Rect::from_min_size(rect.min, vec2(300.0, rect.height()));
     let right = Rect::from_min_max(pos2(rect.max.x - (rect.width() * 0.4).clamp(360.0, 640.0), rect.min.y), rect.max);

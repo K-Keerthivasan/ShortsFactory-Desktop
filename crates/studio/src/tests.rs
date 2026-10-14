@@ -339,3 +339,12 @@ fn a_logo_is_copied_registered_once_and_used_by_the_brand() {
     assert!(b.logo_path.as_deref().is_some_and(|p| p.ends_with("New Logo.png")));
     assert!(s.set_logo(1, &s.root.join("notes.txt")).is_err());
 }
+
+#[test]
+fn timestamps_with_offsets_parse() {
+    let z = clock::parse_iso("2026-12-13T17:00:00Z").unwrap();
+    assert_eq!(clock::parse_iso("2026-12-13T17:00:00+00:00"), Some(z));
+    assert_eq!(clock::parse_iso("2026-12-13T17:00:00.123456+00:00"), Some(z + 123));
+    assert_eq!(clock::parse_iso("2026-12-13T12:00:00-05:00"), Some(z));
+    assert!(cloud::token_health(Some("2099-01-01T00:00:00+00:00")).0.ends_with("days left"));
+}

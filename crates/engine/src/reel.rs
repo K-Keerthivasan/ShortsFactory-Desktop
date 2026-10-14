@@ -46,7 +46,7 @@ pub fn commands() -> Vec<CommandSpec> {
             "reel.new",
             "New Reel…",
             M,
-            r#"{"name":str?,"template":str?,"brand":Brand?,"channelId":n?,"card":Card?,"item":itemId? (project footage to build around),"paths":[str]? (a file; reused when already in the project),"seconds":f64? (length without footage)}"#,
+            r#"{"name":str?,"format":"reel"|"post"?,"template":str?,"brand":Brand?,"channelId":n?,"card":Card?,"item":itemId? (project footage to build around),"paths":[str]? (a file; reused when already in the project),"seconds":f64? (length without footage)}"#,
             always,
             new_reel,
         ),
@@ -109,10 +109,12 @@ fn new_reel(s: &mut Session, p: &Value) -> Result<Value> {
     let brand: Brand = parse(p, "brand", "reel.new")?.unwrap_or_default();
     let template = str_p(p, "template").map(str::to_string).unwrap_or_else(|| brand.default_layout.clone());
     let name = str_p(p, "name").unwrap_or("Reel").to_string();
+    let format = if str_p(p, "format") == Some("post") { "post".to_string() } else { "reel".to_string() };
     let paths: Vec<String> =
         p.get("paths").and_then(Value::as_array).map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()).unwrap_or_default();
     s.edit_group("New Reel", |s| {
-        let seq = s.execute("file.newSequence", json!({"name": name, "width": REEL_WIDTH, "height": REEL_HEIGHT, "fps": REEL_FPS, "video": TRACKS.len(), "audio": 2}))?;
+        let (fw, fh) = filmcraft_reel::frame_for(&format);
+        let seq = s.execute("file.newSequence", json!({"name": name, "width": fw, "height": fh, "fps": REEL_FPS, "video": TRACKS.len(), "audio": 2}))?;
         // A project item as it is; a file already in the project is reused, never imported twice.
         let mut item = item_p(p, "item").filter(|i| s.project.item(*i).is_some()).map(|i| i.0);
         if item.is_none()
@@ -123,7 +125,7 @@ fn new_reel(s: &mut Session, p: &Value) -> Result<Value> {
                 None => s.execute("file.import", json!({"paths": [path]}))?.get("items").and_then(Value::as_array).and_then(|a| a.first()).and_then(Value::as_u64),
             };
         }
-        let mut args = json!({"template": template, "brand": brand, "card": p.get("card").cloned().unwrap_or(Value::Null), "seconds": f64_p(p, "seconds").unwrap_or(15.0)});
+        let mut args = json!({"template": template, "brand": brand, "card": p.get("card").cloned().unwrap_or(Value::Null), "seconds": f64_p(p, "seconds").unwrap_or(15.0), "format": format});
         if let Some(i) = item {
             args["item"] = json!(i);
         }
@@ -213,9 +215,16 @@ fn apply(s: &mut Session, p: &Value) -> Result<Value> {
     }
     let seq_id = s.state.active_sequence.ok_or(EngineError::NoSequence)?;
     let (w, h, rate) = s.active_sequence().map(|q| (q.settings.width, q.settings.height, q.settings.frame_rate)).ok_or(EngineError::NoSequence)?;
-    if (w, h) != (REEL_WIDTH, REEL_HEIGHT) {
-        return Err(bad("reel.apply", format!("Reels are {REEL_WIDTH}×{REEL_HEIGHT}; this sequence is {w}×{h}. Start one with Reel ▸ New Reel")));
+    if (w, h) != (REEL_WIDTH, REEL_HEIGHT) && (w, h) != (REEL_WIDTH, filmcraft_reel::POST_HEIGHT) {
+        return Err(bad(
+            "reel.apply",
+            format!(
+                "Reels are {REEL_WIDTH}×{REEL_HEIGHT} and Posts {REEL_WIDTH}×{}; this sequence is {w}×{h}. Start one with Reel ▸ New Reel",
+                filmcraft_reel::POST_HEIGHT
+            ),
+        ));
     }
+    reel.format = if h == filmcraft_reel::POST_HEIGHT { "post".into() } else { "reel".into() };
     // Footage placed from the project panel goes onto the Footage track at the playhead (or 0).
     let placed = item_p(p, "item");
     let logo_item = match reel.brand.logo_path.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
@@ -264,7 +273,7 @@ fn apply(s: &mut Session, p: &Value) -> Result<Value> {
         let q = pr.sequence(seq_id).ok_or(EngineError::NoSequence)?;
         let found = main_id.and_then(|c| q.find_item(c).map(|(_, i)| i.clone()));
         let (start, dur) = found.as_ref().map_or((rate.snap(start_at), fallback), |i| (i.start, i.duration));
-        let plan = filmcraft_reel::plan(&template_id, &reel_brand, &reel_card, dur.seconds()).map_err(|e| bad("reel.apply", e))?;
+        let plan = filmcraft_reel::plan_for(&template_id, &reel_brand, &reel_card, dur.seconds(), h).map_err(|e| bad("reel.apply", e))?;
         // Clear what an earlier template made in this span.
         let q = pr.sequence_mut(seq_id).ok_or(EngineError::NoSequence)?;
         let span = TimeRange::new(start, dur);
@@ -298,7 +307,7 @@ fn apply(s: &mut Session, p: &Value) -> Result<Value> {
             bg.name = MADE[0].into();
             bg.effects.retain(|e| e.effect == "motion" || e.effect == "opacity");
             let size = pr.conformed_source_size(bg.item, (1, 1)).unwrap_or((f64::from(w), f64::from(h)));
-            let full = ReelPlan { slot: filmcraft_reel::Rect::FULL, fit: Fit::Cover, ..plan.clone() };
+            let full = ReelPlan { slot: filmcraft_reel::Rect::new(0.0, 0.0, f64::from(w), f64::from(h)), fit: Fit::Cover, ..plan.clone() };
             fit_footage(&mut bg, size, &full);
             if let Some(m) = motion(&mut bg)
                 && let Some(Param { value: ParamValue::Float(sc), .. }) = m.params.get("scale").cloned()
