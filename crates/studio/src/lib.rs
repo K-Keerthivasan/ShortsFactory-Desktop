@@ -17,6 +17,7 @@ pub mod cloud;
 pub mod commands;
 pub mod data;
 pub mod instagram;
+pub mod meta_token;
 pub mod settings;
 pub mod youtube;
 pub mod ytdlp;

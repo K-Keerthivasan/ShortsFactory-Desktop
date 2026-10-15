@@ -436,3 +436,24 @@ fn replacing_an_account_token_preserves_other_fields_and_validates_the_destinati
     assert!(s.set_account_token(1, token).is_err());
     assert_eq!(std::fs::read_to_string(outside).unwrap(), "keep");
 }
+
+#[test]
+fn token_expiry_reads_plainly() {
+    use crate::meta_token::TokenInfo;
+    assert!(TokenInfo { valid: false, expires_at: Some("2020-01-01T00:00:00Z".into()), kind: "USER".into() }.describe().starts_with("expired or revoked"));
+    assert_eq!(TokenInfo { valid: true, expires_at: None, kind: "PAGE".into() }.describe(), "valid, never expires (page token)");
+    let later = crate::clock::iso(crate::clock::now_ms() + 59 * 86_400_000 + 3_600_000);
+    let d = TokenInfo { valid: true, expires_at: Some(later.clone()), kind: "USER".into() }.describe();
+    assert!(d.starts_with("valid until ") && d.ends_with("(59 days left)"), "{d}");
+    assert!(crate::cloud::expiry_text(Some(&later)).ends_with("(59 days left)"));
+    assert_eq!(crate::cloud::expiry_text(None), "expiry unknown");
+}
+
+#[test]
+fn extending_needs_the_meta_app_and_never_calls_out_without_it() {
+    let s = fixture("extend");
+    let e = s.extend_account_token(1).unwrap_err().to_string();
+    assert!(e.contains("META_APP_ID"), "{e}");
+    assert!(!e.contains("never-logged"), "no token in errors");
+    assert!(crate::cloud::replace_token(&s, "x", "123", "short").is_err());
+}

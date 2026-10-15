@@ -214,6 +214,16 @@ pub fn register() {
                 crate::cloud::call(&studio()?, &action, body).map_err(err)
             },
         ),
+        spec("studio.tokenInfo", "Instagram Token Expiry", r#"{"account":n} → {valid,expiresAt,kind,text} (never the token)"#, false, |_, p| {
+            Ok(crate::meta_token::summary(&studio()?.token_info(int(p, "account")?).map_err(err)?))
+        }),
+        spec(
+            "studio.extendToken",
+            "Extend an Instagram Token",
+            r#"{"account":n} — long-lived, or the Page's never-expiring token; the old one is kept on any failure"#,
+            true,
+            |_, p| Ok(crate::meta_token::summary(&studio()?.extend_account_token(int(p, "account")?).map_err(err)?)),
+        ),
         spec("studio.calendar", "Publishing Calendar", r#"{"channel":n?,"from":"ISO","to":"ISO"}"#, false, |_, p| {
             let channel = p.get("channel").and_then(Value::as_i64);
             to_value(studio()?.calendar(channel, text(p, "from")?, text(p, "to")?).map_err(err)?)

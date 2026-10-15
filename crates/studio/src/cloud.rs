@@ -256,3 +256,34 @@ pub fn token_health(expires_at: Option<&str>) -> (String, u8) {
     };
     (text, level)
 }
+
+/// "until 2026-12-13 14:02 (59 days left)" from a backend `expires` / `token_expires_at`.
+pub fn expiry_text(expires_at: Option<&str>) -> String {
+    let (left, _) = token_health(expires_at);
+    match expires_at.and_then(parse_iso).and_then(chrono::DateTime::from_timestamp_millis) {
+        Some(d) => format!("until {} ({left})", d.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M")),
+        None => left,
+    }
+}
+
+/// Gives a cloud Instagram account a fresh token (`connectInstagram`, which replaces the stored
+/// one) and extends it at once (`extendInstagramToken`), so a short-lived token from Graph API
+/// Explorer becomes a long-lived one before it can lapse. Returns the new expiry text. If the
+/// extension fails, the fresh token stays connected and the error says so.
+pub fn replace_token(studio: &Studio, account_id: &str, instagram_user_id: &str, token: &str) -> Result<String> {
+    let token = token.trim();
+    if token.len() < 20 || token.chars().any(char::is_whitespace) {
+        return err("Paste the whole access token");
+    }
+    if !instagram_user_id.bytes().all(|b| b.is_ascii_digit()) || instagram_user_id.is_empty() {
+        return err("this cloud account has no Instagram account ID");
+    }
+    let connected = call(studio, "connectInstagram", json!({"instagramUserId": instagram_user_id, "accessToken": token}))?;
+    match call(studio, "extendInstagramToken", json!({"id": account_id})) {
+        Ok(h) => Ok(format!("token replaced and extended, valid {}", expiry_text(h.get("expires").and_then(Value::as_str)))),
+        Err(e) => Ok(format!(
+            "token replaced, valid {}; extending it failed: {e}",
+            expiry_text(connected.get("token_expires_at").and_then(Value::as_str))
+        )),
+    }
+}

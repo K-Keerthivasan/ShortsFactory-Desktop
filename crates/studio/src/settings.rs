@@ -236,6 +236,8 @@ pub const EDITABLE_ENV: &[&str] = &[
     "YTDLP_PATH",
     "FFMPEG_PATH",
     "META_GRAPH_VERSION",
+    "META_APP_ID",
+    "META_APP_SECRET",
 ];
 
 /// Results of the start-up connection check.

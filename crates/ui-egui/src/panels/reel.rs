@@ -212,6 +212,8 @@ enum Done {
     /// A publication finished: the Reel's name, the link or the error, the queue item.
     Published(String, Result<Option<String>, String>, Option<u64>),
     Notice((String, bool)),
+    /// A local account's token expiry (text) or why it could not be read; whether to pop it up.
+    Token(i64, Result<String, String>, bool),
 }
 
 struct CardTarget {
@@ -292,6 +294,8 @@ struct Runtime {
     pending_start: Option<(String, std::path::PathBuf)>,
     /// The AI panel's links, from download to the parts chosen.
     ai_runs: ai::Runs,
+    /// Local accounts' token expiry, as last read from Meta.
+    token_info: std::collections::BTreeMap<i64, Result<String, String>>,
 }
 
 /// Whether this process may act on the library by itself: the start-up connection check and
@@ -446,6 +450,18 @@ pub fn poll(app: &mut FilmcraftApp, now: f64) {
                 }
             }
             Done::Notice((text, ok)) => notify(&mut r, text, ok),
+            Done::Token(id, result, tell) => {
+                if tell {
+                    match &result {
+                        Ok(t) => notify(&mut r, format!("Instagram token: {t}"), t.starts_with("valid")),
+                        Err(e) => notify(&mut r, format!("Instagram token: {e}"), false),
+                    }
+                }
+                r.token_info.insert(id, result);
+                if let Some(c) = r.loaded_channel {
+                    load_channel(&mut r, c);
+                }
+            }
             Done::Sent(Ok((link, render)), sequence, project, queue) => {
                 // The post links to the Reel that was rendered, wherever the editor is now.
                 if project_is_open(app, &project)
@@ -1798,6 +1814,8 @@ fn plugin_settings(app: &mut FilmcraftApp, ctx: &egui::Context) {
                             ("CLOUD_AUTH_EMAIL", "Sign-in email", false),
                             ("CLOUD_AUTH_PASSWORD", "Sign-in password", true),
                             ("META_GRAPH_VERSION", "Meta Graph API version", false),
+                            ("META_APP_ID", "Meta app ID (to extend local tokens)", false),
+                            ("META_APP_SECRET", "Meta app secret", true),
                         ],
                     );
                 }
@@ -1878,6 +1896,33 @@ fn accounts_settings(app: &mut FilmcraftApp, ui: &mut egui::Ui, channel: Option<
             ui.set_width(ui.available_width());
             ui.label(RichText::new(format!("{} · {}", a.platform, a.display_name)).strong());
             ui.label(RichText::new(format!("Status: {}", a.status.to_lowercase())).small());
+            if a.platform == "INSTAGRAM" {
+                let info = rt().token_info.get(&a.id).cloned();
+                let (text, colour) = match &info {
+                    Some(Ok(text)) if text.starts_with("valid") => (format!("Token {text}"), t.text_dim),
+                    Some(Ok(text)) => (format!("Token {text}"), t.danger),
+                    Some(Err(e)) => (format!("Token: {e}"), t.danger),
+                    None => ("Token expiry: press Check expiry".into(), t.text_dim),
+                };
+                ui.label(RichText::new(text).small().color(colour));
+                ui.horizontal(|ui| {
+                    let check = ui.small_button("Check expiry");
+                    app.auto.add_response(&format!("reel.accountTokenInfo.{}", a.id), &check, "Check token expiry");
+                    if check.clicked() {
+                        token_check(s, a.id, true);
+                    }
+                    let extend = ui.small_button("Extend token").on_hover_text(
+                        "Makes the token last: about 60 days, or never expiring when the Instagram account belongs to a Facebook Page. Needs META_APP_ID and META_APP_SECRET (Cloud tab). Only works on a token that has not expired yet.",
+                    );
+                    app.auto.add_response(&format!("reel.accountExtend.{}", a.id), &extend, "Extend token");
+                    if extend.clicked() {
+                        let (st, id) = (s.clone(), a.id);
+                        spawn(&mut rt(), "Extend token", move || {
+                            Done::Token(id, st.extend_account_token(id).map(|i| format!("{} (extended)", i.describe())).map_err(|e| e.to_string()), true)
+                        });
+                    }
+                });
+            }
             ui.horizontal(|ui| {
                 let test = ui.button("Test");
                 app.auto.add_response(&format!("reel.accountTest.{}", a.id), &test, "Test account connection");
@@ -1899,7 +1944,13 @@ fn accounts_settings(app: &mut FilmcraftApp, ui: &mut egui::Ui, channel: Option<
                 app.auto.add_response(&format!("reel.accountSaveToken.{}", a.id), &save, "Save account token");
                 if save.clicked() {
                     app.ui.status = match s.set_account_token(a.id, draft) {
-                        Ok(()) => "Token saved; press Test to check it".into(),
+                        Ok(()) => {
+                            // Show the new token's expiry straight away.
+                            if a.platform == "INSTAGRAM" {
+                                token_check(s, a.id, true);
+                            }
+                            "Token saved; checking it with Meta…".into()
+                        }
                         Err(e) => e.to_string(),
                     };
                     draft.clear();
@@ -1910,6 +1961,12 @@ fn accounts_settings(app: &mut FilmcraftApp, ui: &mut egui::Ui, channel: Option<
             });
         });
     }
+}
+
+/// Reads a local account's token expiry from Meta on a worker.
+fn token_check(s: &Studio, id: i64, tell: bool) {
+    let st = s.clone();
+    spawn(&mut rt(), "Token expiry", move || Done::Token(id, st.token_info(id).map(|i| i.describe()).map_err(|e| e.to_string()), tell));
 }
 
 fn settings(app: &mut FilmcraftApp, ui: &mut egui::Ui, channel: Option<i64>, s: &Studio, brand: &Brand) {
@@ -2783,13 +2840,16 @@ fn cloud(app: &mut FilmcraftApp, ui: &mut egui::Ui, info: Option<&ReelInfo>, cha
     for a in &accounts {
         let id = a.get("id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
         let name = a.get("account_name").and_then(|v| v.as_str()).unwrap_or("account").to_string();
-        let (left, level) = filmcraft_studio::cloud::token_health(a.get("token_expires_at").and_then(|v| v.as_str()));
+        let expires = a.get("token_expires_at").and_then(|v| v.as_str());
+        let (_, level) = filmcraft_studio::cloud::token_health(expires);
+        let left = filmcraft_studio::cloud::expiry_text(expires);
+        let ig_user = a.get("instagram_user_id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
         let colour = match level {
             0 => t.text_dim,
             1 | 2 => egui::Color32::from_rgb(0xf5, 0xb0, 0x41),
             _ => egui::Color32::from_rgb(0xff, 0x6b, 0x6b),
         };
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.radio_value(&mut app.ui.reel.cloud_account, Some(id.clone()), format!("@{name}"));
             ui.label(RichText::new(left).small().color(colour));
             for (label, action, tip) in [
@@ -2801,12 +2861,41 @@ fn cloud(app: &mut FilmcraftApp, ui: &mut egui::Ui, info: Option<&ReelInfo>, cha
                     let mut r = rt();
                     r.cloud_loaded = false;
                     spawn(&mut r, "Account", move || {
-                        Done::Message(match filmcraft_studio::cloud::call(&st, action, json!({"id": id})) {
-                            Ok(_) => format!("Cloud account: {label} done"),
-                            Err(e) => format!("Cloud account {label} failed: {e}"),
+                        Done::Notice(match filmcraft_studio::cloud::call(&st, action, json!({"id": id})) {
+                            Ok(h) => (
+                                format!("Cloud token valid {}", filmcraft_studio::cloud::expiry_text(h.get("expires").and_then(|v| v.as_str()))),
+                                h.get("status").and_then(|v| v.as_str()) != Some("expired"),
+                            ),
+                            Err(e) => (
+                                format!("Cloud account {label} failed: {e}. An expired token cannot be extended: paste a fresh one and press Replace token."),
+                                false,
+                            ),
                         })
                     });
                 }
+            }
+        });
+        // A fresh token (Graph API Explorer) replaces the stored one and is extended at once.
+        ui.horizontal(|ui| {
+            let key = format!("cloud-token:{id}");
+            let draft = app.ui.reel.env_drafts.entry(key).or_default();
+            let input = ui.add(egui::TextEdit::singleline(draft).password(true).hint_text("Paste a fresh access token").desired_width(220.0));
+            app.auto.add_response(&format!("reel.cloudToken.{id}"), &input, "Fresh cloud access token");
+            let replace = ui
+                .add_enabled(!draft.trim().is_empty(), egui::Button::new("Replace token"))
+                .on_hover_text("Connect this account with a fresh token, then extend it to about 60 days");
+            app.auto.add_response(&format!("reel.cloudReplace.{id}"), &replace, "Replace cloud token");
+            if replace.clicked() {
+                let token = std::mem::take(draft);
+                let (st, id, ig, name) = (s.clone(), id.clone(), ig_user.clone(), name.clone());
+                let mut r = rt();
+                r.cloud_loaded = false;
+                spawn(&mut r, "Replace token", move || {
+                    Done::Notice(match filmcraft_studio::cloud::replace_token(&st, &id, &ig, &token) {
+                        Ok(text) => (format!("Cloud @{name}: {text}"), !text.contains("failed")),
+                        Err(e) => (format!("Cloud @{name}: replacing the token failed: {e}"), false),
+                    })
+                });
             }
         });
     }
