@@ -99,6 +99,8 @@ pub struct ReelDraft {
     pub library_grid: bool,
     /// Create's workspace clips as a grid of thumbnails.
     pub clips_grid: bool,
+    /// Hide workspace clips marked done.
+    pub hide_done_clips: bool,
     /// Finished cloud posts cleared from the calendar (ids; hidden here only, nothing is deleted).
     pub cleared_posts: Vec<String>,
     /// Show cleared posts again.
@@ -1169,11 +1171,22 @@ pub fn show_create(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 app.auto.add_response("reel.media.viewList", &list, "List view");
                 let grid = ui.selectable_value(&mut app.ui.reel.clips_grid, true, "▦ Grid");
                 app.auto.add_response("reel.media.viewGrid", &grid, "Grid view");
+                let hide = ui.checkbox(&mut app.ui.reel.hide_done_clips, "Hide done");
+                app.auto.add_response("reel.media.hideDone", &hide, "Hide clips marked done");
             });
             ui.add(egui::TextEdit::singleline(&mut app.ui.reel.media_filter).hint_text("Search clips").desired_width(f32::INFINITY));
             let filter = app.ui.reel.media_filter.to_lowercase();
-            let clips: Vec<MediaRow> =
-                r.media.iter().filter(|m| m.kind == "VIDEO" && (filter.is_empty() || m.label.to_lowercase().contains(&filter))).take(60).cloned().collect();
+            // Clips marked done (this app's own marks) can be hidden, or show greyed with a tick.
+            let done: Vec<i64> = ctx.s.app_settings().done_clips;
+            let hide_done = app.ui.reel.hide_done_clips;
+            let clips: Vec<MediaRow> = r
+                .media
+                .iter()
+                .filter(|m| m.kind == "VIDEO" && (filter.is_empty() || m.label.to_lowercase().contains(&filter)) && !(hide_done && done.contains(&m.id)))
+                .take(60)
+                .cloned()
+                .collect();
+            let mut toggled: Vec<i64> = Vec::new();
             if clips.is_empty() {
                 ui.label(
                     RichText::new("No clips in this workspace yet. Download some, or drop files in its clips folder and refresh.").small().color(t.text_dim),
@@ -1200,7 +1213,18 @@ pub fn show_create(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                             } else if click.clicked() {
                                 preview_clip(app, &mut r, m);
                             }
-                            ui.add(egui::Label::new(RichText::new(&m.label).small()).truncate());
+                            ui.horizontal(|ui| {
+                                let mut is_done = done.contains(&m.id);
+                                let d = ui.checkbox(&mut is_done, "Done");
+                                if ui.is_rect_visible(d.rect) {
+                                    app.auto.add_response(&format!("reel.clip.done.{}", m.id), &d, "Mark clip done");
+                                }
+                                if d.changed() {
+                                    toggled.push(m.id);
+                                }
+                                let name = if done.contains(&m.id) { RichText::new(format!("✓ {}", m.label)).small().color(t.text_dim) } else { RichText::new(&m.label).small() };
+                                ui.add(egui::Label::new(name).truncate());
+                            });
                             ui.horizontal(|ui| {
                                 let new = ui.small_button(format!("New {}", app.ui.reel.format.label()));
                                 if ui.is_rect_visible(new.rect) {
@@ -1272,7 +1296,31 @@ pub fn show_create(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                         }
                     }
                 });
-                ui.add(egui::Label::new(RichText::new(&m.label).small()).truncate());
+                ui.horizontal(|ui| {
+                    let mut is_done = done.contains(&m.id);
+                    let d = ui.checkbox(&mut is_done, "Done");
+                    if ui.is_rect_visible(d.rect) {
+                        app.auto.add_response(&format!("reel.clip.done.{}", m.id), &d, "Mark clip done");
+                    }
+                    if d.changed() {
+                        toggled.push(m.id);
+                    }
+                    let name = if done.contains(&m.id) { RichText::new(format!("✓ {}", m.label)).small().color(t.text_dim) } else { RichText::new(&m.label).small() };
+                    ui.add(egui::Label::new(name).truncate());
+                });
+            }
+            if !toggled.is_empty() {
+                let mut a = ctx.s.app_settings();
+                for id in toggled {
+                    if let Some(i) = a.done_clips.iter().position(|d| *d == id) {
+                        a.done_clips.remove(i);
+                    } else {
+                        a.done_clips.push(id);
+                    }
+                }
+                if let Err(e) = ctx.s.save_app_settings(&a) {
+                    app.ui.status = e.to_string();
+                }
             }
             let restore = ui.small_button("Restore removed clips");
             app.auto.add_response("reel.media.restore", &restore, "Restore removed clips");
@@ -2059,6 +2107,26 @@ fn plugin_settings(app: &mut FilmcraftApp, ctx: &egui::Context) {
                             ("FFMPEG_PATH", "FFmpeg program (for best video + audio)", false),
                         ],
                     );
+                    // YouTube mostly sends picture and sound separately: FFmpeg joins them.
+                    ui.horizontal_wrapped(|ui| {
+                        match filmcraft_studio::ytdlp::ffmpeg(&s) {
+                            Some(p) => ui.label(RichText::new(format!("FFmpeg: {}", p.display())).small().color(app.tokens.text_dim)),
+                            None => ui.label(RichText::new("FFmpeg not found: most YouTube downloads need it to join picture and sound").small().color(app.tokens.danger)),
+                        };
+                        let pick = ui.small_button("Choose FFmpeg…");
+                        app.auto.add_response("reel.settings.chooseFfmpeg", &pick, "Choose FFmpeg");
+                        if pick.clicked() {
+                            app.pick_ui(crate::native_dialogs::FileDialog::OpenFile { filter: "FFmpeg".into(), exts: vec!["exe".into()] }, |app, paths| {
+                                let Some(path) = paths.first() else { return };
+                                let mut r = rt();
+                                let Some(s) = studio(&mut r) else { return };
+                                app.ui.status = match filmcraft_studio::ytdlp::use_ffmpeg(&s, std::path::Path::new(path)) {
+                                    Ok(p) => format!("FFmpeg ready: {}", p.display()),
+                                    Err(e) => format!("Could not use that FFmpeg: {e}"),
+                                };
+                            });
+                        }
+                    });
                     let mut a = s.app_settings();
                     let before = a.clone();
                     ui.checkbox(&mut a.startup_check, "Check connections when the app starts");

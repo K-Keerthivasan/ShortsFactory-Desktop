@@ -9,7 +9,7 @@
 //! copy); without it, downloads use the best single-file MP4.
 
 use std::io::{BufRead, BufReader};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use filmcraft_reel::Card;
@@ -125,6 +125,31 @@ pub fn install(studio: &Studio) -> Result<PathBuf> {
     std::io::copy(&mut resp.into_reader(), &mut out)?;
     drop(out);
     std::fs::rename(&part, &target)?;
+    Ok(target)
+}
+
+/// Uses `file` as the app's FFmpeg: it must run and say it is FFmpeg, then it is copied into the
+/// tools folder (where downloads look for it first after FFMPEG_PATH).
+pub fn use_ffmpeg(studio: &Studio, file: &Path) -> Result<PathBuf> {
+    let mut c = Command::new(file);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        c.creation_flags(0x08000000);
+    }
+    let out = c.args(["-hide_banner", "-version"]).stdin(Stdio::null()).output().map_err(|_| StudioError::Other("that file does not run".into()))?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    if !out.status.success() || !text.starts_with("ffmpeg version") {
+        return err("that file is not FFmpeg");
+    }
+    let dir = tools_dir(studio);
+    std::fs::create_dir_all(&dir)?;
+    let target = dir.join(if cfg!(windows) { "ffmpeg.exe" } else { "ffmpeg" });
+    if target != file {
+        let part = target.with_extension("part");
+        std::fs::copy(file, &part)?;
+        std::fs::rename(&part, &target)?;
+    }
     Ok(target)
 }
 
@@ -296,6 +321,12 @@ fn step(studio: &Studio, channel: i64, job: &mut Import, update: &dyn Fn(&Import
         let status = child.wait()?;
         let stderr = errors.join().unwrap_or_default();
         if !status.success() {
+            // YouTube mostly offers picture and sound as separate streams now; joining them needs FFmpeg.
+            if merge.is_none() && stderr.contains("Requested format is not available") {
+                return err(
+                    "This video has no single file with picture and sound, and FFmpeg (which joins them) was not found. Set it in Plugin Settings > Downloads & tools (Choose FFmpeg), then retry",
+                );
+            }
             return err(format!("yt-dlp failed: {}", stderr.trim().lines().last().unwrap_or("no message")));
         }
         let downloaded = std::fs::read_dir(&work)?

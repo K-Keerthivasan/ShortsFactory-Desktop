@@ -24,6 +24,8 @@ pub struct AppSettings {
     /// An AI provider only this app has ("codex"), kept here because the earlier app's settings
     /// accept Hermes, Ollama and mock only. None: the shared library setting.
     pub ai_provider: Option<String>,
+    /// Workspace clips marked done in Create (media asset ids; this app's own marks).
+    pub done_clips: Vec<i64>,
 }
 
 impl Studio {
@@ -36,6 +38,7 @@ impl Studio {
             queue_auto_approve: true,
             startup_check: true,
             ai_provider: None,
+            done_clips: Vec::new(),
         })
     }
     pub fn save_app_settings(&self, s: &AppSettings) -> Result<()> {
