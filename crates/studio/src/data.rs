@@ -129,7 +129,7 @@ impl Studio {
             .query_row("SELECT status FROM story_clusters WHERE id = ?1 AND channel_id = ?2 AND status != 'REJECTED'", params![story, channel], |r| r.get(0))
             .optional()?
             .ok_or_else(|| StudioError::Other("Post not found in this workspace".into()))?;
-        let active: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM renders r WHERE r.story_id = ?1 AND r.channel_id = ?2 AND (r.status IN ('QUEUED','RENDERING','RUNNING') OR EXISTS(SELECT 1 FROM publishing_jobs p WHERE p.render_id = r.id AND p.status NOT IN ('PUBLISHED','FAILED','CANCELLED'))))", params![story, channel], |r| r.get(0))?;
+        let active: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM renders r WHERE r.story_id = ?1 AND r.channel_id = ?2 AND (r.status IN ('QUEUED','RENDERING','RUNNING') OR EXISTS(SELECT 1 FROM publishing_jobs p WHERE p.render_id = r.id AND p.status NOT IN ('PUBLISHED','PUBLISH_FAILED','FAILED','CANCELLED'))))", params![story, channel], |r| r.get(0))?;
         if active {
             return err("Finish or cancel this post's active rendering/publishing jobs before archiving");
         }

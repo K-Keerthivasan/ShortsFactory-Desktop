@@ -35,6 +35,20 @@ fn load_preview(path: &Path) -> Result<Box<Preview>, String> {
 }
 
 fn preview(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, path: Option<&Path>, seconds: f64, thumbnail: bool) -> Option<f64> {
+    let mut r = rt();
+    preview_in(app, ui, rect, path, seconds, thumbnail, &mut r)
+}
+
+/// [`preview`] for a caller that already holds the panel state.
+pub(super) fn preview_in(
+    app: &mut FilmcraftApp,
+    ui: &mut egui::Ui,
+    rect: Rect,
+    path: Option<&Path>,
+    seconds: f64,
+    thumbnail: bool,
+    r: &mut Runtime,
+) -> Option<f64> {
     ui.painter().rect_filled(rect, 4.0, Color32::BLACK);
     if !ui.is_rect_visible(rect) {
         return None;
@@ -44,7 +58,6 @@ fn preview(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, path: Option<&
         return None;
     };
     let state = {
-        let mut r = rt();
         if !r.previews.contains_key(path) && r.tasks.iter().filter(|(name, _)| name == "Library preview").count() < 3 {
             if r.previews.len() >= 80
                 && let Some(old) = r.previews.keys().next().cloned()
@@ -53,7 +66,7 @@ fn preview(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, path: Option<&
             }
             let file = path.to_path_buf();
             r.previews.insert(file.clone(), Ok(None));
-            spawn(&mut r, "Library preview", move || Done::Preview(file.clone(), load_preview(&file)));
+            spawn(r, "Library preview", move || Done::Preview(file.clone(), load_preview(&file)));
         }
         r.previews.get(path).cloned()
     };
@@ -230,7 +243,7 @@ pub(super) fn library_row(app: &mut FilmcraftApp, ui: &mut egui::Ui, post: &Libr
                                     r.archived = Some((channel, post.story_id));
                                     load_channel(&mut r, channel);
                                 }
-                                Err(e) => app.ui.status = e.to_string(),
+                                Err(e) => notify(&mut rt(), format!("Could not remove “{}”: {e}", post.title), false),
                             }
                         }
                     }

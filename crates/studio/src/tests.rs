@@ -165,7 +165,8 @@ fn library_names_archive_and_restore_are_scoped_and_keep_files() {
     let c = s.connect().unwrap();
     c.execute("INSERT INTO publishing_jobs (created_at, updated_at, channel_id, render_id, social_account_id, platform, status, scheduled_at) VALUES ('', '', 1, ?1, 1, 'INSTAGRAM', 'SCHEDULED', '')", [render]).unwrap();
     assert!(s.archive_post(1, post.story_id).is_err());
-    c.execute("UPDATE publishing_jobs SET status = 'CANCELLED'", []).unwrap();
+    // A publication that failed for good does not hold the post (the earlier app's failure state).
+    c.execute("UPDATE publishing_jobs SET status = 'PUBLISH_FAILED'", []).unwrap();
     assert!(s.archive_post(999, post.story_id).is_err());
     s.archive_post(1, post.story_id).unwrap();
     assert!(s.library(1, 10).unwrap().is_empty());

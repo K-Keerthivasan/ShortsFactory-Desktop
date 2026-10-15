@@ -83,6 +83,48 @@ impl<'a> Ctx<'a> {
         let b = self.card.badge.trim();
         if b.is_empty() { "01".into() } else { b.to_string() }
     }
+    /// How tall `text` is when drawn as the card's `field` (title, caption, point1…): measured by
+    /// the text engine with the face, weight, capitals, tracking and line spacing the card's text
+    /// styles give that field (see `plan`), so what is placed below it never overlaps it.
+    /// `leading` is the template's own line spacing, used unless the card sets one.
+    pub fn measure(&self, field: &str, text: &str, size: f64, width: f64, leading: f64) -> f64 {
+        let style = self.card.text_styles.get(field);
+        let title = field == "title";
+        let standard = matches!(field, "title" | "caption" | "point1" | "point2" | "point3" | "point4");
+        let family = self
+            .card
+            .fonts
+            .get(field)
+            .map(|f| f.trim().to_string())
+            .filter(|f| !f.is_empty())
+            .unwrap_or_else(|| if standard { "Inter".into() } else { self.font.clone() });
+        let size = if title { size } else { style.and_then(|s| s.size).filter(|v| v.is_finite()).unwrap_or(size) };
+        let leading = style.map(|s| s.line_spacing).filter(|v| v.is_finite() && *v != 0.0).unwrap_or(leading);
+        measure_text(
+            text,
+            &family,
+            style.and_then(|s| s.bold).unwrap_or(title),
+            style.is_some_and(|s| s.italic),
+            style.and_then(|s| s.uppercase).unwrap_or(title),
+            style.map_or(0.0, |s| s.tracking).clamp(-100.0, 500.0),
+            size,
+            width,
+            leading,
+        )
+    }
+
+    /// The headline's size and drawn height: the template's size, made smaller (to 34 px at the
+    /// least) until it fits `max_height`.
+    pub fn fit_title(&self, base: f64, width: f64, leading: f64, max_height: f64) -> (f64, f64) {
+        let mut size = self.title_size(base);
+        let mut h = self.measure("title", self.title(), size, width, leading);
+        while h > max_height && size > 34.0 {
+            size = (size * 0.92).floor().max(34.0);
+            h = self.measure("title", self.title(), size, width, leading);
+        }
+        (size, h)
+    }
+
     pub fn title_size(&self, base: f64) -> f64 {
         let size = self.card.text_styles.get("title").and_then(|s| s.size).filter(|s| s.is_finite()).unwrap_or(base).clamp(16.0, 160.0);
         fit_size(self.title(), size)
@@ -103,6 +145,32 @@ pub(crate) fn fit_size(text: &str, base: f64) -> f64 {
             1.0
         })
     .round()
+}
+
+/// The height of `text` laid out by the text engine (a little extra so placements never touch).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn measure_text(text: &str, family: &str, bold: bool, italic: bool, caps: bool, tracking: f64, size: f64, width: f64, leading: f64) -> f64 {
+    if text.trim().is_empty() || !(size.is_finite() && width.is_finite()) || size <= 0.0 || width <= 0.0 {
+        return 0.0;
+    }
+    let face = match (bold, italic) {
+        (true, true) => "Bold Italic",
+        (true, false) => "Bold",
+        (false, true) => "Italic",
+        (false, false) => "Regular",
+    };
+    let style = filmcraft_text::TextStyle {
+        family: family.to_string(),
+        style: face.into(),
+        size: size as f32,
+        tracking: tracking as f32,
+        caps: if caps { filmcraft_text::Caps::All } else { filmcraft_text::Caps::Normal },
+        ..Default::default()
+    };
+    let para = filmcraft_text::ParagraphStyle { width: Some(width as f32), leading: leading as f32, ..Default::default() };
+    let l = filmcraft_text::layout(text, &style, &para);
+    let h = f64::from(l.bounds[3] - l.bounds[1]);
+    if h.is_finite() && h > 0.0 { h * 1.04 + 4.0 } else { text_height(text, size, width, 1.3) }
 }
 
 /// A conservative estimate of how tall wrapped text set at `size` in a `width` box is. The text

@@ -251,7 +251,7 @@ fn review(app: &mut FilmcraftApp, ui: &mut egui::Ui, ctx: &super::Ctx, runs: &Ru
             let title = if run.import.title.is_empty() { run.import.url.clone() } else { run.import.title.clone() };
             ui.label(RichText::new(title).strong());
             ui.label(RichText::new(&run.stage).small().color(t.text_dim));
-            if ui.small_button("✕").on_hover_text("Remove from the list (the download stays)").clicked() {
+            if ui.small_button("Remove").on_hover_text("Remove from the list (the download stays)").clicked() {
                 remove = true;
             }
         });

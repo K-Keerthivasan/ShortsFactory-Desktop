@@ -183,6 +183,17 @@ pub fn refresh(studio: &Studio) -> Result<Updates> {
     let notifications = state.events.into_iter().rev().collect();
     Ok(Updates { notifications, cloud_posts: posts, cloud_error })
 }
+/// Removes updates from the history (all of them when `ids` is None). What was already seen
+/// stays recorded, so a cleared update does not come back on the next refresh.
+pub fn clear(studio: &Studio, ids: Option<&[String]>) -> Result<()> {
+    let _lock = guard();
+    let mut state = load(studio)?;
+    match ids {
+        Some(ids) => state.events.retain(|e| !ids.contains(&e.id)),
+        None => state.events.clear(),
+    }
+    save(studio, &state)
+}
 pub fn acknowledge(studio: &Studio, ids: &[String]) -> Result<()> {
     let _lock = guard();
     let mut state = load(studio)?;
@@ -217,6 +228,27 @@ mod tests {
         std::fs::remove_file(path(&studio)).unwrap();
         std::fs::remove_dir(root.join("Editor")).unwrap();
         std::fs::remove_dir(root).unwrap();
+    }
+    #[test]
+    fn cleared_updates_do_not_come_back() {
+        let root = std::env::temp_dir().join(format!("filmcraft-notification-clear-{}-{}", std::process::id(), crate::clock::now_ms()));
+        let studio = Studio { database: root.join("unused.db"), storage: root.join("storage"), secrets: root.join("secrets"), env: Default::default(), root: root.clone() };
+        let mut state = State::default();
+        observe(&mut state, row("local:1", "PUBLISHED"));
+        observe(&mut state, row("local:2", "PUBLISHED"));
+        save(&studio, &state).unwrap();
+        let before = load(&studio).unwrap().events;
+        assert!(!before.is_empty());
+        clear(&studio, Some(std::slice::from_ref(&before[0].id))).unwrap();
+        assert_eq!(load(&studio).unwrap().events.len(), before.len() - 1);
+        clear(&studio, None).unwrap();
+        let mut reopened = load(&studio).unwrap();
+        assert!(reopened.events.is_empty());
+        // The same publications observed again (the next refresh) report nothing new.
+        observe(&mut reopened, row("local:1", "PUBLISHED"));
+        observe(&mut reopened, row("local:2", "PUBLISHED"));
+        assert!(reopened.events.is_empty());
+        let _ = std::fs::remove_dir_all(root);
     }
     fn row(key: &str, status: &str) -> Observation {
         Observation {

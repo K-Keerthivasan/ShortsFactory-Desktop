@@ -2250,6 +2250,7 @@ version = "0.8.0"
 dependencies = [
  "filmcraft-geom",
  "filmcraft-project",
+ "filmcraft-text",
  "filmcraft-time",
  "serde",
  "serde_json",

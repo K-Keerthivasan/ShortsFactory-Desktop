@@ -13,5 +13,7 @@ workspace = true
 filmcraft-geom = { workspace = true }
 filmcraft-project = { workspace = true }
 filmcraft-time = { workspace = true }
+# Real text measurement, so templates place words by their drawn size.
+filmcraft-text = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

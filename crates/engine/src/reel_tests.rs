@@ -208,6 +208,28 @@ fn reel_frames() {
     }
 }
 
+/// [`reel_frames`] with a long all-caps headline and a supporting line over bright footage, the
+/// case where words used to overlap the footage or run off the frame
+/// (`cargo test -p filmcraft-engine reel_frames_long -- --ignored`).
+#[test]
+#[ignore = "writes images for visual review"]
+fn reel_frames_long() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/reel-frames-long");
+    std::fs::create_dir_all(&dir).unwrap();
+    for t in TEMPLATES {
+        let mut s = Session::default();
+        s.execute("reel.new", json!({"name": "Long", "template": t.id, "seconds": 8})).unwrap();
+        let item = s.execute("file.importDemoFootage", json!({"scene": "OceanSunset"})).unwrap();
+        let id = item["items"].as_array().and_then(|a| a.first()).and_then(Value::as_u64).or_else(|| item["item"].as_u64()).unwrap();
+        let card = json!({"title": "Watch the cameras, spot creepy changes, survive your shift.", "caption": "A new horror game where every room hides a change you must catch.", "bullets": ["Spot the change", "Report it fast"]});
+        let brand = json!({"channelName": "JKR", "socialHandle": "jkr_studio_", "primaryColor": "#ff2e3f"});
+        s.execute("reel.apply", json!({"template": t.id, "item": id, "card": card, "brand": brand})).unwrap();
+        let path = dir.join(format!("{}.png", t.id));
+        let r = s.execute("file.exportFrame", json!({"path": path.to_string_lossy(), "format": "png", "time": filmcraft_reel::secs(1.2).0}));
+        assert!(r.is_ok(), "{}: {r:?}", t.id);
+    }
+}
+
 #[test]
 fn a_reel_exports_to_a_vertical_mp4() {
     let mut s = Session::default();
@@ -293,4 +315,24 @@ fn a_reel_can_use_one_segment_of_the_source() {
     let clip = s.active_sequence().unwrap().find_item(ClipId(v["reel"]["mainClip"].as_u64().unwrap())).unwrap().1.clone();
     assert!((clip.source_in.seconds() - 1.0).abs() < 0.05, "starts at 1 s of the source, not {}", clip.source_in.seconds());
     assert!((clip.duration.seconds() - 2.0).abs() < 0.05, "two seconds long, not {}", clip.duration.seconds());
+}
+
+#[test]
+fn clearing_the_supporting_line_removes_it_from_the_picture() {
+    for template in TEMPLATES.iter().map(|t| t.id) {
+        let (mut s, _) = reel(template);
+        s.execute("reel.setCard", json!({"caption": "A supporting line"})).unwrap();
+        s.execute("reel.setCard", json!({"caption": ""})).unwrap();
+        let overlay = &track_items(&s, 3)[0];
+        let shown: Vec<String> = overlay
+            .effects
+            .iter()
+            .filter_map(|e| match e.params.get("text").map(|p| &p.value) {
+                Some(ParamValue::Text(t)) => Some(t.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(!shown.iter().any(|t| t.contains("A supporting line")), "{template}: still drawn: {shown:?}");
+        assert_eq!(crate::reel::current(&s).unwrap().card.caption, "", "{template}");
+    }
 }

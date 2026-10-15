@@ -97,6 +97,8 @@ pub struct ReelDraft {
     pub schedule_time: String,
     /// Library as a grid of thumbnails instead of a list.
     pub library_grid: bool,
+    /// Create's workspace clips as a grid of thumbnails.
+    pub clips_grid: bool,
     /// Finished cloud posts cleared from the calendar (ids; hidden here only, nothing is deleted).
     pub cleared_posts: Vec<String>,
     /// Show cleared posts again.
@@ -322,6 +324,8 @@ struct Runtime {
     pending_start: Option<(String, std::path::PathBuf)>,
     /// The AI panel's links, from download to the parts chosen.
     ai_runs: ai::Runs,
+    /// When a card field was last typed in (applied half a second later).
+    card_typed_at: Option<f64>,
     /// Local accounts' token expiry, as last read from Meta.
     token_info: std::collections::BTreeMap<i64, Result<String, String>>,
 }
@@ -330,6 +334,16 @@ struct Runtime {
 /// running due scheduled posts. Only the Shorts Factory app turns it on ([`enable_background`]),
 /// so tests and other embedders never call Meta or publish from the user's real library.
 static BACKGROUND: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Unread publishing updates (posted, scheduled, failed), for the header's bell.
+pub fn unread_updates() -> usize {
+    rt().publication_updates.iter().filter(|n| !n.read).count()
+}
+
+/// Opens the publishing updates window (the header's bell).
+pub fn open_updates() {
+    rt().updates_open = true;
+}
 
 /// Lets this process run the start-up check and due scheduled posts. Call once from the app.
 pub fn enable_background() {
@@ -945,6 +959,34 @@ fn start_reel(app: &mut FilmcraftApp, ctx: &Ctx, name: &str, path: Option<std::p
     }
 }
 
+/// Opens a workspace clip in the Source monitor (imported once, then reused).
+fn preview_clip(app: &mut FilmcraftApp, r: &mut Runtime, m: &MediaRow) {
+    let existing = app.session.project.items.values().find_map(|item| match &item.as_media()?.media {
+        filmcraft_project::MediaRef::File { path } if std::path::Path::new(path) == m.path => Some(item.id.0),
+        _ => None,
+    });
+    let result = (|| -> Result<(), String> {
+        let item = match existing {
+            Some(id) => id,
+            None => app
+                .session
+                .execute("file.import", json!({"paths": [m.path.to_string_lossy()]}))
+                .map_err(|e| e.to_string())?
+                .get("items")
+                .and_then(|v| v.as_array())
+                .and_then(|a| a.first())
+                .and_then(|v| v.as_u64())
+                .ok_or("The source was not imported")?,
+        };
+        app.session.execute("source.open", json!({"item": item})).map_err(|e| e.to_string())?;
+        app.show_panel(crate::PanelKind::Source);
+        Ok(())
+    })();
+    if let Err(e) = result {
+        log(r, format!("Could not preview the clip: {e}"));
+    }
+}
+
 fn new_reel_from(app: &mut FilmcraftApp, ctx: &Ctx, p: &ReusePrompt) {
     let format = app.ui.reel.format;
     let mut params = json!({"name": p.name, "template": ctx.brand.default_layout, "brand": ctx.brand, "channelId": ctx.channel, "card": app.ui.reel.card, "format": format.id()});
@@ -1106,6 +1148,28 @@ pub fn show_create(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                     })
                 });
             }
+            ui.horizontal_wrapped(|ui| {
+                let open = ui.add_enabled(ctx.channel.is_some(), egui::Button::new("📂 Open workspace folder"));
+                app.auto.add_response("reel.media.openFolder", &open, "Open workspace folder");
+                if open.clicked()
+                    && let Some(ch) = ctx.channel
+                {
+                    match ctx.s.workspace_folder(ch) {
+                        Ok(dir) => {
+                            let clips = dir.join("assets").join("clips");
+                            let target = if clips.is_dir() { clips } else { dir };
+                            if let Err(e) = super::menu_dialogs::open_path(app, ui.ctx(), &target.to_string_lossy(), false) {
+                                app.ui.status = e;
+                            }
+                        }
+                        Err(e) => app.ui.status = e.to_string(),
+                    }
+                }
+                let list = ui.selectable_value(&mut app.ui.reel.clips_grid, false, "☰ List");
+                app.auto.add_response("reel.media.viewList", &list, "List view");
+                let grid = ui.selectable_value(&mut app.ui.reel.clips_grid, true, "▦ Grid");
+                app.auto.add_response("reel.media.viewGrid", &grid, "Grid view");
+            });
             ui.add(egui::TextEdit::singleline(&mut app.ui.reel.media_filter).hint_text("Search clips").desired_width(f32::INFINITY));
             let filter = app.ui.reel.media_filter.to_lowercase();
             let clips: Vec<MediaRow> =
@@ -1115,7 +1179,60 @@ pub fn show_create(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                     RichText::new("No clips in this workspace yet. Download some, or drop files in its clips folder and refresh.").small().color(t.text_dim),
                 );
             }
-            for m in clips {
+            if app.ui.reel.clips_grid {
+                let gap = 8.0;
+                let per_row = ((ui.available_width() + gap) / (150.0 + gap)).floor().max(1.0);
+                let tile = ((ui.available_width() + gap) / per_row - gap).max(110.0);
+                let mut removed = Vec::new();
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = vec2(gap, gap);
+                    for m in &clips {
+                        ui.vertical(|ui| {
+                            ui.set_width(tile);
+                            let (rect, click) = ui.allocate_exact_size(vec2(tile, tile * 9.0 / 16.0), egui::Sense::click());
+                            delivery::preview_in(app, ui, rect, Some(&m.path), 1.0, true, &mut r);
+                            let click = click.on_hover_text(format!("{} · {}", m.label, m.duration.map(|d| format!("{d:.1}s")).unwrap_or_default()));
+                            if ui.is_rect_visible(rect) {
+                                app.auto.add_response(&format!("reel.clip.tile.{}", m.id), &click, &m.label);
+                            }
+                            if click.double_clicked() {
+                                r.pending_start = Some((m.label.clone(), m.path.clone()));
+                            } else if click.clicked() {
+                                preview_clip(app, &mut r, m);
+                            }
+                            ui.add(egui::Label::new(RichText::new(&m.label).small()).truncate());
+                            ui.horizontal(|ui| {
+                                let new = ui.small_button(format!("New {}", app.ui.reel.format.label()));
+                                if ui.is_rect_visible(new.rect) {
+                                    app.auto.add_response(&format!("reel.new.{}", m.id), &new, &m.label);
+                                }
+                                if new.clicked() {
+                                    r.pending_start = Some((m.label.clone(), m.path.clone()));
+                                }
+                                let remove = ui.small_button("Remove").on_hover_text("Remove from Create; keep the source file and existing Reels");
+                                if ui.is_rect_visible(remove.rect) {
+                                    app.auto.add_response(&format!("reel.remove.{}", m.id), &remove, "Remove from Create (keep file)");
+                                }
+                                if remove.clicked() {
+                                    removed.push(m.id);
+                                }
+                            });
+                        });
+                    }
+                });
+                if let Some(channel) = ctx.channel {
+                    for id in removed {
+                        match ctx.s.remove_clip(channel, id) {
+                            Ok(()) => {
+                                r.media.retain(|row| row.id != id);
+                                app.ui.status = "Removed from Create. Source file kept.".into();
+                            }
+                            Err(e) => app.ui.status = e.to_string(),
+                        }
+                    }
+                }
+            }
+            for m in clips.iter().filter(|_| !app.ui.reel.clips_grid).cloned().collect::<Vec<_>>() {
                 ui.horizontal(|ui| {
                     let b = ui.small_button(format!("New {}", app.ui.reel.format.label()));
                     // Rows scrolled out of view are not clickable, so agents don't see them.
@@ -1136,30 +1253,7 @@ pub fn show_create(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                         app.auto.add_response(&format!("reel.preview.{}", m.id), &preview, "Preview source");
                     }
                     if preview.clicked() {
-                        let existing = app.session.project.items.values().find_map(|item| match &item.as_media()?.media {
-                            filmcraft_project::MediaRef::File { path } if std::path::Path::new(path) == m.path => Some(item.id.0),
-                            _ => None,
-                        });
-                        let result = (|| -> Result<(), String> {
-                            let item = match existing {
-                                Some(id) => id,
-                                None => app
-                                    .session
-                                    .execute("file.import", json!({"paths": [m.path.to_string_lossy()]}))
-                                    .map_err(|e| e.to_string())?
-                                    .get("items")
-                                    .and_then(|v| v.as_array())
-                                    .and_then(|a| a.first())
-                                    .and_then(|v| v.as_u64())
-                                    .ok_or("The source was not imported")?,
-                            };
-                            app.session.execute("source.open", json!({"item": item})).map_err(|e| e.to_string())?;
-                            app.show_panel(crate::PanelKind::Source);
-                            Ok(())
-                        })();
-                        if let Err(e) = result {
-                            log(&mut r, format!("Could not preview the clip: {e}"));
-                        }
+                        preview_clip(app, &mut r, &m);
                     }
                     if b.clicked() {
                         r.pending_start = Some((m.label.clone(), m.path.clone()));
@@ -1647,6 +1741,8 @@ fn publication_updates_popup(app: &mut FilmcraftApp, ctx: &egui::Context) {
         return;
     }
     let mut dismiss = false;
+    // Updates to clear: None = none, Some(None) = all, Some(Some(ids)) = these.
+    let mut clear: Option<Option<Vec<String>>> = None;
     egui::Window::new("Publishing updates").id(egui::Id::new("reel-publication-updates")).open(&mut open).default_width(420.0).show(ctx, |ui| {
         if events.is_empty() {
             ui.label("No publishing updates yet.");
@@ -1654,7 +1750,14 @@ fn publication_updates_popup(app: &mut FilmcraftApp, ctx: &egui::Context) {
         egui::ScrollArea::vertical().max_height(340.0).show(ui, |ui| {
             for event in &events {
                 ui.group(|ui| {
-                    ui.label(RichText::new(format!("{} {}", if event.ok { "✓" } else { "!" }, event.title)).strong());
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(format!("{} {}", if event.ok { "✓" } else { "!" }, event.title)).strong());
+                        let x = ui.small_button("Clear").on_hover_text("Clear this update");
+                        app.auto.add_response(&format!("reel.updates.clear.{}", event.id), &x, "Clear this update");
+                        if x.clicked() {
+                            clear = Some(Some(vec![event.id.clone()]));
+                        }
+                    });
                     ui.label(&event.message);
                     ui.label(RichText::new(local_time(&event.at)).small());
                     if let Some(link) = &event.link {
@@ -1664,10 +1767,33 @@ fn publication_updates_popup(app: &mut FilmcraftApp, ctx: &egui::Context) {
                 });
             }
         });
-        let b = ui.button("Mark read and close");
-        app.auto.add_response("reel.updates.dismiss", &b, "Mark updates read and close");
-        dismiss = b.clicked();
+        ui.horizontal(|ui| {
+            let b = ui.button("Mark read and close");
+            app.auto.add_response("reel.updates.dismiss", &b, "Mark updates read and close");
+            dismiss = b.clicked();
+            let all = ui.add_enabled(!events.is_empty(), egui::Button::new("Clear all"));
+            app.auto.add_response("reel.updates.clearAll", &all, "Clear all updates");
+            if all.clicked() {
+                clear = Some(None);
+            }
+        });
     });
+    if let Some(which) = clear {
+        let mut r = rt();
+        match &which {
+            Some(ids) => r.publication_updates.retain(|e| !ids.contains(&e.id)),
+            None => r.publication_updates.clear(),
+        }
+        if let Some(s) = studio(&mut r) {
+            spawn(&mut r, "Clear updates", move || {
+                Done::Message(match filmcraft_studio::notifications::clear(&s, which.as_deref()) {
+                    Ok(()) => String::new(),
+                    Err(e) => format!("Could not clear the updates: {e}"),
+                })
+            });
+        }
+        return;
+    }
     let mut r = rt();
     r.updates_open = open && !dismiss;
     if !open || dismiss {
@@ -1725,7 +1851,7 @@ pub fn overlays(app: &mut FilmcraftApp, ctx: &egui::Context) {
                     ui.set_max_width(380.0);
                     ui.horizontal(|ui| {
                         ui.label(RichText::new(if all_ok { "✓ Everything is connected" } else { "Connection check" }).strong());
-                        if ui.small_button("✕").clicked() {
+                        if ui.small_button("Close").clicked() {
                             close = true;
                         }
                     });
@@ -2251,6 +2377,10 @@ fn card(app: &mut FilmcraftApp, ui: &mut egui::Ui, is_reel: bool, part: CardPart
             ui.add(egui::TextEdit::singleline(field).desired_width(f32::INFINITY))
         };
         app.auto.add_response(&format!("reel.card.{id}"), &r, label);
+        // Typing applies a moment after it stops (see `card_typed_at`); leaving the field applies now.
+        if r.changed() {
+            rt().card_typed_at = Some(ui.input(|i| i.time));
+        }
         r.lost_focus()
     }
     let mut changed = false;
@@ -2450,6 +2580,19 @@ fn card(app: &mut FilmcraftApp, ui: &mut egui::Ui, is_reel: bool, part: CardPart
             changed |= tr.lost_focus();
             app.auto.add_response("reel.card.hashtags", &tr, "Hashtags");
         });
+    }
+    // Half a second after the last keystroke, what was typed (or cleared) goes onto the Reel.
+    let now = ui.input(|i| i.time);
+    let typed = rt().card_typed_at;
+    if let Some(at) = typed {
+        if now - at >= 0.5 {
+            changed = true;
+        } else {
+            ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(0.5 - (now - at)));
+        }
+    }
+    if changed {
+        rt().card_typed_at = None;
     }
     if changed && is_reel {
         let p = card_params(&app.ui.reel.card);

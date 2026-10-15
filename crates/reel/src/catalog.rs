@@ -4,7 +4,7 @@
 
 use filmcraft_project::{Interpolation, ParamValue};
 
-use crate::layers::{BLACK, Builder, Ctx, MONO, Rgba, Style, WHITE, Z, text_height, text_height_w, with_alpha};
+use crate::layers::{BLACK, Builder, Ctx, MONO, Rgba, Style, WHITE, Z, with_alpha};
 use crate::{Backdrop, Fit, LogoSpot, Rect, ReelPlan};
 
 /// One entry of the template gallery.
@@ -54,77 +54,99 @@ pub fn find(id: &str) -> Option<&'static TemplateInfo> {
 // Card layouts
 // ------------------------------------------------------------------------------------------------
 
-fn title_and_caption(b: &mut Builder<'_, '_>, x: f64, y: f64, width: f64, size: f64, line: f64, style: Style<'_>, caption_bottom: Option<f64>) -> f64 {
+/// The headline at `y` and the supporting line under it, both measured as drawn; returns where
+/// they end.
+fn title_and_caption(b: &mut Builder<'_, '_>, x: f64, y: f64, width: f64, size: f64, style: Style<'_>, title_h: f64) -> f64 {
     let title = b.c.title().to_string();
     let t = b.text(Z::Over, "Title", &title, x, y, width, size, style);
     b.control("title", "Headline", t, "text");
     b.reveal(t, 0.0, 0.6, 18.0);
-    let mut bottom = y + text_height(&title, size, width, line);
+    let mut bottom = y + title_h;
     let caption = b.c.card.caption.trim().to_string();
     if !caption.is_empty() {
-        let cap = b.text(Z::Over, "Caption", &caption, x, bottom + 24.0, width, 32.0, Style { opacity: 60.0, ..Style::regular() });
+        let cap = b.text(Z::Over, "Caption", &caption, x, bottom + 22.0, width, 32.0, Style { opacity: 70.0, ..Style::regular() });
         b.control("caption", "Caption", cap, "text");
-        bottom += 24.0 + text_height(&caption, 32.0, width, 1.3);
-        if let Some(edge) = caption_bottom {
-            b.bottom_at(cap, edge);
-        }
+        bottom += 22.0 + b.c.measure("caption", &caption, 32.0, width, 0.0);
     }
     bottom
 }
 
+/// The supporting line's drawn height plus the gap above it (0 without one).
+fn caption_block(c: &Ctx<'_>, size: f64, width: f64, gap: f64) -> f64 {
+    let caption = c.card.caption.trim();
+    if caption.is_empty() { 0.0 } else { gap + c.measure("caption", caption, size, width, 0.0) }
+}
+
+/// Words on a solid card above the footage: the footage starts below the words (never under
+/// them) and keeps at least 760 px; a long headline is set smaller to make room.
 fn quote_card(c: &Ctx<'_>) -> ReelPlan {
-    let top = 650.0;
+    let (x, y, width) = (64.0, 340.0, 820.0);
+    let cap_h = caption_block(c, 32.0, width, 22.0);
+    let (size, title_h) = c.fit_title(c.brand.card_title_size.max(40.0), width, 0.0, (1920.0 - 760.0 - 56.0 - y - cap_h).max(120.0));
+    let top = (y + title_h + cap_h + 56.0).max(650.0);
     let mut b = Builder::new(c, Rect::new(0.0, top, 1080.0, 1920.0 - top));
     b.rect(Z::Under, "Card", Rect::FULL, c.card_bg, 0.0);
     b.brand_row(64.0, 220.0, 88.0, 36.0, 30.0);
-    let size = c.title_size(c.brand.card_title_size).round();
-    title_and_caption(&mut b, 64.0, 350.0, 820.0, size, 1.26, Style { weight: "SemiBold", ..Style::regular() }, None);
+    title_and_caption(&mut b, x, y, width, size, Style { weight: "SemiBold", ..Style::regular() }, title_h);
     b.finish()
 }
 
+/// A dark backing behind words over footage: fades in above `top`, solid from `top` down to
+/// `bottom`, so white words read on any picture.
+fn backing(b: &mut Builder<'_, '_>, top: f64, bottom: f64, strength: f32) {
+    let fade = 260.0;
+    b.gradient(Z::Over, "Bottom scrim", Rect::new(0.0, top - fade, 1080.0, fade), with_alpha(BLACK, 0.0), with_alpha(BLACK, strength), 90.0);
+    b.rect(Z::Over, "Text backing", Rect::new(0.0, top, 1080.0, (bottom - top).max(0.0)), with_alpha(BLACK, strength), 0.0);
+}
+
+/// The footage fills the frame; the words sit low on a dark backing (inside Instagram's safe
+/// area: above 1420 px, clear of the caption and buttons).
 fn full_bleed(c: &Ctx<'_>) -> ReelPlan {
     let mut b = Builder::new(c, Rect::FULL);
     b.gradient(Z::Over, "Top scrim", Rect::new(0.0, 0.0, 1080.0, 430.0), with_alpha(BLACK, 0.8), with_alpha(BLACK, 0.0), 90.0);
-    b.gradient(Z::Over, "Bottom scrim", Rect::new(0.0, 990.0, 1080.0, 930.0), with_alpha(BLACK, 0.0), with_alpha(BLACK, 0.92), 90.0);
     b.brand_row(64.0, 220.0, 78.0, 34.0, 30.0);
-    let size = c.title_size(78.0);
+    let width = 820.0;
     let caption = c.card.caption.trim();
-    let cap_h = if caption.is_empty() { 0.0 } else { text_height(caption, 30.0, 820.0, 1.4) };
-    let title_h = text_height(c.title(), size, 820.0, 1.08);
-    let y = 1420.0 - if cap_h > 0.0 { cap_h + 22.0 } else { 0.0 } - title_h;
-    let bar = b.rect(Z::Over, "Accent", Rect::new(56.0, y - 32.0, 96.0, 6.0), c.accent, 3.0);
-    let t = b.text(Z::Over, "Title", c.title(), 64.0, y, 820.0, size, Style { weight: "ExtraBold", leading: -6.0, ..Style::regular() });
+    let cap_h = if caption.is_empty() { 0.0 } else { c.measure("caption", caption, 30.0, width, 0.0) };
+    let (size, title_h) = c.fit_title(78.0, width, -6.0, 560.0 - cap_h);
+    let base = 1420.0;
+    let y = base - if cap_h > 0.0 { cap_h + 22.0 } else { 0.0 } - title_h;
+    backing(&mut b, y - 60.0, 1920.0, 0.86);
+    let bar = b.rect(Z::Over, "Accent", Rect::new(64.0, y - 32.0, 96.0, 6.0), c.accent, 3.0);
+    let t = b.text(Z::Over, "Title", c.title(), 64.0, y, width, size, Style { weight: "ExtraBold", leading: -6.0, ..Style::regular() });
     b.control("title", "Headline", t, "text");
     b.reveal(t, 0.0, 0.6, 0.0);
     if cap_h > 0.0 {
-        let cap = b.text(Z::Over, "Caption", caption, 64.0, 1420.0 - cap_h, 820.0, 30.0, Style { opacity: 88.0, ..Style::regular() });
+        let cap = b.text(Z::Over, "Caption", caption, 64.0, base - cap_h, width, 30.0, Style { opacity: 88.0, ..Style::regular() });
         b.control("caption", "Caption", cap, "text");
-        b.bottom_at(cap, 1420.0);
+        b.bottom_at(cap, base);
         b.pin(t, cap, [false, false, false, true], [0.0, 0.0, 0.0, -(cap_h + 22.0)]);
     } else {
-        b.bottom_at(t, 1420.0);
+        b.bottom_at(t, base);
     }
     b.pin(bar, t, [false, true, false, false], [0.0, -32.0, 0.0, 0.0]);
     b.finish()
 }
 
+/// A big headline on the card, the footage below it, the supporting line under the footage.
 fn headline(c: &Ctx<'_>) -> ReelPlan {
-    let size = c.title_size(92.0);
+    let width = 820.0;
     let title_y = 220.0 + 72.0 + 46.0;
-    let title_h = text_height(c.title(), size, 820.0, 1.05);
     let caption = c.card.caption.trim();
-    let caption_h = if caption.is_empty() { 0.0 } else { 34.0 + text_height(caption, 31.0, 820.0, 1.45) };
+    let caption_h = if caption.is_empty() { 0.0 } else { 34.0 + c.measure("caption", caption, 31.0, width, 0.0) };
+    // The footage keeps at least 600 px: the headline gets what is left.
+    let (size, title_h) = c.fit_title(92.0, width, -6.0, (1420.0 - caption_h - 600.0 - 44.0 - title_y).max(120.0));
     let slot_y = title_y + title_h + 44.0;
-    let slot_h = (1420.0 - caption_h - slot_y).max(240.0);
-    let mut b = Builder::new(c, Rect::new(64.0, slot_y, 820.0, slot_h));
+    let slot_h = (1420.0 - caption_h - slot_y).max(600.0);
+    let mut b = Builder::new(c, Rect::new(64.0, slot_y, width, slot_h));
     b.gradient(Z::Under, "Card", Rect::FULL, c.card_bg, c.background, 75.0);
     b.brand_row(64.0, 220.0, 72.0, 32.0, 28.0);
-    let t = b.text(Z::Over, "Title", c.title(), 64.0, title_y, 820.0, size, Style { weight: "ExtraBold", leading: -6.0, ..Style::regular() });
+    let t = b.text(Z::Over, "Title", c.title(), 64.0, title_y, width, size, Style { weight: "ExtraBold", leading: -6.0, ..Style::regular() });
     b.control("title", "Headline", t, "text");
     b.reveal(t, 0.0, 0.6, 18.0);
-    b.rect(Z::Over, "Accent rule", Rect::new(64.0, slot_y + slot_h - 5.0, 820.0, 5.0), c.accent, 0.0);
+    b.rect(Z::Over, "Accent rule", Rect::new(64.0, slot_y + slot_h - 5.0, width, 5.0), c.accent, 0.0);
     if !caption.is_empty() {
-        let cap = b.text(Z::Over, "Caption", caption, 64.0, slot_y + slot_h + 34.0, 820.0, 31.0, Style { align: 1, opacity: 88.0, ..Style::regular() });
+        let cap = b.text(Z::Over, "Caption", caption, 64.0, slot_y + slot_h + 34.0, width, 31.0, Style { align: 1, opacity: 88.0, ..Style::regular() });
         b.control("caption", "Caption", cap, "text");
     }
     b.finish()
@@ -136,7 +158,7 @@ fn bullets(b: &mut Builder<'_, '_>, x: f64, mut y: f64, width: f64, size: f64) -
         b.text(Z::Over, "Dash", "—", x, y, 40.0, size, Style { color: Some(accent), ..Style::mono() });
         let l = b.text(Z::Over, &format!("Point {}", i + 1), line, x + 56.0, y, width - 56.0, size, Style { opacity: 88.0, ..Style::mono() });
         b.control(&format!("point{}", i + 1), &format!("Point {}", i + 1), l, "text");
-        y += text_height(line, size, width - 56.0, 1.42) + 16.0;
+        y += b.c.measure(&format!("point{}", i + 1), line, size, width - 56.0, 0.0) + 16.0;
     }
     y
 }
@@ -156,10 +178,11 @@ fn numbered(c: &Ctx<'_>) -> ReelPlan {
         Style { tracking: 70.0, plate: Some(([1.0, 1.0, 1.0, 0.12], 12.0, 30.0)), ..Style::mono() },
     );
     b.control("badge", "Badge", badge, "text");
-    let size = c.title_size(72.0);
+    let points: f64 = c.bullets().iter().enumerate().map(|(i, l)| c.measure(&format!("point{}", i + 1), l, 33.0, 764.0, 0.0) + 16.0).sum();
+    let (size, title_h) = c.fit_title(72.0, 820.0, -4.0, (1330.0 - 900.0 - 26.0 - points).max(90.0));
     let t = b.text(Z::Over, "Title", c.title(), 64.0, 900.0, 820.0, size, Style { weight: "ExtraBold", leading: -4.0, ..Style::regular() });
     b.control("title", "Headline", t, "text");
-    let y = 900.0 + text_height(c.title(), size, 820.0, 1.08) + 26.0;
+    let y = 900.0 + title_h + 26.0;
     bullets(&mut b, 64.0, y, 820.0, 33.0);
     b.logo = Some(LogoSpot { center: (100.0, 1390.0), size: 54.0, opacity: 100.0 });
     let h = b.text(Z::Over, "Handle", &c.brand.handle_line(), 148.0, 1374.0, 700.0, 30.0, Style { opacity: 70.0, ..Style::regular() });
@@ -168,9 +191,10 @@ fn numbered(c: &Ctx<'_>) -> ReelPlan {
 }
 
 fn framed(c: &Ctx<'_>) -> ReelPlan {
-    let size = c.title_size(56.0);
     let caption = c.card.caption.trim();
-    let footer = 30.0 + text_height(c.title(), size, 820.0, 1.14) + if caption.is_empty() { 0.0 } else { 16.0 + text_height(caption, 28.0, 820.0, 1.3) } + 24.0;
+    let cap_h = if caption.is_empty() { 0.0 } else { 16.0 + c.measure("caption", caption, 28.0, 820.0, 0.0) };
+    let (size, title_h) = c.fit_title(56.0, 820.0, 0.0, 330.0 - cap_h);
+    let footer = 30.0 + title_h + cap_h + 24.0;
     let slot_y = 320.0;
     let slot = Rect::new(64.0, slot_y, 820.0, (1420.0 - slot_y - footer).max(300.0));
     let mut b = Builder::new(c, slot);
@@ -189,7 +213,7 @@ fn framed(c: &Ctx<'_>) -> ReelPlan {
             "Caption",
             caption,
             64.0,
-            ty + text_height(c.title(), size, 820.0, 1.14) + 16.0,
+            ty + title_h + 16.0,
             820.0,
             28.0,
             Style { align: 1, opacity: 72.0, ..Style::mono() },
@@ -213,10 +237,11 @@ fn brief(c: &Ctx<'_>) -> ReelPlan {
     let top = slot_y + 620.0 + 10.0;
     let badge = b.text(Z::Over, "Badge", &c.badge(), 66.0, top, 400.0, 30.0, Style { color: Some(c.accent), tracking: 100.0, ..Style::mono() });
     b.control("badge", "Badge", badge, "text");
-    let size = c.title_size(68.0);
+    let points: f64 = c.bullets().iter().enumerate().map(|(i, l)| c.measure(&format!("point{}", i + 1), l, 31.0, 764.0, 0.0) + 16.0).sum();
+    let (size, title_h) = c.fit_title(68.0, 820.0, -4.0, (1330.0 - top - 48.0 - 24.0 - points).max(90.0));
     let t = b.text(Z::Over, "Title", c.title(), 64.0, top + 48.0, 820.0, size, Style { weight: "ExtraBold", leading: -4.0, ..Style::regular() });
     b.control("title", "Headline", t, "text");
-    bullets(&mut b, 64.0, top + 48.0 + text_height(c.title(), size, 820.0, 1.08) + 24.0, 820.0, 31.0);
+    bullets(&mut b, 64.0, top + 48.0 + title_h + 24.0, 820.0, 31.0);
     b.logo = Some(LogoSpot { center: (100.0, 1390.0), size: 52.0, opacity: 100.0 });
     let n = b.text(Z::Over, "Channel", &c.channel(), 148.0, 1370.0, 700.0, 30.0, Style::bold());
     b.control("channel", "Channel Name", n, "text");
@@ -388,26 +413,27 @@ fn design(c: &Ctx<'_>) -> ReelPlan {
         }
         _ => {}
     }
-    // A weighted edge where the words sit.
-    if r.top {
-        b.gradient(Z::Over, "Top shade", Rect::new(0.0, 0.0, 1080.0, 900.0), with_alpha(BLACK, 0.78), with_alpha(BLACK, 0.0), 90.0);
-    } else {
-        b.gradient(Z::Over, "Bottom shade", Rect::new(0.0, 960.0, 1080.0, 960.0), with_alpha(BLACK, 0.0), with_alpha(BLACK, 0.86), 90.0);
-    }
     b.brand_row(64.0, 220.0, 56.0, 30.0, 24.0);
     // The words. Safe area: 72 px left, 180 px right, 300 px above the bottom. Bottom-placed
     // words are pinned by their bottom edge, so a headline of any length grows upwards from the
     // caption and never runs into it; the plate, rule and bar follow the headline.
     let (left, width) = (64.0, 820.0);
-    let size = c.title_size(r.max_size);
     let style = title_style(&r, c);
-    let em = if matches!(r.look, Look::Condensed | Look::Outline | Look::Stacked) { 0.7 } else { 0.56 };
-    let title_h = text_height_w(c.title(), size, width, 1.12, em);
     let caption = c.card.caption.trim();
-    let cap_text_h = if caption.is_empty() { 0.0 } else { text_height(caption, 32.0, width, 1.35) };
+    let cap_text_h = if caption.is_empty() { 0.0 } else { c.measure("caption", caption, 32.0, width, 0.0) };
     let caption_h = if caption.is_empty() { 0.0 } else { 18.0 + cap_text_h };
+    // Words take at most ~560 px, so most of the footage stays clear; longer headlines are set smaller.
+    let (size, title_h) = c.fit_title(r.max_size, width, style.leading, (560.0 - caption_h).max(120.0));
     let base = 1420.0;
     let y = if r.top { 330.0 + 46.0 } else { base - caption_h - title_h };
+    // A dark backing where the words sit, from just above them to the frame's edge.
+    if r.top {
+        let bottom = y + title_h + caption_h + 60.0;
+        b.rect(Z::Over, "Top shade", Rect::new(0.0, 0.0, 1080.0, bottom), with_alpha(BLACK, 0.78), 0.0);
+        b.gradient(Z::Over, "Top fade", Rect::new(0.0, bottom, 1080.0, 240.0), with_alpha(BLACK, 0.78), with_alpha(BLACK, 0.0), 90.0);
+    } else {
+        backing(&mut b, y - 70.0, 1920.0, 0.82);
+    }
     let mut words: Vec<u64> = Vec::new();
     if r.top {
         let label = b.text(
@@ -478,7 +504,7 @@ fn design(c: &Ctx<'_>) -> ReelPlan {
             base - cap_text_h,
             width,
             32.0,
-            Style { opacity: 82.0, shadow: Some([0.0, 0.0, 0.0, 0.6]), ..Style::regular() },
+            Style { opacity: 86.0, shadow: Some([0.0, 0.0, 0.0, 0.6]), ..Style::regular() },
         );
         b.control("caption", "Caption", cap, "text");
         b.bottom_at(cap, base);

@@ -90,8 +90,18 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     if btn(ui, Icon::Search, "search", tl!("Search"), app).clicked() {
         app.show_panel(crate::dock::PanelKind::Effects);
     }
-    if btn(ui, Icon::Bell, "notifications", tl!("Progress"), app).clicked() {
-        app.ui.mode = Mode::Export;
+    // Notifications: publishing updates (posted, scheduled, failed), with the unread count.
+    let unread = crate::panels::reel::unread_updates();
+    let bell_tip = if unread > 0 { format!("{} ({unread})", tl!("Notifications")) } else { tl!("Notifications").to_string() };
+    let bell = btn(ui, Icon::Bell, "notifications", &bell_tip, app);
+    if unread > 0 {
+        let dot = pos2(bell.rect.right() - 6.0, bell.rect.top() + 6.0);
+        ui.painter().circle_filled(dot, 7.0, t.accent);
+        let n = if unread > 9 { "9+".to_string() } else { unread.to_string() };
+        ui.painter().text(dot, egui::Align2::CENTER_CENTER, n, egui::FontId::proportional(9.0), Color32::WHITE);
+    }
+    if bell.clicked() {
+        crate::panels::reel::open_updates();
     }
     // Quick Export: a popup with File Name & Location, a preset list and Export (Premiere 26)
     let qx = rect.max.x - 14.0 - 4.0 * 38.0; // the fifth button from the right
