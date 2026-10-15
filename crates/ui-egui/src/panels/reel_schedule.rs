@@ -141,7 +141,12 @@ pub(super) fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, ctx: &Ctx) {
     let Some(first) = NaiveDate::from_ymd_opt(y, m, 1) else { return };
     let Some(end) = (if m == 12 { NaiveDate::from_ymd_opt(y + 1, 1, 1) } else { NaiveDate::from_ymd_opt(y, m + 1, 1) }) else { return };
     let selected = app.ui.reel.calendar_day.as_deref().and_then(|d| NaiveDate::parse_from_str(d, "%Y-%m-%d").ok()).unwrap_or(today);
-    let live = |p: &serde_json::Value| !matches!(p.get("status").and_then(|v| v.as_str()), Some("deleted"));
+    let cleared = app.ui.reel.cleared_posts.clone();
+    let show_cleared = app.ui.reel.show_cleared;
+    let live = |p: &serde_json::Value| {
+        !matches!(p.get("status").and_then(|v| v.as_str()), Some("deleted"))
+            && (show_cleared || !cleared.iter().any(|c| Some(c.as_str()) == p.get("id").and_then(|v| v.as_str())))
+    };
     let on_day = |d: NaiveDate| -> Vec<&serde_json::Value> {
         let mut v: Vec<&serde_json::Value> =
             posts.iter().filter(|p| live(p) && p.get("scheduled_for").and_then(|v| v.as_str()).and_then(day_of) == Some(d)).collect();
@@ -208,8 +213,22 @@ pub(super) fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, ctx: &Ctx) {
     ui.separator();
 
     // The chosen day: its posts and their actions.
-    ui.label(RichText::new(selected.format("%A %d %B %Y").to_string()).strong());
     let day_posts = on_day(selected);
+    let finished = |p: &&serde_json::Value| matches!(p.get("status").and_then(|v| v.as_str()), Some("published" | "cancelled" | "failed"));
+    let mut clear: Vec<String> = Vec::new();
+    ui.horizontal_wrapped(|ui| {
+        ui.label(RichText::new(selected.format("%A %d %B %Y").to_string()).strong());
+        let done: Vec<String> = day_posts.iter().filter(|p| finished(p)).filter_map(|p| p.get("id").and_then(|v| v.as_str()).map(str::to_string)).collect();
+        let b = ui.add_enabled(done.iter().any(|id| !cleared.contains(id)), egui::Button::new("Clear finished").small());
+        app.auto.add_response("reel.schedule.clearDay", &b, "Clear this day's finished posts");
+        if b.on_hover_text("Hides this day's published, cancelled and failed posts here (nothing is deleted)").clicked() {
+            clear.extend(done);
+        }
+        if !cleared.is_empty() {
+            let c = ui.checkbox(&mut app.ui.reel.show_cleared, format!("Show cleared ({})", cleared.len()));
+            app.auto.add_response("reel.schedule.showCleared", &c, "Show cleared posts");
+        }
+    });
     if day_posts.is_empty() {
         ui.label(RichText::new("Nothing scheduled this day.").small().color(t.text_dim));
     }
@@ -230,6 +249,21 @@ pub(super) fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, ctx: &Ctx) {
                 ui.label(RichText::new(e).small().color(t.danger));
             }
             ui.horizontal_wrapped(|ui| {
+                if matches!(status.as_str(), "published" | "cancelled" | "failed") {
+                    if cleared.contains(&id) {
+                        let b = ui.small_button("Unclear");
+                        app.auto.add_response(&format!("reel.schedule.unclear.{id}"), &b, "Show this post again");
+                        if b.clicked() {
+                            app.ui.reel.cleared_posts.retain(|c| *c != id);
+                        }
+                    } else {
+                        let b = ui.small_button("Clear").on_hover_text("Hide it here (nothing is deleted)");
+                        app.auto.add_response(&format!("reel.schedule.clear.{id}"), &b, "Clear post");
+                        if b.clicked() {
+                            clear.push(id.clone());
+                        }
+                    }
+                }
                 if let Some(link) = p.get("instagram_permalink").and_then(|v| v.as_str()) {
                     let r = ui.hyperlink_to("Open on Instagram", link);
                     app.auto.add_response(&format!("reel.schedule.open.{id}"), &r, "Open on Instagram");
@@ -261,6 +295,15 @@ pub(super) fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, ctx: &Ctx) {
                 }
             });
         });
+    }
+    for id in clear {
+        if !app.ui.reel.cleared_posts.contains(&id) {
+            app.ui.reel.cleared_posts.push(id);
+        }
+    }
+    // Ids of posts the cloud no longer lists need not be kept.
+    if !posts.is_empty() {
+        app.ui.reel.cleared_posts.retain(|c| posts.iter().any(|p| p.get("id").and_then(|v| v.as_str()) == Some(c.as_str())));
     }
     ui.separator();
 

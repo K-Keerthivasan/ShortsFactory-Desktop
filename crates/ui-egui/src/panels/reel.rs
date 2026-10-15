@@ -95,6 +95,10 @@ pub struct ReelDraft {
     pub calendar_day: Option<String>,
     /// The time a Reel is scheduled at on that day (local `HH:MM`).
     pub schedule_time: String,
+    /// Finished cloud posts cleared from the calendar (ids; hidden here only, nothing is deleted).
+    pub cleared_posts: Vec<String>,
+    /// Show cleared posts again.
+    pub show_cleared: bool,
     /// Plugin Settings fields being edited (never saved in the workspace state).
     #[serde(skip)]
     pub env_drafts: std::collections::BTreeMap<String, String>,
@@ -177,6 +181,9 @@ enum CardPart {
 #[derive(Clone, Debug, PartialEq)]
 enum QueueAction {
     LibraryOnly,
+    PublishNow(Vec<i64>),
+    /// Accounts, UTC ISO time.
+    Schedule(Vec<i64>, String),
     /// Book it in the cloud: the cloud account, UTC ISO time, publish at once.
     Cloud(String, String, bool),
 }
@@ -1466,6 +1473,25 @@ fn queue_sent(r: &mut Runtime, id: u64, render: i64) {
     let Some(ch) = q.info.channel_id else { return };
     match q.action.clone() {
         QueueAction::LibraryOnly => q.status = "In the library".into(),
+        QueueAction::Schedule(accounts, at) => match s.schedule(ch, render, &accounts, &at) {
+            Ok(n) => {
+                q.status = format!("Scheduled on {n} account(s)");
+                notify(r, format!("Scheduled: {}", r.queue.iter().find(|q| q.id == id).map(|q| q.name.clone()).unwrap_or_default()), true);
+            }
+            Err(e) => {
+                q.status = "Failed".into();
+                q.error = Some(e.to_string());
+            }
+        },
+        QueueAction::PublishNow(accounts) => {
+            q.status = "Publishing".into();
+            let name = q.name.clone();
+            for a in accounts {
+                let st = s.clone();
+                let name = name.clone();
+                spawn(r, "Publishing", move || Done::Published(name, filmcraft_studio::publish_now(&st, ch, render, a).map_err(|e| e.to_string()), Some(id)));
+            }
+        }
         QueueAction::Cloud(account, at, now) => {
             q.status = "Publishing".into();
             spawn(r, "Cloud scheduling", move || {
@@ -1484,13 +1510,29 @@ fn queue_sent(r: &mut Runtime, id: u64, render: i64) {
     }
 }
 
-fn queue_view(app: &mut FilmcraftApp, ui: &mut egui::Ui, _ctx: &Ctx) {
+fn queue_view(app: &mut FilmcraftApp, ui: &mut egui::Ui, ctx: &Ctx) {
     let t = app.tokens;
-    ui.label(
-        RichText::new("Reels scheduled from the Schedule tab render here one after another, then go to the library approved and are booked in the cloud.")
-            .small()
-            .color(t.text_dim),
-    );
+    ui.label(RichText::new("Reels in the queue render one after another, go to the library approved, and are then published or scheduled on the accounts chosen in Reel Studio.").small().color(t.text_dim));
+    if let Some(info) = ctx.info.clone() {
+        ui.horizontal_wrapped(|ui| {
+            let accounts = app.ui.reel.accounts.clone();
+            if ui.button("Queue: render + library").clicked() {
+                enqueue(app, &info, QueueAction::LibraryOnly);
+            }
+            if ui.add_enabled(!accounts.is_empty(), egui::Button::new("Queue: render + publish now")).clicked() {
+                enqueue(app, &info, QueueAction::PublishNow(accounts.clone()));
+            }
+            ui.add(egui::TextEdit::singleline(&mut app.ui.reel.schedule_at).desired_width(130.0).hint_text("YYYY-MM-DD HH:MM"));
+            if ui.add_enabled(!accounts.is_empty(), egui::Button::new("Queue: render + schedule")).clicked() {
+                match filmcraft_studio::local_to_utc_iso(&app.ui.reel.schedule_at) {
+                    Some(at) => enqueue(app, &info, QueueAction::Schedule(accounts.clone(), at)),
+                    None => app.ui.status = "Type the time as YYYY-MM-DD HH:MM".into(),
+                }
+            }
+        });
+    } else {
+        ui.label(RichText::new("Open a Reel to add it to the queue.").small().color(t.text_dim));
+    }
     ui.separator();
     ui.label(RichText::new("Render queue").strong());
     let items: Vec<(u64, String, String, Option<String>)> = rt().queue.iter().map(|q| (q.id, q.name.clone(), q.status.clone(), q.error.clone())).collect();
@@ -1533,6 +1575,21 @@ fn queue_view(app: &mut FilmcraftApp, ui: &mut egui::Ui, _ctx: &Ctx) {
         let title = p.get("title").and_then(|v| v.as_str()).unwrap_or("Reel");
         let status = p.get("status").and_then(|v| v.as_str()).unwrap_or_default();
         ui.label(RichText::new(format!("{} · {title} · {status}", local_time(at))).small());
+    }
+    ui.label(RichText::new("Upcoming on this PC").strong());
+    let now = filmcraft_studio::now_iso();
+    match ctx.s.calendar(ctx.channel, &now, "9999-12-31T00:00:00.000Z") {
+        Ok(entries) if entries.iter().all(|e| e.cloud) => {
+            ui.label(RichText::new("No local publications scheduled.").small().color(t.text_dim));
+        }
+        Ok(entries) => {
+            for e in entries.iter().filter(|e| !e.cloud).take(40) {
+                ui.label(RichText::new(format!("{} · {} · {} · {}", local_time(&e.at), e.title, e.platform.to_lowercase(), e.status.to_lowercase())).small());
+            }
+        }
+        Err(e) => {
+            ui.label(RichText::new(e.to_string()).small());
+        }
     }
 }
 
@@ -3083,7 +3140,7 @@ mod tests {
         app.session.execute("reel.new", json!({"channelId": 1, "card": {"title": "Trailer"}})).unwrap();
         app.ui.reel.channel_id = Some(1);
         app.ui.reel.export_tab = ExportTab::Publish;
-        app.ui.reel.publish_tab = PublishTab::Now;
+        app.ui.reel.publish_tab = PublishTab::Calendar;
         let tomorrow = Local::now().date_naive() + Duration::days(1);
         let day = tomorrow.format("%Y-%m-%d").to_string();
         let post_at = schedule::at_local(tomorrow, "09:15").unwrap();
@@ -3100,7 +3157,10 @@ mod tests {
             brand: Some(Brand::default()),
             cloud_loaded: true,
             cloud_accounts: vec![json!({"id": "acc1", "account_name": "jkr_studio_", "token_expires_at": expires})],
-            cloud_posts: vec![json!({"id": "p1", "title": "Earlier trailer", "status": "scheduled", "scheduled_for": post_at, "instagram_account_id": "acc1"})],
+            cloud_posts: vec![
+                json!({"id": "p1", "title": "Earlier trailer", "status": "scheduled", "scheduled_for": post_at, "instagram_account_id": "acc1"}),
+                json!({"id": "p2", "title": "Posted trailer", "status": "published", "scheduled_for": post_at, "instagram_account_id": "acc1"}),
+            ],
             ..Default::default()
         };
         app.ui.reel.calendar_day = Some(day.clone());
@@ -3114,7 +3174,26 @@ mod tests {
         assert!(find(&app, "reel.schedule.cancel.p1").is_some() && find(&app, "reel.schedule.reschedule.p1").is_some(), "the day's post can be cancelled or rescheduled");
         assert_eq!(app.ui.reel.cloud_account.as_deref(), Some("acc1"), "the only account is chosen");
         assert_eq!(find(&app, "reel.schedule.submit").and_then(|e| e.enabled), Some(true), "tomorrow 18:00 can be scheduled");
-        assert!(find(&app, "reel.publish.delivery.local").is_none() && find(&app, "reel.publish.renderNow").is_none(), "no local publishing or Publish now");
+        // A finished post can be cleared from the calendar (hidden here only); a scheduled one cannot.
+        assert!(find(&app, "reel.schedule.clear.p1").is_none());
+        assert!(find(&app, "reel.schedule.clear.p2").is_some());
+        app.ui.reel.cleared_posts.push("p2".into());
+        schedule_frame(&mut app, &ctx);
+        schedule_frame(&mut app, &ctx);
+        assert!(find(&app, "reel.schedule.cancel.p1").is_some() && find(&app, "reel.schedule.clear.p2").is_none(), "the cleared post is hidden");
+        app.ui.reel.show_cleared = true;
+        schedule_frame(&mut app, &ctx);
+        schedule_frame(&mut app, &ctx);
+        assert!(find(&app, "reel.schedule.unclear.p2").is_some(), "Show cleared brings it back");
+        app.ui.reel.show_cleared = false;
+        // The Publish tab keeps local publishing and Publish now.
+        app.ui.reel.publish_tab = PublishTab::Now;
+        schedule_frame(&mut app, &ctx);
+        schedule_frame(&mut app, &ctx);
+        assert!(find(&app, "reel.publish.delivery.local").is_some() && find(&app, "reel.publish.renderNow").is_some(), "local publishing and Publish now are there");
+        app.ui.reel.publish_tab = PublishTab::Calendar;
+        schedule_frame(&mut app, &ctx);
+        schedule_frame(&mut app, &ctx);
         // A day in the past cannot be booked.
         app.ui.reel.calendar_day = Some((Local::now().date_naive() - Duration::days(1)).format("%Y-%m-%d").to_string());
         schedule_frame(&mut app, &ctx);

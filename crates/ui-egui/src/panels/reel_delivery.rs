@@ -212,18 +212,146 @@ pub(super) fn publish_page(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect
     frame(ui, left, "sf-publish-settings", |ui| {
         let Some(ctx) = prelude(app, ui) else { return };
         workspace_line(app, ui, &ctx);
-        // Cloud publishing on a calendar, and the render queue behind it.
-        let mut tab = match app.ui.reel.publish_tab {
-            PublishTab::Queue => PublishTab::Queue,
-            _ => PublishTab::Now,
-        };
-        tab_bar(app, ui, &mut tab, "reel.publish", &[(PublishTab::Now, "schedule", "Schedule"), (PublishTab::Queue, "queue", "Queue")]);
+        let mut tab = app.ui.reel.publish_tab;
+        tab_bar(
+            app,
+            ui,
+            &mut tab,
+            "reel.publish",
+            &[(PublishTab::Now, "now", "Publish"), (PublishTab::Calendar, "schedule", "Schedule"), (PublishTab::Queue, "queue", "Queue")],
+        );
         app.ui.reel.publish_tab = tab;
-        if tab == PublishTab::Queue {
-            queue_view(app, ui, &ctx);
+        match tab {
+            PublishTab::Queue => {
+                queue_view(app, ui, &ctx);
+                activity(app, ui);
+                return;
+            }
+            // Cloud publishing on a calendar.
+            PublishTab::Calendar => {
+                has_reel = ctx.info.is_some();
+                super::schedule::show(app, ui, &ctx);
+                activity(app, ui);
+                return;
+            }
+            PublishTab::Cloud => {
+                app.ui.reel.publish_tab = PublishTab::Now;
+            }
+            PublishTab::Now => {}
+        }
+        let Some(info) = ctx.info else {
+            ui.label("Open a Reel to publish it.");
+            return;
+        };
+        has_reel = true;
+        ui.heading("Publish Reel");
+        ui.horizontal(|ui| {
+            let local = ui.selectable_value(&mut app.ui.reel.use_cloud, false, "Local publishing");
+            app.auto.add_response("reel.publish.delivery.local", &local, "Local publishing");
+            let cloud = ui.add_enabled(filmcraft_studio::cloud::configured(&ctx.s), egui::Button::new("Cloud publishing").selected(app.ui.reel.use_cloud));
+            app.auto.add_response("reel.publish.delivery.cloud", &cloud, "Cloud publishing");
+            if cloud.clicked() {
+                app.ui.reel.use_cloud = true;
+            }
+        });
+        ui.label("Accounts");
+        let accounts = rt().accounts.clone();
+        if app.ui.reel.use_cloud {
+            let mut runtime = rt();
+            if !runtime.cloud_loaded {
+                runtime.cloud_loaded = true;
+                let s = ctx.s.clone();
+                spawn(&mut runtime, "Cloud accounts", move || {
+                    Done::CloudAccounts(
+                        filmcraft_studio::cloud::call(&s, "accounts", serde_json::json!({}))
+                            .map(|v| v.as_array().cloned().unwrap_or_default())
+                            .map_err(|e| e.to_string()),
+                    )
+                });
+            }
+            let cloud_accounts = runtime.cloud_accounts.clone();
+            drop(runtime);
+            for account in cloud_accounts {
+                let id = account.get("id").and_then(|v| v.as_str()).unwrap_or_default();
+                let name = account.get("account_name").and_then(|v| v.as_str()).unwrap_or("Instagram");
+                let b = ui.radio_value(&mut app.ui.reel.cloud_account, Some(id.to_string()), name);
+                app.auto.add_response(&format!("reel.publish.cloudAccount.{id}"), &b, name);
+            }
+            ui.label("Cloud publishing continues when the app is closed. Tokens are managed in Plugin Settings → Cloud. The Schedule tab shows cloud posts on a calendar.");
         } else {
-            has_reel = ctx.info.is_some();
-            super::schedule::show(app, ui, &ctx);
+            for account in accounts {
+                let mut selected = app.ui.reel.accounts.contains(&account.id);
+                let check = ui.add_enabled(account.enabled, egui::Checkbox::new(&mut selected, format!("{} · {}", account.display_name, account.platform)));
+                app.auto.add_response(&format!("reel.publish.account.{}", account.id), &check, &account.display_name);
+                if check.changed() {
+                    app.ui.reel.accounts.retain(|id| *id != account.id);
+                    if selected {
+                        app.ui.reel.accounts.push(account.id);
+                    }
+                }
+                ui.label(RichText::new(account.status.to_lowercase()).small().color(app.tokens.text_dim));
+            }
+        }
+        if rt().accounts.is_empty() {
+            ui.label("Connect an account in Plugin Settings → Accounts & keys.");
+        }
+        section(ui, "Post caption", true, |ui| {
+            ui.label(&info.card.instagram_caption);
+            ui.label(info.card.hashtags.join(" "));
+        });
+        if app.ui.reel.schedule_at.is_empty() {
+            app.ui.reel.schedule_at = filmcraft_studio::local_in(60);
+        }
+        ui.label("Schedule time (local)");
+        let time = ui.add(egui::TextEdit::singleline(&mut app.ui.reel.schedule_at).hint_text("YYYY-MM-DD HH:MM"));
+        app.auto.add_response("reel.publish.time", &time, "Schedule time");
+        ui.separator();
+        let busy = {
+            let runtime = rt();
+            runtime.export.is_some()
+                || runtime.tasks.iter().any(|(label, _)| label == "Publishing")
+                || runtime.queue.iter().any(|item| matches!(item.status.as_str(), "Waiting to render" | "Rendering" | "Publishing" | "Cloud processing"))
+        };
+        let ready = !busy
+            && (if app.ui.reel.use_cloud { app.ui.reel.cloud_account.is_some() } else { !app.ui.reel.accounts.is_empty() })
+            && info.channel_id == ctx.channel
+            && ctx.channel.is_some();
+        ui.horizontal_wrapped(|ui| {
+            let queue = ui.add_enabled(ready, egui::Button::new("Schedule"));
+            app.auto.add_response("reel.publish.scheduleReel", &queue, "Render and schedule Reel");
+            if queue.clicked() {
+                match filmcraft_studio::local_to_utc_iso(&app.ui.reel.schedule_at) {
+                    Some(at) => enqueue(
+                        app,
+                        &info,
+                        if app.ui.reel.use_cloud {
+                            QueueAction::Cloud(app.ui.reel.cloud_account.clone().unwrap_or_default(), at, false)
+                        } else {
+                            QueueAction::Schedule(app.ui.reel.accounts.clone(), at)
+                        },
+                    ),
+                    None => app.ui.status = "Use YYYY-MM-DD HH:MM for the schedule time".into(),
+                }
+            }
+            let publish = ui.add_enabled(ready, egui::Button::new("Publish now").fill(app.tokens.accent));
+            app.auto.add_response("reel.publish.renderNow", &publish, "Render and publish Reel");
+            if publish.clicked() {
+                enqueue(
+                    app,
+                    &info,
+                    if app.ui.reel.use_cloud {
+                        QueueAction::Cloud(app.ui.reel.cloud_account.clone().unwrap_or_default(), filmcraft_studio::now_iso(), true)
+                    } else {
+                        QueueAction::PublishNow(app.ui.reel.accounts.clone())
+                    },
+                );
+            }
+        });
+        ui.label(RichText::new("Renders the current Reel, approves it, then publishes to the selected accounts.").small().color(app.tokens.text_dim));
+        let library = ui.button("Render to library only");
+        app.auto.add_response("reel.publish.libraryOnly", &library, "Render to library without publishing");
+        if library.clicked() {
+            enqueue(app, &info, QueueAction::LibraryOnly);
         }
         activity(app, ui);
     });
