@@ -249,6 +249,11 @@ fn app_creator(launch: Launch, graphics: graphics::GraphicsStart, created: Arc<A
             }
         }
         let mut app = FilmcraftApp::new(session);
+        // Shorts Factory opens on its Reels workspace until another one is chosen (the saved
+        // choice is restored on the first frame).
+        if app.workspaces.current.is_empty() {
+            app.set_workspace("Reels");
+        }
         app.graphics_notice = notice;
         if recover == Some(false) {
             app.dialog = None;

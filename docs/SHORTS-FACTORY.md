@@ -124,7 +124,16 @@ Same `publishing-api` edge function, same `.env` credentials (`CLOUD_SUPABASE_UR
 
 ## 11. Automatic import workflow
 
-Link → download → AI → render → local schedule: **Planned** (after §3).
+Built as the **AI** panel (beside Reel Studio), with approval before anything is published:
+
+| Step | Status |
+|---|---|
+| Paste up to ten video links; yt-dlp downloads each once | Built |
+| The AI (Hermes, Codex or Ollama) reads the video's title, description, chapters and captions and picks one part, several, or decides itself, with a card per part | Built — falls back to the chapters or even parts when no AI answers |
+| Review: tick parts, adjust their times and headlines | Built |
+| One Reel or Post per part from the same file (`reel.new` with `sourceIn`/`sourceOut`), queued to render into the library | Built |
+| Approve, then publish now or schedule, from the same panel | Built |
+| The same workflow for agents over MCP (`studio.download`, `studio.plan`, `reel.new`, `studio.sendToLibrary`, …) | Built — see [MCP.md](MCP.md) |
 
 ## 12. Account health and token notifications
 
@@ -138,7 +147,8 @@ Link → download → AI → render → local schedule: **Planned** (after §3).
 
 | Feature | Status |
 |---|---|
-| AI provider settings | Built — Settings switches Hermes/Ollama while preserving scheduler settings; credentials remain in the existing configuration |
+| AI provider settings | Built — Plugin Settings switches Hermes / Codex / Ollama while preserving scheduler settings; credentials remain in the existing configuration |
+| MCP server for AI agents (Claude Code, Codex, Hermes) | Built — every editing command plus `studio.*`; see [MCP.md](MCP.md) |
 | Logs, media and settings folders | Done — FilmCraft logs; the library's folders open from the panel |
 | Dashboard, system health, feed configuration | Planned |
 

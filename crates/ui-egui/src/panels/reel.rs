@@ -28,6 +28,10 @@ use serde_json::json;
 
 use crate::FilmcraftApp;
 
+#[path = "reel_ai.rs"]
+mod ai;
+pub use ai::{AiDraft, show as show_ai};
+
 /// What the panel is editing (UI state; serde so agents can read it).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -59,6 +63,8 @@ pub struct ReelDraft {
     pub cloud_account: Option<String>,
     /// The card was loaded from this project's Reel info (so a project switch reloads it).
     pub loaded_for: Option<String>,
+    /// The AI panel's links and choices.
+    pub ai: AiDraft,
     /// Make a Reel (9:16) or a Post (4:5).
     pub format: Format,
     pub design_tab: DesignTab,
@@ -193,7 +199,8 @@ enum Done {
     CloudAccounts(Result<Vec<serde_json::Value>, String>),
     CloudPosts(Result<Vec<serde_json::Value>, String>),
     Card(Result<Box<Card>, String>, Box<CardTarget>),
-    Sent(Result<(PostLink, i64), String>, std::sync::Arc<filmcraft_project::Project>),
+    /// The library hand-off finished, for this sequence (a Reel).
+    Sent(Result<(PostLink, i64), String>, u64),
     Message(String),
     Health(filmcraft_studio::settings::HealthReport),
     /// A publication finished: the Reel's name, the link or the error, the queue item.
@@ -231,11 +238,12 @@ struct PendingExport {
     path: std::path::PathBuf,
     approve: bool,
     info: ReelInfo,
-    project: std::sync::Arc<filmcraft_project::Project>,
     footage: Option<(std::path::PathBuf, f64, f64)>,
     duration: f64,
     /// The queue item this render belongs to.
     queue: Option<u64>,
+    /// The Reel (sequence) rendered.
+    sequence: u64,
 }
 
 /// Library data and background work. Not UI state: it is rebuilt from the library on demand.
@@ -273,6 +281,8 @@ struct Runtime {
     pending_start: Option<(String, std::path::PathBuf)>,
     /// The queue item whose render is on its way to the library.
     sent_queue: Option<u64>,
+    /// The AI panel's links, from download to the parts chosen.
+    ai_runs: ai::Runs,
 }
 
 fn rt() -> std::sync::MutexGuard<'static, Runtime> {
@@ -394,9 +404,10 @@ pub fn poll(app: &mut FilmcraftApp, now: f64) {
                 }
             }
             Done::Notice((text, ok)) => notify(&mut r, text, ok),
-            Done::Sent(Ok((link, render)), source) => {
-                if std::sync::Arc::ptr_eq(&source, &app.session.project)
-                    && let Err(e) = app.session.execute("reel.linkPost", json!({"post": link}))
+            Done::Sent(Ok((link, render)), sequence) => {
+                // The post links to the Reel that was rendered, wherever the editor is now.
+                if app.session.project.item(filmcraft_project::ItemId(sequence)).is_some()
+                    && let Err(e) = app.session.execute("reel.linkPost", json!({"post": link, "sequence": sequence}))
                 {
                     log(&mut r, format!("Could not link the post: {e}"));
                 }
@@ -450,7 +461,7 @@ pub fn poll(app: &mut FilmcraftApp, now: f64) {
                 let Some(pending) = r.export.take() else { return };
                 r.sent_queue = pending.queue;
                 let thumb = pending.path.with_extension("png");
-                if std::sync::Arc::ptr_eq(&pending.project, &app.session.project) {
+                if app.session.state.active_sequence.map(|q| q.0) == Some(pending.sequence) {
                     let _ =
                         app.session.execute("file.exportFrame", json!({"path": thumb.to_string_lossy(), "format": "png", "time": filmcraft_reel::secs(1.0).0}));
                 }
@@ -469,7 +480,7 @@ pub fn poll(app: &mut FilmcraftApp, now: f64) {
                                     pending.approve,
                                 )
                                 .map_err(|e| e.to_string()),
-                                pending.project,
+                                pending.sequence,
                             )
                         });
                     }
@@ -893,7 +904,11 @@ pub fn show_create(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
             for m in clips {
                 ui.horizontal(|ui| {
                     let b = ui.small_button(format!("New {}", app.ui.reel.format.label()));
-                    app.auto.add_response(&format!("reel.new.{}", m.id), &b, &m.label);
+                    // Rows scrolled out of view are not clickable, so agents don't see them.
+                    let shown = ui.is_rect_visible(b.rect);
+                    if shown {
+                        app.auto.add_response(&format!("reel.new.{}", m.id), &b, &m.label);
+                    }
                     let dims = match (m.width, m.height) {
                         (Some(w), Some(h)) => format!("{w}×{h}"),
                         _ => String::new(),
@@ -901,7 +916,9 @@ pub fn show_create(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                     let preview = ui
                         .add_sized(vec2(ui.available_width().max(1.0), 22.0), egui::Button::new(&m.label).frame(false).wrap_mode(egui::TextWrapMode::Truncate))
                         .on_hover_text(format!("Preview in the Source monitor · {} · {}", m.duration.map(|d| format!("{d:.1}s")).unwrap_or_default(), dims));
-                    app.auto.add_response(&format!("reel.preview.{}", m.id), &preview, "Preview source");
+                    if shown {
+                        app.auto.add_response(&format!("reel.preview.{}", m.id), &preview, "Preview source");
+                    }
                     if preview.clicked() {
                         let existing = app.session.project.items.values().find_map(|item| match &item.as_media()?.media {
                             filmcraft_project::MediaRef::File { path } if std::path::Path::new(path) == m.path => Some(item.id.0),
@@ -947,39 +964,50 @@ pub fn show_create(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
 // ------------------------------------------------------------------------------------------------
 
 pub fn show_design(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
-    frame(ui, rect, "sf-design", |ui| {
-        let Some(ctx) = prelude(app, ui) else { return };
-        let t = app.tokens;
-        let previous = app.ui.reel.design_tab;
-        let mut tab = previous;
-        tab_bar(
-            app,
-            ui,
-            &mut tab,
-            "reel.design",
-            &[
-                (DesignTab::Templates, "templates", "Layout"),
-                (DesignTab::Card, "card", "Card"),
-                (DesignTab::Ai, "ai", "Use AI"),
-                (DesignTab::Caption, "caption", "Caption & hashtags"),
-            ],
-        );
-        app.ui.reel.design_tab = tab;
-        // Leaving a text tab applies what was typed.
-        if previous != tab
-            && ctx.info.as_ref().is_some_and(|i| i.card != app.ui.reel.card)
-            && let Err(e) = app.session.execute("reel.setCard", card_params(&app.ui.reel.card))
-        {
-            app.ui.status = e.to_string();
-        }
-        if ctx.info.is_none() {
+    // The tabs stay at the top; only the tab's content scrolls.
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink2(vec2(10.0, 8.0))));
+    let ui = &mut child;
+    ui.spacing_mut().item_spacing.y = 6.0;
+    // Layout, card and caption work on the open Reel without the library; only Use AI needs it.
+    let ctx = prelude(app, ui);
+    let info = ctx.as_ref().map_or_else(|| reel_info(app), |c| c.info.clone());
+    let t = app.tokens;
+    let previous = app.ui.reel.design_tab;
+    let mut tab = previous;
+    tab_bar(
+        app,
+        ui,
+        &mut tab,
+        "reel.design",
+        &[
+            (DesignTab::Templates, "templates", "Layout"),
+            (DesignTab::Card, "card", "Card"),
+            (DesignTab::Ai, "ai", "Use AI"),
+            (DesignTab::Caption, "caption", "Caption & hashtags"),
+        ],
+    );
+    app.ui.reel.design_tab = tab;
+    // Leaving a text tab applies what was typed.
+    if previous != tab
+        && info.as_ref().is_some_and(|i| i.card != app.ui.reel.card)
+        && let Err(e) = app.session.execute("reel.setCard", card_params(&app.ui.reel.card))
+    {
+        app.ui.status = e.to_string();
+    }
+    egui::ScrollArea::vertical().id_salt("sf-design").auto_shrink([false, false]).show(ui, |ui| {
+        if info.is_none() {
             ui.label(RichText::new("Open or start a Reel (Create panel) to design it.").small().color(t.text_dim));
         }
-        let is_reel = ctx.info.is_some();
+        let is_reel = info.is_some();
         match tab {
-            DesignTab::Templates => templates(app, ui, ctx.info.as_ref()),
+            DesignTab::Templates => templates(app, ui, info.as_ref()),
             DesignTab::Card => card(app, ui, is_reel, CardPart::Card),
-            DesignTab::Ai => write_card(app, ui, ctx.channel, &ctx.s),
+            DesignTab::Ai => match &ctx {
+                Some(c) => write_card(app, ui, c.channel, &c.s),
+                None => {
+                    ui.label(RichText::new("Writing with AI needs the Shorts Factory library.").small().color(t.text_dim));
+                }
+            },
             DesignTab::Caption => card(app, ui, is_reel, CardPart::Caption),
         }
     });
@@ -1131,10 +1159,21 @@ fn advance_queue(app: &mut FilmcraftApp, r: &mut Runtime) {
     let Some(i) = r.queue.iter().position(|q| q.status == "Waiting to render") else { return };
     let Some(s) = studio(r) else { return };
     let Some(q) = r.queue.get_mut(i) else { return };
-    if !std::sync::Arc::ptr_eq(&q.project, &app.session.project) {
-        q.status = "Failed".into();
-        q.error = Some("The project changed before this Reel rendered; queue it again".into());
-        return;
+    // The Reel renders as it is now (edits made while it waited are kept); one that was deleted
+    // or opened from another project fails.
+    let seq = filmcraft_project::ItemId(q.sequence);
+    // The same item: an id from another project names something else (`created` tells them apart).
+    let same_file = app.session.project.item(seq).map(|i| i.created) == q.project.item(seq).map(|i| i.created);
+    match filmcraft_engine::reel::for_sequence(app.session.project.reel.as_ref(), seq) {
+        Some(info) if same_file && app.session.project.item(seq).is_some() => {
+            q.info = info;
+            q.project = app.session.project.clone();
+        }
+        _ => {
+            q.status = "Failed".into();
+            q.error = Some("This Reel is no longer in the open project; queue it again".into());
+            return;
+        }
     }
     let dir = s.root.join("Editor").join("exports");
     let _ = std::fs::create_dir_all(&dir);
@@ -1151,10 +1190,10 @@ fn advance_queue(app: &mut FilmcraftApp, r: &mut Runtime) {
                     path,
                     approve,
                     info: q.info.clone(),
-                    project: q.project.clone(),
                     footage: q.footage.clone(),
                     duration: q.duration,
                     queue: Some(q.id),
+                    sequence: q.sequence,
                 });
             }
             None => {
@@ -1728,6 +1767,7 @@ fn settings(app: &mut FilmcraftApp, ui: &mut egui::Ui, channel: Option<i64>, s: 
         let mut selected = current.clone();
         let combo = egui::ComboBox::from_id_salt("reel-ai-provider").selected_text(&current).show_ui(ui, |ui| {
             ui.selectable_value(&mut selected, "hermes".into(), "Hermes");
+            ui.selectable_value(&mut selected, "codex".into(), "Codex (this app)");
             ui.selectable_value(&mut selected, "ollama".into(), "Ollama");
         });
         app.auto.add_response("reel.ai.provider", &combo.response, "AI provider (all workspaces)");
@@ -1871,7 +1911,9 @@ fn templates(app: &mut FilmcraftApp, ui: &mut egui::Ui, info: Option<&ReelInfo>)
                         })
                         .inner
                         .on_hover_text(tpl.note);
-                    app.auto.add_response(&format!("reel.template.{}", tpl.id), &b, tpl.name);
+                    if ui.is_rect_visible(b.rect) {
+                        app.auto.add_response(&format!("reel.template.{}", tpl.id), &b, tpl.name);
+                    }
                     if b.clicked()
                         && let Err(e) = app.session.execute("reel.apply", json!({"template": tpl.id}))
                     {
@@ -2022,10 +2064,10 @@ fn deliver(app: &mut FilmcraftApp, ui: &mut egui::Ui, info: Option<&ReelInfo>, c
                         path,
                         approve: app.ui.reel.approve_on_send,
                         info: info.clone(),
-                        project: app.session.project.clone(),
                         footage: footage(app, info),
                         duration: app.session.active_sequence().map_or(0.0, |q| q.duration().seconds()),
                         queue: None,
+                        sequence: app.session.state.active_sequence.map_or(0, |q| q.0),
                     })
                 }
                 None => app.ui.status = "The export did not start".into(),
@@ -2635,11 +2677,12 @@ mod tests {
     }
 
     #[test]
-    fn navigation_stays_visible_while_settings_scroll() {
+    fn design_tabs_stay_visible_while_the_tab_scrolls() {
         let _guard = test_guard();
         let mut app = FilmcraftApp::new(filmcraft_engine::Session::default());
         app.ui.reel.channel_id = Some(1);
-        app.ui.reel.page = ReelPage::Settings;
+        app.ui.reel.design_tab = DesignTab::Templates;
+        app.session.execute("reel.new", json!({"template": "quoteCard"})).unwrap();
         let studio =
             Studio { root: Default::default(), database: ":memory:".into(), storage: Default::default(), secrets: Default::default(), env: Default::default() };
         *rt() = Runtime {
@@ -2666,11 +2709,11 @@ mod tests {
             let mut output = ctx.run_ui(
                 egui::RawInput { screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(420.0, 380.0))), events, ..Default::default() },
                 |ui| {
-                    show(&mut app, ui, ui.available_rect_before_wrap());
+                    show_design(&mut app, ui, ui.available_rect_before_wrap());
                 },
             );
             output.textures_delta.clear();
-            let tab = app.auto.elements.iter().find(|e| e.id == "reel.page.create").unwrap();
+            let tab = app.auto.elements.iter().find(|e| e.id == "reel.design.templates").unwrap();
             if frame == 1 {
                 top = Some(tab.rect);
             }
@@ -2694,7 +2737,7 @@ mod tests {
             app.auto.begin_frame();
             let mut output =
                 ctx.run_ui(egui::RawInput { screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(330.0, 5000.0))), ..Default::default() }, |ui| {
-                    show(&mut app, ui, ui.available_rect_before_wrap());
+                    show_design(&mut app, ui, ui.available_rect_before_wrap());
                 });
             output.textures_delta.clear();
         }

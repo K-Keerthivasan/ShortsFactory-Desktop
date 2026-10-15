@@ -44,10 +44,11 @@ pub enum PanelKind {
     Create,
     Design,
     Downloads,
+    Ai,
 }
 
 impl PanelKind {
-    pub const ALL: [PanelKind; 32] = [
+    pub const ALL: [PanelKind; 33] = [
         PanelKind::Project,
         PanelKind::MediaBrowser,
         PanelKind::Libraries,
@@ -80,6 +81,7 @@ impl PanelKind {
         PanelKind::Create,
         PanelKind::Design,
         PanelKind::Downloads,
+        PanelKind::Ai,
     ];
     pub fn title(self) -> &'static str {
         match self {
@@ -115,6 +117,7 @@ impl PanelKind {
             PanelKind::Create => "Create",
             PanelKind::Design => "Design",
             PanelKind::Downloads => "Downloads",
+            PanelKind::Ai => "AI",
         }
     }
     pub fn id(self) -> String {
@@ -335,7 +338,7 @@ pub fn workspace(name: &str) -> DockNode {
                 FixedB(420.0),
                 hsplit(
                     Ratio(0.44),
-                    vsplit(Ratio(0.62), tabs(&[Create, Project, Downloads, MediaBrowser], 0), tabs(&[ReelStudio], 0)),
+                    vsplit(Ratio(0.62), tabs(&[Create, Project, Downloads, MediaBrowser], 0), tabs(&[ReelStudio, Ai], 0)),
                     tabs(&[Program, Source], 0),
                 ),
                 tabs(&[Design, Properties, EffectControls, EssentialGraphics], 0),

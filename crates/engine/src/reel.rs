@@ -46,7 +46,7 @@ pub fn commands() -> Vec<CommandSpec> {
             "reel.new",
             "New Reel…",
             M,
-            r#"{"name":str?,"format":"reel"|"post"?,"template":str?,"brand":Brand?,"channelId":n?,"card":Card?,"item":itemId? (project footage to build around),"paths":[str]? (a file; reused when already in the project),"seconds":f64? (length without footage)}"#,
+            r#"{"name":str?,"format":"reel"|"post"?,"template":str?,"brand":Brand?,"channelId":n?,"card":Card?,"item":itemId? (project footage to build around),"paths":[str]? (a file; reused when already in the project),"sourceIn":f64?,"sourceOut":f64? (seconds of the footage to use),"seconds":f64? (length without footage)}"#,
             always,
             new_reel,
         ),
@@ -54,7 +54,7 @@ pub fn commands() -> Vec<CommandSpec> {
             "reel.apply",
             "Apply Reel Template",
             M,
-            r#"{"template":str,"brand":Brand?,"card":Card?,"clip":clipId? (the main footage; default: the Reel's main clip, else the selected or lowest video clip at the playhead),"item":itemId? (place this media as the footage),"seconds":f64?}"#,
+            r#"{"template":str,"brand":Brand?,"card":Card?,"clip":clipId? (the main footage; default: the Reel's main clip, else the selected or lowest video clip at the playhead),"item":itemId? (place this media as the footage),"sourceIn":f64?,"sourceOut":f64? (seconds of the item to use),"seconds":f64?}"#,
             has_seq,
             apply,
         ),
@@ -69,12 +69,20 @@ pub fn commands() -> Vec<CommandSpec> {
         spec("reel.setBrand", "Set Reel Brand", M, r#"{"brand":Brand,"channelId":n?,"rebuild":bool?=true}"#, has_reel, set_brand),
         spec("reel.duplicate", "New Version of This Reel", M, r#"{"name":str?}"#, has_reel, duplicate),
         query("reel.usesOf", "Reels Made From", r#"{"item":itemId?,"path":str?}"#, uses_of),
-        spec("reel.linkPost", "Link Reel to Post", &[], r#"{"post":{"channelId":n,"storyId":n,"scriptId":n}|null}"#, has_reel, link_post),
+        spec("reel.linkPost", "Link Reel to Post", &[], r#"{"post":{"channelId":n,"storyId":n,"scriptId":n}|null,"sequence":id? (default: the open Reel)}"#, any_reel, link_post),
     ]
 }
 
 fn has_reel(s: &Session) -> std::result::Result<(), String> {
     if current(s).is_some() { Ok(()) } else { Err("this sequence is not a Reel".into()) }
+}
+
+fn any_reel(s: &Session) -> std::result::Result<(), String> {
+    if s.project.reel.as_ref().and_then(|v| v.get("sequences")).and_then(Value::as_object).is_some_and(|m| !m.is_empty()) || current(s).is_some() {
+        Ok(())
+    } else {
+        Err("the project has no Reel".into())
+    }
 }
 
 fn info(s: &Session) -> ReelInfo {
@@ -129,8 +137,10 @@ fn new_reel(s: &mut Session, p: &Value) -> Result<Value> {
         if let Some(i) = item {
             args["item"] = json!(i);
         }
-        if let Some(c) = p.get("channelId") {
-            args["channelId"] = c.clone();
+        for k in ["channelId", "sourceIn", "sourceOut"] {
+            if let Some(v) = p.get(k) {
+                args[k] = v.clone();
+            }
         }
         let r = apply(s, &args)?;
         Ok(json!({"sequence": seq.get("sequence").cloned().unwrap_or(Value::Null), "reel": r}))
@@ -246,10 +256,14 @@ fn apply(s: &mut Session, p: &Value) -> Result<Value> {
                 .map(|q| (q.video_tracks.get(FOOTAGE).map(|t| t.id), q.audio_tracks.first().map(|t| t.id)))
                 .ok_or(EngineError::NoSequence)?;
             let (_, has_audio) = s.project.source_streams(item);
+            // A part of the source (`sourceIn` / `sourceOut`, seconds): one segment of a long video.
+            let from = f64_p(p, "sourceIn").map(|v| Tick::from_seconds_f64(v.max(0.0))).unwrap_or(Tick::ZERO).min(dur);
+            let to = f64_p(p, "sourceOut").map(|v| Tick::from_seconds_f64(v.max(0.0))).unwrap_or(dur).min(dur);
+            let len = if to > from { to - from } else { dur - from };
             let clips = crate::commands::place_item(
                 s,
                 item,
-                TimeRange::new(Tick::ZERO, rate.snap(dur).max(rate.frame_duration())),
+                TimeRange::new(from, rate.snap(len).max(rate.frame_duration())),
                 Tick::ZERO,
                 vt,
                 at.filter(|_| has_audio),
@@ -513,15 +527,20 @@ fn set_brand(s: &mut Session, p: &Value) -> Result<Value> {
 }
 
 fn link_post(s: &mut Session, p: &Value) -> Result<Value> {
-    let mut reel = info(s);
+    // `sequence`: a Reel other than the open one (a queued render reaching the library).
+    let seq = match item_p(p, "sequence") {
+        Some(q) if s.project.item(q).is_some_and(|i| i.as_sequence().is_some()) => q,
+        Some(_) => return Err(bad("reel.linkPost", "no such sequence")),
+        None => s.state.active_sequence.ok_or(EngineError::NoSequence)?,
+    };
+    let mut reel = for_sequence(s.project.reel.as_ref(), seq).ok_or_else(|| bad("reel.linkPost", "that sequence is not a Reel"))?;
     reel.post = parse(p, "post", "reel.linkPost")?;
     let value = reel.to_value();
-    let seq = s.state.active_sequence.ok_or(EngineError::NoSequence)?;
     s.edit("Link Reel to Post", |pr, _| {
         store(pr, seq, value);
         Ok(())
     })?;
-    Ok(json!({"reel": current(s).map(|r| r.to_value())}))
+    Ok(json!({"reel": for_sequence(s.project.reel.as_ref(), seq).map(|r| r.to_value())}))
 }
 
 /// The Reels (sequences) already built around a project item, or around the file at `path`.

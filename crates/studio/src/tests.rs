@@ -348,3 +348,43 @@ fn timestamps_with_offsets_parse() {
     assert_eq!(clock::parse_iso("2026-12-13T12:00:00-05:00"), Some(z));
     assert!(cloud::token_health(Some("2099-01-01T00:00:00+00:00")).0.ends_with("days left"));
 }
+
+#[test]
+fn the_ai_workflow_keeps_parts_inside_the_video_in_order_and_apart() {
+    use crate::autopilot::{Mode, Segment, Wants, clean};
+    let w = Wants { mode: Mode::Multiple, max_reels: 3, min_seconds: 10.0, max_seconds: 30.0, notes: String::new() };
+    let seg = |a: f64, b: f64| Segment { start: a, end: b, ..Default::default() };
+    let out = clean(vec![seg(50.0, 70.0), seg(0.0, 100.0), seg(60.0, 80.0), seg(f64::NAN, 5.0), seg(90.0, 95.0), seg(110.0, 140.0), seg(130.0, 150.0)], 120.0, &w);
+    let got: Vec<(f64, f64)> = out.iter().map(|s| (s.start, s.end)).collect();
+    // Too long is shortened, overlaps and too-short parts are dropped, the end is the video's.
+    assert_eq!(got, vec![(0.0, 30.0), (50.0, 70.0), (110.0, 120.0)]);
+}
+
+#[test]
+fn without_an_ai_the_workflow_falls_back_to_chapters_or_even_parts() {
+    use crate::autopilot::{Mode, Wants, plan};
+    let s = fixture("autopilot");
+    s.connect().unwrap().execute("INSERT INTO application_settings (key, json) VALUES ('general', '{\"aiProvider\":\"mock\"}')", []).unwrap();
+    let w = Wants { mode: Mode::Multiple, max_reels: 5, min_seconds: 10.0, max_seconds: 30.0, notes: String::new() };
+    let meta = json!({"title": "Trailer", "uploader": "Studio", "chapters": [
+        {"start_time": 0.0, "end_time": 20.0, "title": "Intro"}, {"start_time": 20.0, "end_time": 25.0, "title": "Logo"}, {"start_time": 25.0, "end_time": 50.0, "title": "Reveal"}]});
+    let (parts, why) = plan(&s, 1, &meta, 50.0, &w);
+    assert!(why.is_some(), "the mock provider makes no choice");
+    assert_eq!(parts.iter().map(|p| (p.start, p.end)).collect::<Vec<_>>(), vec![(0.0, 20.0), (25.0, 50.0)]);
+    assert_eq!(parts[1].card.title, "Trailer: Reveal");
+    assert_eq!(parts[1].card.attribution, "Original: Studio");
+    let (parts, _) = plan(&s, 1, &json!({"title": "Long"}), 100.0, &w);
+    assert_eq!(parts.iter().map(|p| (p.start, p.end)).collect::<Vec<_>>(), vec![(0.0, 30.0), (30.0, 60.0), (60.0, 90.0)]);
+    let one = Wants { mode: Mode::Single, ..w };
+    assert_eq!(plan(&s, 1, &json!({"title": "Long"}), 100.0, &one).0.len(), 1);
+}
+
+#[test]
+fn captions_become_timed_lines() {
+    let body = json!({"events": [
+        {"tStartMs": 0, "segs": [{"utf8": "Hello"}, {"utf8": " there"}]},
+        {"tStartMs": 1500, "segs": [{"utf8": "\n"}]},
+        {"tStartMs": 2000, "segs": [{"utf8": "friends"}]},
+        {"tStartMs": 9000, "segs": [{"utf8": "Next   part"}]}]});
+    assert_eq!(crate::autopilot::json3_lines(&body), vec![(0.0, "Hello there friends".to_string()), (9.0, "Next part".to_string())]);
+}

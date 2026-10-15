@@ -147,8 +147,15 @@ impl Studio {
     }
 
     pub fn set_ai_provider(&self, provider: &str) -> Result<()> {
+        // Codex is this app's alone: the shared setting (read by the earlier app) is left as is.
+        let mut own = self.app_settings();
+        own.ai_provider = (provider == "codex").then(|| provider.to_string());
+        self.save_app_settings(&own)?;
+        if provider == "codex" {
+            return Ok(());
+        }
         if !matches!(provider, "hermes" | "ollama") {
-            return err("Choose Hermes or Ollama");
+            return err("Choose Hermes, Codex or Ollama");
         }
         let mut c = self.connect()?;
         let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;

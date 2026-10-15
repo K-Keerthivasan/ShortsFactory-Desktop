@@ -69,17 +69,31 @@ pub fn register() {
         spec(
             "studio.download",
             "Download a Video",
-            r#"{"channel":n,"url":str,"notes":str?,"options":{"quality":"best|1080|720|480","format":str?,"cookiesFrom":str?,"rateLimit":str?,"sectionStart":str?,"sectionEnd":str?}?} (blocks until done: download, checks, library, AI draft)"#,
+            r#"{"channel":n,"url":str,"notes":str?,"noDraft":bool? (skip the one-card draft; for studio.plan),"options":{"quality":"best|1080|720|480","format":str?,"cookiesFrom":str?,"rateLimit":str?,"sectionStart":str?,"sectionEnd":str?}?} (blocks until done: download, checks, library, AI draft)"#,
             true,
             |_, p| {
                 let s = studio()?;
                 let options = p.get("options").cloned().map(serde_json::from_value).transpose().map_err(|e| bad(format!("options: {e}")))?.unwrap_or_default();
-                let job = crate::ytdlp::Import { url: text(p, "url")?.to_string(), notes: p.get("notes").and_then(Value::as_str).unwrap_or("").to_string(), options, ..Default::default() };
+                let job = crate::ytdlp::Import { url: text(p, "url")?.to_string(), notes: p.get("notes").and_then(Value::as_str).unwrap_or("").to_string(), options, no_draft: p.get("noDraft").and_then(Value::as_bool).unwrap_or(false), ..Default::default() };
                 let done = crate::ytdlp::run(&s, int(p, "channel")?, job, &|_| {});
                 if let Some(e) = &done.error {
                     return Err(bad(e.clone()));
                 }
                 to_value(done)
+            },
+        ),
+        spec(
+            "studio.plan",
+            "Choose Reels in a Video with AI",
+            r#"{"channel":n,"url":str,"duration":f64? (of the downloaded file; default the video's),"wants":{"mode":"auto|single|multiple","maxReels":n=3,"minSeconds":15,"maxSeconds":60,"notes":str}?} → segments [{start,end,card,why}] (blocks); then reel.new with sourceIn/sourceOut per segment"#,
+            false,
+            |_, p| {
+                let s = studio()?;
+                let wants: crate::autopilot::Wants = p.get("wants").cloned().map(serde_json::from_value).transpose().map_err(|e| bad(format!("wants: {e}")))?.unwrap_or_default();
+                let meta = crate::ytdlp::analyze(&s, text(p, "url")?, &crate::ytdlp::Options::default()).map_err(err)?;
+                let duration = p.get("duration").and_then(Value::as_f64).or_else(|| meta.get("duration").and_then(Value::as_f64)).unwrap_or(0.0);
+                let (segments, fallback) = crate::autopilot::plan(&s, int(p, "channel")?, &meta, duration, &wants);
+                Ok(json!({"segments": to_value(segments)?, "fallback": fallback, "title": meta.get("title")}))
             },
         ),
         spec(

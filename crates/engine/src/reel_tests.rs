@@ -196,3 +196,13 @@ fn a_post_is_a_4_by_5_sequence_with_the_template_fitted() {
     assert_eq!(crate::reel::current(&s).unwrap().format, "post");
     s.execute("reel.apply", json!({"template": "jkr-cinematic-v2"})).unwrap();
 }
+
+#[test]
+fn a_reel_can_use_one_segment_of_the_source() {
+    let (mut s, r) = reel("framed");
+    let main = s.active_sequence().unwrap().find_item(ClipId(r["mainClip"].as_u64().unwrap())).unwrap().1.item;
+    let v = s.execute("reel.new", json!({"name": "Part 2", "item": main.0, "sourceIn": 1.0, "sourceOut": 3.0})).unwrap();
+    let clip = s.active_sequence().unwrap().find_item(ClipId(v["reel"]["mainClip"].as_u64().unwrap())).unwrap().1.clone();
+    assert!((clip.source_in.seconds() - 1.0).abs() < 0.05, "starts at 1 s of the source, not {}", clip.source_in.seconds());
+    assert!((clip.duration.seconds() - 2.0).abs() < 0.05, "two seconds long, not {}", clip.duration.seconds());
+}

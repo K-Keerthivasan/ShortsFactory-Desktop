@@ -14,7 +14,8 @@ filmcraft-cli exec studio.workspaces
 | `studio.workspaces`, `studio.brand`, `studio.media`, `studio.library`, `studio.accounts` | Read the shared library (account rows name the key file, never its contents) |
 | `studio.health` | The start-up connection check (read-only; never changes account status) |
 | `studio.writeCard` | Writes a card (headline, caption, hashtags) with Hermes / Ollama |
-| `studio.download` | yt-dlp download → checks → library → AI draft (blocks until done) |
+| `studio.download` | yt-dlp download → checks → library → AI draft (blocks until done; `noDraft` skips the draft) |
+| `studio.plan` | The AI reads the video's chapters and captions and picks the parts worth a Reel, with a card each |
 | `reel.new`, `reel.apply`, `reel.setCard`, `reel.duplicate`, `reel.usesOf` | Build and edit Reels and Posts on the timeline |
 | `studio.sendToLibrary` | Renders the active Reel and adds it to its workspace's library |
 | `studio.approve` | Approves a render; nothing unapproved is ever published |
@@ -59,10 +60,14 @@ mcp_servers:
 
 ## A full run, as an agent would do it
 
-1. `studio.download {"channel":1,"url":"https://youtu.be/…"}` → a library asset and its path
-2. `studio.brand {"channel":1}`, then `reel.new {"paths":["…mp4"],"template":"jkr-clean-v2","channelId":1,"brand":<that brand>}`
-   (`"format":"post"` for a 4:5 Post; repeat for several Reels from one source – the file is imported once)
-3. `studio.writeCard` → `reel.setCard` with the result
-4. `studio.sendToLibrary {}` → `{render, post}`
+1. `studio.download {"channel":1,"url":"https://youtu.be/…","noDraft":true}` → the file and its length
+2. `studio.plan {"channel":1,"url":"…","duration":<length>,"wants":{"mode":"auto","maxReels":3}}` → segments
+3. `studio.brand {"channel":1}`, then per segment `reel.new {"paths":["…mp4"],"sourceIn":start,"sourceOut":end,"card":card,"template":"jkr-clean-v2","channelId":1,"brand":<that brand>}`
+   (`"format":"post"` for a 4:5 Post; the file is imported once and every Reel uses it)
+4. `studio.sendToLibrary {}` (with each Reel open: `sequence.open`) → `{render, post}`
 5. You approve in the app (Export ▸ Library), or the agent calls `studio.approve` if you allow it
 6. `studio.publishNow` / `studio.schedule` / `studio.cloudSchedule`
+
+The app's **AI** panel runs this same workflow with buttons: paste links, choose single /
+several / let the AI decide, review the parts it picked, then queue them. Every Reel lands in the
+library unapproved unless you approve it.

@@ -21,6 +21,9 @@ pub struct AppSettings {
     pub queue_auto_approve: bool,
     /// Show the start-up connection check.
     pub startup_check: bool,
+    /// An AI provider only this app has ("codex"), kept here because the earlier app's settings
+    /// accept Hermes, Ollama and mock only. None: the shared library setting.
+    pub ai_provider: Option<String>,
 }
 
 impl Studio {
@@ -32,6 +35,7 @@ impl Studio {
             download_dir: None,
             queue_auto_approve: true,
             startup_check: true,
+            ai_provider: None,
         })
     }
     pub fn save_app_settings(&self, s: &AppSettings) -> Result<()> {
@@ -224,6 +228,8 @@ pub const EDITABLE_ENV: &[&str] = &[
     "OLLAMA_MODEL",
     "HERMES_BIN",
     "HERMES_MODEL_POST",
+    "CODEX_BIN",
+    "CODEX_MODEL",
     "YTDLP_PATH",
     "FFMPEG_PATH",
     "META_GRAPH_VERSION",
@@ -247,13 +253,15 @@ pub fn health_check(studio: &Studio) -> HealthReport {
                 Err(_) => (format!("AI: Ollama is not reachable at {host}"), false),
             }
         }
-        _ => {
-            let bin = studio.var("HERMES_BIN").unwrap_or("hermes");
+        "mock" => ("AI: the mock provider is on (no real AI)".to_string(), true),
+        other => {
+            let (name, var, default) = if other == "codex" { ("Codex", "CODEX_BIN", "codex") } else { ("Hermes", "HERMES_BIN", "hermes") };
+            let bin = studio.var(var).unwrap_or(default);
             let found = Path::new(bin).is_file()
                 || std::env::var_os("PATH").is_some_and(|p| {
                     std::env::split_paths(&p).any(|d| d.join(bin).is_file() || d.join(format!("{bin}.exe")).is_file() || d.join(format!("{bin}.cmd")).is_file())
                 });
-            if found { ("AI: Hermes is installed".to_string(), true) } else { ("AI: Hermes was not found (set HERMES_BIN)".to_string(), false) }
+            if found { (format!("AI: {name} is installed"), true) } else { (format!("AI: {name} was not found (set {var})"), false) }
         }
     };
     out.lines.push(ai);

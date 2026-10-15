@@ -65,6 +65,9 @@ pub struct Import {
     pub card: Option<Card>,
     pub post: Option<filmcraft_reel::PostLink>,
     pub error: Option<String>,
+    /// Stop after the download (the AI workflow writes a card per segment instead of one draft).
+    #[serde(default)]
+    pub no_draft: bool,
 }
 
 /// yt-dlp's executable, if one is installed.
@@ -311,6 +314,10 @@ fn step(studio: &Studio, channel: i64, job: &mut Import, update: &dyn Fn(&Import
         }
         job.file = Some(file);
         job.duration = Some(duration);
+    }
+    if job.no_draft {
+        set(job, "Downloaded");
+        return Ok(());
     }
     if job.card.is_none() {
         set(job, "Writing draft with local AI");
