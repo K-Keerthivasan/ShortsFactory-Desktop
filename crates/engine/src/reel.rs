@@ -62,14 +62,21 @@ pub fn commands() -> Vec<CommandSpec> {
             "reel.setCard",
             "Edit Reel Card",
             M,
-            r#"{"title":str?,"caption":str?,"attribution":str?,"badge":str?,"bullets":[str]?,"cta":str?,"instagramCaption":str?,"hashtags":[str]?}"#,
+            r#"{"title":str?,"caption":str?,"attribution":str?,"badge":str?,"bullets":[str]?,"cta":str?,"instagramCaption":str?,"hashtags":[str]?,"fonts":{fieldId:fontFamily}? (empty family restores template default)}"#,
             has_reel,
             set_card,
         ),
         spec("reel.setBrand", "Set Reel Brand", M, r#"{"brand":Brand,"channelId":n?,"rebuild":bool?=true}"#, has_reel, set_brand),
         spec("reel.duplicate", "New Version of This Reel", M, r#"{"name":str?}"#, has_reel, duplicate),
         query("reel.usesOf", "Reels Made From", r#"{"item":itemId?,"path":str?}"#, uses_of),
-        spec("reel.linkPost", "Link Reel to Post", &[], r#"{"post":{"channelId":n,"storyId":n,"scriptId":n}|null,"sequence":id? (default: the open Reel)}"#, any_reel, link_post),
+        spec(
+            "reel.linkPost",
+            "Link Reel to Post",
+            &[],
+            r#"{"post":{"channelId":n,"storyId":n,"scriptId":n}|null,"sequence":id? (default: the open Reel)}"#,
+            any_reel,
+            link_post,
+        ),
     ]
 }
 
@@ -283,6 +290,18 @@ fn apply(s: &mut Session, p: &Value) -> Result<Value> {
     let result = s.edit("Apply Reel Template", |pr, st| {
         let pr: &mut Project = pr;
         let main_id = main;
+        if let Some(item) = logo_item {
+            let bin = pr
+                .root
+                .children
+                .iter()
+                .find_map(|entry| match entry {
+                    filmcraft_project::BinEntry::Bin(bin) if bin.name == "Brand Assets" => Some(bin.id),
+                    _ => None,
+                })
+                .unwrap_or_else(|| pr.add_bin("Brand Assets", None));
+            pr.move_to_bin(&[item], Some(bin));
+        }
         ensure_tracks(pr, seq_id)?;
         let q = pr.sequence(seq_id).ok_or(EngineError::NoSequence)?;
         let found = main_id.and_then(|c| q.find_item(c).map(|(_, i)| i.clone()));
@@ -438,6 +457,13 @@ fn ensure_tracks(pr: &mut Project, seq: ItemId) -> Result<()> {
 fn set_card(s: &mut Session, p: &Value) -> Result<Value> {
     let mut reel = info(s);
     let mut card = reel.card.clone();
+    let fonts: Option<std::collections::BTreeMap<String, String>> = parse(p, "fonts", "reel.setCard")?;
+    if let Some(fonts) = fonts {
+        if fonts.len() > 16 || fonts.iter().any(|(k, v)| k.len() > 32 || v.len() > 256) {
+            return Err(bad("reel.setCard", "Font choices are too large"));
+        }
+        card.fonts = fonts;
+    }
     let text = |k: &str| str_p(p, k).map(str::to_string);
     if let Some(v) = text("title") {
         card.title = v;
@@ -474,7 +500,10 @@ fn set_card(s: &mut Session, p: &Value) -> Result<Value> {
         ("point4", card.bullets.get(3).cloned().unwrap_or_default()),
     ];
     let cta = if card.cta.trim().is_empty() { reel.brand.cta.clone().unwrap_or_default() } else { card.cta.clone() };
+    let fonts_changed = reel.card.fonts != card.fonts;
     reel.card = card;
+    let font_plan =
+        if fonts_changed { Some(filmcraft_reel::plan(&reel.template, &reel.brand, &reel.card, 15.0).map_err(|e| bad("reel.setCard", e))?) } else { None };
     let value = reel.to_value();
     let seq = s.state.active_sequence.ok_or(EngineError::NoSequence)?;
     s.edit("Edit Reel Card", |pr, _| {
@@ -497,6 +526,15 @@ fn set_card(s: &mut Session, p: &Value) -> Result<Value> {
                         && !cta.trim().is_empty()
                     {
                         k.value = ParamValue::Text(cta.clone());
+                    }
+                }
+                if let Some(plan) = &font_plan {
+                    for control in &link.controls {
+                        let Some(source) = plan.over.iter().find(|e| e.layer.as_ref().is_some_and(|l| l.uid == control.layer)) else { continue };
+                        let Some(font) = source.params.get("font") else { continue };
+                        if let Some(layer) = ti.effects.iter_mut().find(|e| e.layer.as_ref().is_some_and(|l| l.uid == control.layer)) {
+                            layer.params.insert("font".into(), font.clone());
+                        }
                     }
                 }
             }

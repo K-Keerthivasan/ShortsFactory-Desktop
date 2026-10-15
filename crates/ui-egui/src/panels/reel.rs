@@ -30,6 +30,8 @@ use crate::FilmcraftApp;
 
 #[path = "reel_ai.rs"]
 mod ai;
+#[path = "reel_delivery.rs"]
+mod delivery;
 pub use ai::{AiDraft, show as show_ai};
 
 /// What the panel is editing (UI state; serde so agents can read it).
@@ -47,6 +49,8 @@ pub struct ReelDraft {
     pub approve_on_send: bool,
     pub media_filter: String,
     pub library_filter: String,
+    pub library_selected: Option<(i64, i64)>,
+    pub library_preview_time: f64,
     pub page: ReelPage,
     pub workspace_name: String,
     pub workspace_slug: String,
@@ -57,6 +61,7 @@ pub struct ReelDraft {
     /// Video links for yt-dlp, one per line.
     pub links: String,
     pub link_notes: String,
+    pub draft_downloads: bool,
     /// yt-dlp download options.
     pub download: filmcraft_studio::ytdlp::Options,
     /// The cloud Instagram account (Supabase id) schedules go to.
@@ -196,11 +201,12 @@ pub enum ReelPage {
 }
 
 enum Done {
+    Preview(std::path::PathBuf, Result<Box<delivery::Preview>, String>),
     CloudAccounts(Result<Vec<serde_json::Value>, String>),
     CloudPosts(Result<Vec<serde_json::Value>, String>),
     Card(Result<Box<Card>, String>, Box<CardTarget>),
     /// The library hand-off finished, for this sequence (a Reel).
-    Sent(Result<(PostLink, i64), String>, u64),
+    Sent(Result<(PostLink, i64), String>, u64, std::sync::Arc<filmcraft_project::Project>, Option<u64>),
     Message(String),
     Health(filmcraft_studio::settings::HealthReport),
     /// A publication finished: the Reel's name, the link or the error, the queue item.
@@ -244,11 +250,16 @@ struct PendingExport {
     queue: Option<u64>,
     /// The Reel (sequence) rendered.
     sequence: u64,
+    project: std::sync::Arc<filmcraft_project::Project>,
+    /// When the job first read as finished without a result: the exporter sets `finished` a
+    /// moment before it stores the result, so that is waited out before calling it stopped.
+    finished_at: Option<f64>,
 }
 
 /// Library data and background work. Not UI state: it is rebuilt from the library on demand.
 #[derive(Default)]
 struct Runtime {
+    previews: std::collections::HashMap<std::path::PathBuf, Result<Option<std::sync::Arc<delivery::Preview>>, String>>,
     studio: Option<Result<Studio, String>>,
     channels: Vec<Channel>,
     brand: Option<Brand>,
@@ -279,10 +290,22 @@ struct Runtime {
     queue: Vec<QueueItem>,
     /// A workspace clip whose New Reel button was pressed.
     pending_start: Option<(String, std::path::PathBuf)>,
-    /// The queue item whose render is on its way to the library.
-    sent_queue: Option<u64>,
     /// The AI panel's links, from download to the parts chosen.
     ai_runs: ai::Runs,
+}
+
+/// Whether this process may act on the library by itself: the start-up connection check and
+/// running due scheduled posts. Only the Shorts Factory app turns it on ([`enable_background`]),
+/// so tests and other embedders never call Meta or publish from the user's real library.
+static BACKGROUND: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Lets this process run the start-up check and due scheduled posts. Call once from the app.
+pub fn enable_background() {
+    BACKGROUND.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn background() -> bool {
+    BACKGROUND.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 fn rt() -> std::sync::MutexGuard<'static, Runtime> {
@@ -316,8 +339,14 @@ fn spawn(r: &mut Runtime, label: &str, work: impl FnOnce() -> Done + Send + 'sta
 }
 
 fn load_channel(r: &mut Runtime, channel: i64) {
+    if r.loaded_channel != Some(channel) {
+        r.previews.clear();
+    }
     let Some(s) = studio(r) else { return };
     let result = (|| -> filmcraft_studio::Result<()> {
+        if let Ok(folder) = s.workspace_folder(channel) {
+            filmcraft_text::fonts::add_source(&filmcraft_text::fonts::DirectorySource { dirs: vec![folder.join("assets/brand/fonts")] });
+        }
         r.brand = Some(s.brand(channel)?);
         r.media = s.media(channel)?;
         r.articles = s.articles(channel, 60)?;
@@ -334,6 +363,14 @@ fn load_channel(r: &mut Runtime, channel: i64) {
 
 fn reel_info(app: &FilmcraftApp) -> Option<ReelInfo> {
     filmcraft_engine::reel::current(&app.session)
+}
+
+/// An item id alone is not a project identity: a new project reuses the same ids.
+/// Keep accepting edits and undo/redo in the originating session, but fail closed after
+/// opening another project or discarding the originating history snapshot.
+fn project_is_open(app: &FilmcraftApp, source: &std::sync::Arc<filmcraft_project::Project>) -> bool {
+    std::sync::Arc::ptr_eq(source, &app.session.project)
+        || app.session.history.undo.iter().chain(&app.session.history.redo).any(|(_, project)| std::sync::Arc::ptr_eq(source, project))
 }
 
 /// The Reel's main footage: its file, source in point and length (seconds).
@@ -360,6 +397,11 @@ pub fn poll(app: &mut FilmcraftApp, now: f64) {
     });
     for (label, d) in finished {
         match d {
+            Done::Preview(path, result) => {
+                if r.previews.contains_key(&path) {
+                    r.previews.insert(path, result.map(|p| Some(std::sync::Arc::from(p))));
+                }
+            }
             Done::Card(Ok(card), target) => {
                 if !target.matches(app) {
                     log(&mut r, "AI writing finished, but the Reel or its text changed. Run Write again on the current Reel.");
@@ -404,22 +446,31 @@ pub fn poll(app: &mut FilmcraftApp, now: f64) {
                 }
             }
             Done::Notice((text, ok)) => notify(&mut r, text, ok),
-            Done::Sent(Ok((link, render)), sequence) => {
+            Done::Sent(Ok((link, render)), sequence, project, queue) => {
                 // The post links to the Reel that was rendered, wherever the editor is now.
-                if app.session.project.item(filmcraft_project::ItemId(sequence)).is_some()
+                if project_is_open(app, &project)
+                    && app.session.project.item(filmcraft_project::ItemId(sequence)).is_some()
                     && let Err(e) = app.session.execute("reel.linkPost", json!({"post": link, "sequence": sequence}))
                 {
                     log(&mut r, format!("Could not link the post: {e}"));
                 }
                 log(&mut r, format!("Sent to the library as post {} (render {render})", link.story_id));
-                if let Some(id) = r.sent_queue.take() {
+                if let Some(id) = queue {
                     queue_sent(&mut r, id, render);
                 }
                 if let Some(c) = r.loaded_channel {
                     load_channel(&mut r, c);
                 }
             }
-            Done::Sent(Err(e), _) => log(&mut r, format!("{label} failed: {e}")),
+            Done::Sent(Err(e), _, _, queue) => {
+                if let Some(id) = queue
+                    && let Some(q) = r.queue.iter_mut().find(|q| q.id == id)
+                {
+                    q.status = "Failed".into();
+                    q.error = Some(e.clone());
+                }
+                log(&mut r, format!("{label} failed: {e}"));
+            }
             Done::CloudAccounts(Ok(a)) => {
                 r.cloud_accounts = a;
                 r.cloud_error.clear();
@@ -459,9 +510,8 @@ pub fn poll(app: &mut FilmcraftApp, now: f64) {
             }
             Some((true, Some(Ok(_)))) => {
                 let Some(pending) = r.export.take() else { return };
-                r.sent_queue = pending.queue;
                 let thumb = pending.path.with_extension("png");
-                if app.session.state.active_sequence.map(|q| q.0) == Some(pending.sequence) {
+                if project_is_open(app, &pending.project) && app.session.state.active_sequence.map(|q| q.0) == Some(pending.sequence) {
                     let _ =
                         app.session.execute("file.exportFrame", json!({"path": thumb.to_string_lossy(), "format": "png", "time": filmcraft_reel::secs(1.0).0}));
                 }
@@ -481,6 +531,8 @@ pub fn poll(app: &mut FilmcraftApp, now: f64) {
                                 )
                                 .map_err(|e| e.to_string()),
                                 pending.sequence,
+                                pending.project,
+                                pending.queue,
                             )
                         });
                     }
@@ -488,18 +540,24 @@ pub fn poll(app: &mut FilmcraftApp, now: f64) {
                 }
             }
             Some((true, Some(Err(e)))) => {
-                r.export = None;
+                let queue = r.export.take().and_then(|p| p.queue);
+                fail_queued(&mut r, queue, format!("the render failed: {e}"));
                 log(&mut r, format!("Export failed: {e}"));
             }
             Some((true, None)) => {
-                r.export = None;
-                log(&mut r, "The export stopped");
+                // Usually the result is a moment away; only a job that stays resultless stopped.
+                let first = r.export.as_mut().map_or(now, |p| *p.finished_at.get_or_insert(now));
+                if now - first > 10.0 {
+                    let queue = r.export.take().and_then(|p| p.queue);
+                    fail_queued(&mut r, queue, "the render was cancelled or stopped".into());
+                    log(&mut r, "The export was cancelled or stopped without a result");
+                }
             }
             Some((false, _)) => {}
         }
     }
     // Scheduled publications that are due (when the earlier app's worker is not running).
-    if !r.due_running && now - r.last_due_check > 60.0 {
+    if background() && !r.due_running && now - r.last_due_check > 60.0 {
         r.last_due_check = now;
         if let Some(s) = studio(&mut r) {
             r.due_running = true;
@@ -515,7 +573,7 @@ pub fn poll(app: &mut FilmcraftApp, now: f64) {
 }
 
 fn card_params(c: &Card) -> serde_json::Value {
-    json!({"title": c.title, "caption": c.caption, "attribution": c.attribution, "badge": c.badge, "bullets": c.bullets, "cta": c.cta, "instagramCaption": c.instagram_caption, "hashtags": c.hashtags})
+    json!({"fonts": c.fonts, "title": c.title, "caption": c.caption, "attribution": c.attribution, "badge": c.badge, "bullets": c.bullets, "cta": c.cta, "instagramCaption": c.instagram_caption, "hashtags": c.hashtags})
 }
 
 fn section(ui: &mut egui::Ui, title: &str, open: bool, body: impl FnOnce(&mut egui::Ui)) {
@@ -834,6 +892,27 @@ pub fn show_create(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         let Some(ctx) = prelude(app, ui) else { return };
         let t = app.tokens;
         workspace_line(app, ui, &ctx);
+        ui.horizontal_wrapped(|ui| {
+            let b = ui.add_enabled(ctx.channel.is_some(), egui::Button::new("Open folder"));
+            app.auto.add_response("reel.create.folder", &b, "Open workspace folder");
+            if b.clicked()
+                && let Some(channel) = ctx.channel
+            {
+                match ctx.s.workspace_folder(channel) {
+                    Ok(folder) => {
+                        if let Err(e) = super::menu_dialogs::open_path(app, ui.ctx(), &folder.to_string_lossy(), false) {
+                            app.ui.status = e;
+                        }
+                    }
+                    Err(e) => app.ui.status = e.to_string(),
+                }
+            }
+            let b = ui.button("Download videos");
+            app.auto.add_response("reel.create.downloads", &b, "Download videos");
+            if b.clicked() {
+                app.show_panel(crate::PanelKind::Downloads);
+            }
+        });
         ui.horizontal(|ui| {
             ui.label("Make a");
             for f in [Format::Reel, Format::Post] {
@@ -867,6 +946,14 @@ pub fn show_create(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
             }
             for (id, name, secs) in items {
                 ui.horizontal(|ui| {
+                    let preview = ui.small_button("Preview");
+                    app.auto.add_response(&format!("reel.previewItem.{id}"), &preview, "Preview footage");
+                    if preview.clicked() {
+                        match app.session.execute("source.open", json!({"item": id})) {
+                            Ok(_) => app.show_panel(crate::PanelKind::Source),
+                            Err(e) => app.ui.status = e.to_string(),
+                        }
+                    }
                     let b = ui.small_button(format!("New {}", app.ui.reel.format.label()));
                     app.auto.add_response(&format!("reel.newFromItem.{id}"), &b, &name);
                     ui.add(egui::Label::new(RichText::new(format!("{name}  {secs:.1}s")).small()).truncate());
@@ -913,9 +1000,11 @@ pub fn show_create(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                         (Some(w), Some(h)) => format!("{w}×{h}"),
                         _ => String::new(),
                     };
-                    let preview = ui
-                        .add_sized(vec2(ui.available_width().max(1.0), 22.0), egui::Button::new(&m.label).frame(false).wrap_mode(egui::TextWrapMode::Truncate))
-                        .on_hover_text(format!("Preview in the Source monitor · {} · {}", m.duration.map(|d| format!("{d:.1}s")).unwrap_or_default(), dims));
+                    let preview = ui.small_button("Preview").on_hover_text(format!(
+                        "Preview in the Source monitor · {} · {}",
+                        m.duration.map(|d| format!("{d:.1}s")).unwrap_or_default(),
+                        dims
+                    ));
                     if shown {
                         app.auto.add_response(&format!("reel.preview.{}", m.id), &preview, "Preview source");
                     }
@@ -948,7 +1037,34 @@ pub fn show_create(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                     if b.clicked() {
                         r.pending_start = Some((m.label.clone(), m.path.clone()));
                     }
+                    let remove = ui.small_button("Remove").on_hover_text("Remove from Create; keep the source file and existing Reels");
+                    app.auto.add_response(&format!("reel.remove.{}", m.id), &remove, "Remove from Create (keep file)");
+                    if remove.clicked()
+                        && let Some(channel) = ctx.channel
+                    {
+                        match ctx.s.remove_clip(channel, m.id) {
+                            Ok(()) => {
+                                r.media.retain(|row| row.id != m.id);
+                                app.ui.status = "Removed from Create. Source file kept.".into();
+                            }
+                            Err(e) => app.ui.status = e.to_string(),
+                        }
+                    }
                 });
+                ui.add(egui::Label::new(RichText::new(&m.label).small()).truncate());
+            }
+            let restore = ui.small_button("Restore removed clips");
+            app.auto.add_response("reel.media.restore", &restore, "Restore removed clips");
+            if restore.clicked()
+                && let Some(channel) = ctx.channel
+            {
+                match ctx.s.restore_clips(channel) {
+                    Ok(count) => {
+                        r.media = ctx.s.media(channel).unwrap_or_else(|_| r.media.clone());
+                        app.ui.status = format!("Restored {count} clips");
+                    }
+                    Err(e) => app.ui.status = e.to_string(),
+                }
             }
         });
         let pending = r.pending_start.take();
@@ -1079,15 +1195,14 @@ pub fn export_tabs(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) -> Opt
     match tab {
         ExportTab::File => Some(rest),
         ExportTab::Library => {
-            ui.painter().rect_filled(rest, app.tokens.radius, app.tokens.panel_bg);
-            frame(ui, rest, "sf-library", |ui| {
-                let Some(ctx) = prelude(app, ui) else { return };
-                workspace_line(app, ui, &ctx);
-                library(app, ui, ctx.channel, &ctx.s);
-            });
+            delivery::library_page(app, ui, rest);
             None
         }
         ExportTab::Publish => {
+            if app.ui.reel.publish_tab == PublishTab::Now {
+                delivery::publish_page(app, ui, rest);
+                return None;
+            }
             ui.painter().rect_filled(rest, app.tokens.radius, app.tokens.panel_bg);
             frame(ui, rest, "sf-publish", |ui| {
                 let Some(ctx) = prelude(app, ui) else { return };
@@ -1162,8 +1277,7 @@ fn advance_queue(app: &mut FilmcraftApp, r: &mut Runtime) {
     // The Reel renders as it is now (edits made while it waited are kept); one that was deleted
     // or opened from another project fails.
     let seq = filmcraft_project::ItemId(q.sequence);
-    // The same item: an id from another project names something else (`created` tells them apart).
-    let same_file = app.session.project.item(seq).map(|i| i.created) == q.project.item(seq).map(|i| i.created);
+    let same_file = project_is_open(app, &q.project);
     match filmcraft_engine::reel::for_sequence(app.session.project.reel.as_ref(), seq) {
         Some(info) if same_file && app.session.project.item(seq).is_some() => {
             q.info = info;
@@ -1194,6 +1308,8 @@ fn advance_queue(app: &mut FilmcraftApp, r: &mut Runtime) {
                     duration: q.duration,
                     queue: Some(q.id),
                     sequence: q.sequence,
+                    finished_at: None,
+                    project: q.project.clone(),
                 });
             }
             None => {
@@ -1205,6 +1321,16 @@ fn advance_queue(app: &mut FilmcraftApp, r: &mut Runtime) {
             q.status = "Failed".into();
             q.error = Some(e.to_string());
         }
+    }
+}
+
+/// A queued render that did not finish: the item says why, and the queue moves on.
+fn fail_queued(r: &mut Runtime, queue: Option<u64>, why: String) {
+    if let Some(id) = queue
+        && let Some(q) = r.queue.iter_mut().find(|q| q.id == id)
+    {
+        q.status = "Failed".into();
+        q.error = Some(why);
     }
 }
 
@@ -1451,7 +1577,7 @@ pub fn overlays(app: &mut FilmcraftApp, ctx: &egui::Context) {
     // The start-up check, once per run.
     {
         let mut r = rt();
-        if !r.startup_checked {
+        if background() && !r.startup_checked {
             r.startup_checked = true;
             if let Some(s) = studio(&mut r)
                 && s.app_settings().startup_check
@@ -1575,14 +1701,24 @@ fn plugin_settings(app: &mut FilmcraftApp, ctx: &egui::Context) {
     egui::Window::new("Shorts Factory · Plugin Settings").id(egui::Id::new("sf-plugin-settings")).default_size([560.0, 620.0]).open(&mut open).show(
         ctx,
         |ui| {
-            let mut r = rt();
-            let Some(s) = studio(&mut r) else {
-                ui.label("The Shorts Factory library was not found.");
-                return;
-            };
-            let brand = r.brand.clone().unwrap_or_default();
-            let channel = app.ui.reel.channel_id;
-            drop(r);
+            let Some(mut context) = prelude(app, ui) else { return };
+            let channels = rt().channels.clone();
+            let previous_channel = app.ui.reel.channel_id;
+            let name = channels.iter().find(|c| Some(c.id) == previous_channel).map_or("Choose workspace", |c| c.name.as_str());
+            ui.horizontal(|ui| {
+                ui.label("Workspace");
+                let picker = egui::ComboBox::from_id_salt("sf-settings-workspace").selected_text(name).show_ui(ui, |ui| {
+                    for channel in &channels {
+                        ui.selectable_value(&mut app.ui.reel.channel_id, Some(channel.id), &channel.name);
+                    }
+                });
+                app.auto.add_response("reel.settings.workspace", &picker.response, "Settings workspace");
+            });
+            if app.ui.reel.channel_id != previous_channel {
+                let Some(next) = prelude(app, ui) else { return };
+                context = next;
+            }
+            let (s, brand, channel) = (context.s, context.brand, context.channel);
             let mut tab = app.ui.reel.plugin_tab;
             tab_bar(
                 app,
@@ -1619,7 +1755,18 @@ fn plugin_settings(app: &mut FilmcraftApp, ctx: &egui::Context) {
                                     app.ui.status = match s.set_logo(ch, std::path::Path::new(file)) {
                                         Ok(_) => {
                                             load_channel(&mut r, ch);
-                                            "Logo saved. Re-apply a template to use it on the open Reel.".into()
+                                            let brand = r.brand.clone();
+                                            drop(r);
+                                            if reel_info(app).is_some_and(|info| info.channel_id == Some(ch))
+                                                && let Some(brand) = brand
+                                            {
+                                                match app.session.execute("reel.setBrand", json!({"brand": brand, "channelId": ch})) {
+                                                    Ok(_) => "Logo saved in Brand Assets and applied to this Reel.".into(),
+                                                    Err(e) => format!("Logo saved; could not update the open Reel: {e}"),
+                                                }
+                                            } else {
+                                                "Logo saved in this workspace's Brand Assets.".into()
+                                            }
                                         }
                                         Err(e) => e.to_string(),
                                     };
@@ -1732,7 +1879,9 @@ fn accounts_settings(app: &mut FilmcraftApp, ui: &mut egui::Ui, channel: Option<
             ui.label(RichText::new(format!("{} · {}", a.platform, a.display_name)).strong());
             ui.label(RichText::new(format!("Status: {}", a.status.to_lowercase())).small());
             ui.horizontal(|ui| {
-                if ui.button("Test").clicked() {
+                let test = ui.button("Test");
+                app.auto.add_response(&format!("reel.accountTest.{}", a.id), &test, "Test account connection");
+                if test.clicked() {
                     let st = s.clone();
                     let id = a.id;
                     let mut r = rt();
@@ -1744,8 +1893,11 @@ fn accounts_settings(app: &mut FilmcraftApp, ui: &mut egui::Ui, channel: Option<
                     });
                 }
                 let draft = app.ui.reel.token_drafts.entry(a.id).or_default();
-                ui.add(egui::TextEdit::singleline(draft).password(true).hint_text("Paste a new access token").desired_width(240.0));
-                if ui.add_enabled(!draft.trim().is_empty(), egui::Button::new("Save token")).clicked() {
+                let input = ui.add(egui::TextEdit::singleline(draft).password(true).hint_text("Paste a new access token").desired_width(240.0));
+                app.auto.add_response(&format!("reel.accountToken.{}", a.id), &input, "New access token");
+                let save = ui.add_enabled(!draft.trim().is_empty(), egui::Button::new("Save token"));
+                app.auto.add_response(&format!("reel.accountSaveToken.{}", a.id), &save, "Save account token");
+                if save.clicked() {
                     app.ui.status = match s.set_account_token(a.id, draft) {
                         Ok(()) => "Token saved; press Test to check it".into(),
                         Err(e) => e.to_string(),
@@ -1941,6 +2093,75 @@ fn card(app: &mut FilmcraftApp, ui: &mut egui::Ui, is_reel: bool, part: CardPart
     }
     let mut changed = false;
     if part == CardPart::Card {
+        let fonts_panel = egui::CollapsingHeader::new("Fonts").default_open(false).show(ui, |ui| {
+            if !filmcraft_text::fonts::system_scanned() {
+                filmcraft_text::fonts::scan_system();
+            }
+            let families = filmcraft_text::fonts::families();
+            let info = reel_info(app).unwrap_or_default();
+            let controls = filmcraft_reel::plan(&info.template, &info.brand, &app.ui.reel.card, 15.0).map(|p| p.controls).unwrap_or_default();
+            ui.label(RichText::new("Fonts for text in this template. Closing text uses the headline font.").small().color(t.text_dim));
+            for control in controls.iter().filter(|c| c.param == "text") {
+                let (field, label) = (control.id.as_str(), control.name.as_str());
+                let font = app.ui.reel.card.fonts.entry(field.into()).or_default();
+                ui.label(RichText::new(label).small());
+                let combo = egui::ComboBox::from_id_salt(("card-font", field))
+                    .selected_text(if font.is_empty() { "Template default" } else { font.as_str() })
+                    .width(ui.available_width())
+                    .show_ui(ui, |ui| {
+                        let default_font = ui.selectable_value(font, String::new(), "Template default");
+                        app.auto.add_response(&format!("reel.card.font.{field}.default"), &default_font, "Template default");
+                        changed |= default_font.changed();
+                        for (family, _) in &families {
+                            let b = ui.selectable_value(font, family.clone(), family);
+                            app.auto.add_response(&format!("reel.card.font.{field}.{family}"), &b, family);
+                            changed |= b.changed();
+                        }
+                    });
+                app.auto.add_response(&format!("reel.card.font.{field}"), &combo.response, label);
+            }
+            let add = ui.button("Add font…");
+            app.auto.add_response("reel.card.addFont", &add, "Add font to brand assets");
+            if add.clicked()
+                && let Some(channel) = app.ui.reel.channel_id
+            {
+                app.pick_ui(
+                    crate::native_dialogs::FileDialog::OpenFile { filter: "Font".into(), exts: vec!["ttf".into(), "otf".into(), "ttc".into()] },
+                    move |app, paths| {
+                        let Some(path) = paths.first() else { return };
+                        let result = (|| -> Result<(), String> {
+                            let source = std::path::Path::new(path);
+                            if std::fs::metadata(source).map_err(|e| e.to_string())?.len() > 32 * 1024 * 1024 {
+                                return Err("Choose a font smaller than 32 MB".into());
+                            }
+                            let data = std::fs::read(source).map_err(|e| e.to_string())?;
+                            let faces = filmcraft_text::fonts::add_font_data(data);
+                            if faces.is_empty() {
+                                return Err("This file is not a readable font".into());
+                            }
+                            let mut r = rt();
+                            let s = studio(&mut r).ok_or("Library is unavailable")?;
+                            let dir = s.workspace_folder(channel).map_err(|e| e.to_string())?.join("assets/brand/fonts");
+                            std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+                            let name = source.file_name().ok_or("The font has no file name")?;
+                            let target = dir.join(name);
+                            if target.exists() && std::fs::read(&target).map_err(|e| e.to_string())? != std::fs::read(source).map_err(|e| e.to_string())? {
+                                return Err("A different font with this name is already in Brand Assets. Rename the file first.".into());
+                            }
+                            if !target.exists() {
+                                std::fs::copy(source, target).map_err(|e| e.to_string())?;
+                            }
+                            Ok(())
+                        })();
+                        app.ui.status = match result {
+                            Ok(()) => "Font added to Brand Assets. Choose it above.".into(),
+                            Err(e) => e,
+                        };
+                    },
+                );
+            }
+        });
+        app.auto.add_response("reel.card.fonts", &fonts_panel.header_response, "Fonts");
         changed |= line(ui, app, "title", "Headline", true, |c| &mut c.title);
         changed |= line(ui, app, "caption", "Supporting line", false, |c| &mut c.caption);
         changed |= line(ui, app, "attribution", "Credit (Original: @creator)", false, |c| &mut c.attribution);
@@ -2068,6 +2289,8 @@ fn deliver(app: &mut FilmcraftApp, ui: &mut egui::Ui, info: Option<&ReelInfo>, c
                         duration: app.session.active_sequence().map_or(0.0, |q| q.duration().seconds()),
                         queue: None,
                         sequence: app.session.state.active_sequence.map_or(0, |q| q.0),
+                        finished_at: None,
+                        project: app.session.project.clone(),
                     })
                 }
                 None => app.ui.status = "The export did not start".into(),
@@ -2200,7 +2423,9 @@ fn library(app: &mut FilmcraftApp, ui: &mut egui::Ui, channel: Option<i64>, s: &
     if b.clicked()
         && let Some(ch) = channel
     {
-        load_channel(&mut rt(), ch);
+        let mut runtime = rt();
+        runtime.previews.clear();
+        load_channel(&mut runtime, ch);
     }
     let filter = app.ui.reel.library_filter.to_lowercase();
     let r = rt();
@@ -2215,21 +2440,7 @@ fn library(app: &mut FilmcraftApp, ui: &mut egui::Ui, channel: Option<i64>, s: &
         ui.label(RichText::new(if filter.is_empty() { "No posts in this workspace yet." } else { "No posts match your search." }).small().color(t.text_dim));
     }
     for p in posts {
-        ui.group(|ui| {
-            ui.set_width(ui.available_width());
-            ui.label(RichText::new(&p.title).strong());
-            ui.label(
-                RichText::new(format!("{} · {} · {}", p.kind.to_lowercase(), p.status.to_lowercase(), p.created_at.get(..10).unwrap_or("")))
-                    .small()
-                    .color(t.text_dim),
-            );
-            if let Some(ch) = channel {
-                library_actions(app, ui, &p, ch, s);
-            }
-            if !app.ui.reel.show_archived {
-                render_actions(app, ui, &p, channel, s);
-            }
-        });
+        delivery::library_row(app, ui, &p, channel, s);
     }
 }
 
@@ -2327,83 +2538,103 @@ fn library_actions(app: &mut FilmcraftApp, ui: &mut egui::Ui, post: &LibraryPost
 
 fn imports(app: &mut FilmcraftApp, ui: &mut egui::Ui, channel: Option<i64>, s: &Studio) {
     let t = app.tokens;
-    ui.label(
-        RichText::new("Up to ten links, one per line. Each is downloaded with yt-dlp, checked, added to this workspace and drafted by the local AI.")
-            .small()
-            .color(t.text_dim),
-    );
+    ui.label(RichText::new("Up to ten links, one per line. Download to this workspace, then preview before creating a Reel.").small().color(t.text_dim));
     match filmcraft_studio::ytdlp::binary(s) {
         Some(p) => {
             ui.label(
                 RichText::new(format!(
-                    "yt-dlp: {}{}",
-                    p.display(),
-                    if filmcraft_studio::ytdlp::ffmpeg(s).is_some() { " · FFmpeg found (best video + audio)" } else { " · no FFmpeg: single-file MP4 only" }
+                    "yt-dlp ready · {}",
+                    if filmcraft_studio::ytdlp::ffmpeg(s).is_some() { "video + audio merging available" } else { "single-file MP4" }
                 ))
                 .small()
                 .color(t.text_dim),
-            );
+            )
+            .on_hover_text(p.display().to_string());
+            let check = ui.small_button("Check downloader");
+            app.auto.add_response("reel.downloads.check", &check, "Check downloader");
+            if check.clicked() {
+                let st = s.clone();
+                spawn(&mut rt(), "Check downloader", move || {
+                    Done::Message(match filmcraft_studio::ytdlp::version(&st) {
+                        Ok(version) => format!("yt-dlp {version} is ready"),
+                        Err(e) => e.to_string(),
+                    })
+                });
+            }
         }
         None => {
             ui.label(RichText::new("yt-dlp is not installed.").small());
-            if ui
-                .small_button("Install yt-dlp")
-                .on_hover_text("Downloads the latest official yt-dlp.exe from github.com/yt-dlp/yt-dlp into the library's tools folder")
-                .clicked()
-            {
+            let installing = rt().tasks.iter().any(|(label, _)| label == "Installing yt-dlp");
+            let install = ui
+                .add_enabled(!installing, egui::Button::new(if installing { "Installing…" } else { "Install yt-dlp" }))
+                .on_hover_text("Downloads the latest official yt-dlp.exe from github.com/yt-dlp/yt-dlp into the library's tools folder");
+            app.auto.add_response("reel.downloads.install", &install, "Install yt-dlp");
+            if install.clicked() {
                 let st = s.clone();
                 let mut r = rt();
                 spawn(&mut r, "Installing yt-dlp", move || {
                     Done::Message(match filmcraft_studio::ytdlp::install(&st) {
-                        Ok(p) => format!("yt-dlp installed at {}", p.display()),
+                        Ok(p) => match filmcraft_studio::ytdlp::version(&st) {
+                            Ok(version) => format!("yt-dlp {version} ready at {}", p.display()),
+                            Err(e) => format!("yt-dlp was downloaded but could not start: {e}"),
+                        },
                         Err(e) => format!("yt-dlp install failed: {e}"),
                     })
                 });
             }
         }
     }
-    ui.add(egui::TextEdit::multiline(&mut app.ui.reel.links).desired_rows(3).hint_text("https://…").desired_width(f32::INFINITY));
-    ui.add(egui::TextEdit::singleline(&mut app.ui.reel.link_notes).hint_text("Notes for the AI (optional)").desired_width(f32::INFINITY));
-    let o = &mut app.ui.reel.download;
-    ui.horizontal_wrapped(|ui| {
-        ui.label(RichText::new("Quality").small());
-        let shown = match o.quality.as_str() {
-            "1080" => "Up to 1080p",
-            "720" => "Up to 720p",
-            "480" => "Up to 480p",
-            _ => "Best",
-        };
-        egui::ComboBox::from_id_salt("dl-quality").selected_text(shown).show_ui(ui, |ui| {
-            for (v, l) in [("best", "Best"), ("1080", "Up to 1080p"), ("720", "Up to 720p"), ("480", "Up to 480p")] {
-                ui.selectable_value(&mut o.quality, v.to_string(), l);
-            }
+    let links_input = ui.add(egui::TextEdit::multiline(&mut app.ui.reel.links).desired_rows(3).hint_text("https://…").desired_width(f32::INFINITY));
+    app.auto.add_response("reel.downloads.links", &links_input, "Video links");
+    let draft = ui.checkbox(&mut app.ui.reel.draft_downloads, "Write a card with AI after downloading");
+    app.auto.add_response("reel.downloads.draft", &draft, "Draft a card after download");
+    if app.ui.reel.draft_downloads {
+        let notes = ui.add(egui::TextEdit::singleline(&mut app.ui.reel.link_notes).hint_text("Notes for the AI (optional)").desired_width(f32::INFINITY));
+        app.auto.add_response("reel.downloads.notes", &notes, "Notes for AI");
+    }
+    let options = egui::CollapsingHeader::new("Download options").default_open(false).show(ui, |ui| {
+        let o = &mut app.ui.reel.download;
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("Quality").small());
+            let shown = match o.quality.as_str() {
+                "1080" => "Up to 1080p",
+                "720" => "Up to 720p",
+                "480" => "Up to 480p",
+                _ => "Best",
+            };
+            egui::ComboBox::from_id_salt("dl-quality").selected_text(shown).show_ui(ui, |ui| {
+                for (v, l) in [("best", "Best"), ("1080", "Up to 1080p"), ("720", "Up to 720p"), ("480", "Up to 480p")] {
+                    ui.selectable_value(&mut o.quality, v.to_string(), l);
+                }
+            });
+            ui.label(RichText::new("Cookies").small());
+            let shown = if o.cookies_from.is_empty() { "None".to_string() } else { o.cookies_from.clone() };
+            egui::ComboBox::from_id_salt("dl-cookies").selected_text(shown).show_ui(ui, |ui| {
+                for v in ["", "chrome", "edge", "firefox", "brave"] {
+                    ui.selectable_value(&mut o.cookies_from, v.to_string(), if v.is_empty() { "None" } else { v });
+                }
+            });
         });
-        ui.label(RichText::new("Cookies").small());
-        let shown = if o.cookies_from.is_empty() { "None".to_string() } else { o.cookies_from.clone() };
-        egui::ComboBox::from_id_salt("dl-cookies").selected_text(shown).show_ui(ui, |ui| {
-            for v in ["", "chrome", "edge", "firefox", "brave"] {
-                ui.selectable_value(&mut o.cookies_from, v.to_string(), if v.is_empty() { "None" } else { v });
-            }
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("Section").small());
+            ui.add(egui::TextEdit::singleline(&mut o.section_start).hint_text("start").desired_width(70.0));
+            ui.add(egui::TextEdit::singleline(&mut o.section_end).hint_text("end").desired_width(70.0));
+            ui.label(RichText::new("Rate limit").small());
+            ui.add(egui::TextEdit::singleline(&mut o.rate_limit).hint_text("e.g. 5M").desired_width(60.0));
+        });
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Format").small());
+            ui.add(egui::TextEdit::singleline(&mut o.format).hint_text("yt-dlp -f expression (optional)").desired_width(f32::INFINITY));
         });
     });
-    ui.horizontal_wrapped(|ui| {
-        ui.label(RichText::new("Section").small());
-        ui.add(egui::TextEdit::singleline(&mut o.section_start).hint_text("start").desired_width(70.0));
-        ui.add(egui::TextEdit::singleline(&mut o.section_end).hint_text("end").desired_width(70.0));
-        ui.label(RichText::new("Rate limit").small());
-        ui.add(egui::TextEdit::singleline(&mut o.rate_limit).hint_text("e.g. 5M").desired_width(60.0));
-    });
-    ui.horizontal(|ui| {
-        ui.label(RichText::new("Format").small());
-        ui.add(egui::TextEdit::singleline(&mut o.format).hint_text("yt-dlp -f expression (optional)").desired_width(f32::INFINITY));
-    });
+    app.auto.add_response("reel.downloads.options", &options.header_response, "Download options");
     let running = rt().imports_running;
     let links: Vec<String> = app.ui.reel.links.lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_string).collect();
     let b = ui.add_enabled(
-        channel.is_some() && !running && !links.is_empty() && links.len() <= 10,
-        egui::Button::new(if running { "Importing…" } else { "Download and draft" }),
+        channel.is_some() && filmcraft_studio::ytdlp::binary(s).is_some() && !running && !links.is_empty() && links.len() <= 10,
+        egui::Button::new(if running { "Downloading…" } else { "Download" }),
     );
-    app.auto.add_response("reel.import", &b, "Download and draft");
+    app.auto.add_response("reel.import", &b, "Download");
     if links.len() > 10 {
         ui.label(RichText::new("At most ten links per batch.").small().color(t.text_dim));
     }
@@ -2443,9 +2674,11 @@ fn imports(app: &mut FilmcraftApp, ui: &mut egui::Ui, channel: Option<i64>, s: &
             links
                 .iter()
                 .map(|u| filmcraft_studio::ytdlp::Import {
+                    channel_id: Some(ch),
                     url: u.clone(),
                     notes: notes.clone(),
                     options: options.clone(),
+                    no_draft: !app.ui.reel.draft_downloads,
                     stage: "Waiting".into(),
                     ..Default::default()
                 })
@@ -2456,6 +2689,9 @@ fn imports(app: &mut FilmcraftApp, ui: &mut egui::Ui, channel: Option<i64>, s: &
     }
     let list: Vec<filmcraft_studio::ytdlp::Import> = rt().imports.lock().unwrap_or_else(PoisonError::into_inner).clone();
     for (i, job) in list.iter().enumerate() {
+        if job.channel_id != channel {
+            continue;
+        }
         ui.group(|ui| {
             ui.set_width(ui.available_width());
             ui.label(RichText::new(if job.title.is_empty() { job.url.as_str() } else { job.title.as_str() }).strong());
@@ -2464,6 +2700,17 @@ fn imports(app: &mut FilmcraftApp, ui: &mut egui::Ui, channel: Option<i64>, s: &
                 ui.label(RichText::new(e).small().color(egui::Color32::from_rgb(0xff, 0x6b, 0x6b)));
             }
             ui.horizontal(|ui| {
+                if let Some(file) = &job.file {
+                    let preview = ui.small_button("Preview");
+                    app.auto.add_response(&format!("reel.downloads.preview.{i}"), &preview, "Preview download");
+                    if preview.clicked() {
+                        let result = app.session.execute("file.import", json!({"paths": [file.to_string_lossy()]})).and_then(|v| {
+                            let item = v.get("items").and_then(|v| v.as_array()).and_then(|v| v.first()).and_then(|v| v.as_u64()).ok_or_else(|| filmcraft_engine::EngineError::Other("Could not import preview".into()))?;
+                            app.session.execute("source.open", json!({"item": item}))
+                        });
+                        match result { Ok(_) => app.show_panel(crate::PanelKind::Source), Err(e) => app.ui.status = e.to_string() }
+                    }
+                }
                 if job.error.is_some() && !running {
                     if ui.small_button("Retry").clicked()
                         && let Some(ch) = channel
@@ -2653,6 +2900,90 @@ mod tests {
     fn test_guard() -> std::sync::MutexGuard<'static, ()> {
         static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
         GUARD.get_or_init(Default::default).lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    #[test]
+    fn a_library_result_cannot_link_another_project_with_the_same_sequence_id() {
+        let _guard = test_guard();
+        let mut app = FilmcraftApp::new(filmcraft_engine::Session::default());
+        app.session.execute("reel.new", json!({})).unwrap();
+        let sequence = app.session.state.active_sequence.unwrap().0;
+        let source = app.session.project.clone();
+        app.session.execute("reel.setCard", json!({"title": "An edit while rendering"})).unwrap();
+        assert!(project_is_open(&app, &source), "ordinary edits retain the originating project");
+        app.session.undo();
+        assert!(project_is_open(&app, &source), "undo retains the originating project");
+        app.session = filmcraft_engine::Session::default();
+        app.session.execute("reel.new", json!({})).unwrap();
+        assert_eq!(app.session.state.active_sequence.unwrap().0, sequence);
+        assert!(!project_is_open(&app, &source));
+        let (tx, rx) = channel();
+        assert!(tx.send(Done::Sent(Ok((PostLink { channel_id: 1, story_id: 91, script_id: 92 }, 93)), sequence, source, None)).is_ok());
+        *rt() = Runtime { studio: Some(Err("Isolated test library".into())), tasks: vec![("Send to library".into(), rx)], ..Default::default() };
+        poll(&mut app, 0.0);
+        assert!(reel_info(&app).unwrap().post.is_none(), "the unrelated Reel must remain unlinked");
+        *rt() = Runtime::default();
+    }
+
+    #[test]
+    fn ai_review_cannot_make_reels_using_another_workspaces_brand() {
+        let mut app = FilmcraftApp::new(filmcraft_engine::Session::default());
+        let before = app.session.project.clone();
+        let ctx = Ctx {
+            s: Studio {
+                root: Default::default(),
+                database: ":memory:".into(),
+                storage: Default::default(),
+                secrets: Default::default(),
+                env: Default::default(),
+            },
+            info: None,
+            channel: Some(2),
+            brand: Brand::default(),
+        };
+        let run = ai::Run { channel: 1, ..Default::default() };
+        assert_eq!(ai::make_reels(&mut app, &ctx, &run), 0);
+        assert!(std::sync::Arc::ptr_eq(&before, &app.session.project));
+        assert!(app.ui.status.contains("workspace"));
+    }
+
+    #[test]
+    fn opening_account_settings_loads_the_workspace_without_the_reel_studio_panel() {
+        let _guard = test_guard();
+        let root = std::env::temp_dir().join(format!("shorts-settings-first-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let database = root.join("accounts.db");
+        let _ = std::fs::remove_file(&database);
+        let studio = Studio { database, storage: root.clone(), secrets: root.clone(), root: root.clone(), env: Default::default() };
+        studio.connect().unwrap().execute_batch(
+            "CREATE TABLE channels (id INTEGER, slug TEXT, name TEXT, enabled INTEGER);
+             CREATE TABLE channel_settings (channel_id INTEGER, json TEXT);
+             CREATE TABLE media_assets (id INTEGER, label TEXT, asset_type TEXT, file_path TEXT, duration REAL, width INTEGER, height INTEGER, created_at TEXT, channel_id INTEGER, tags TEXT DEFAULT '[]');
+             CREATE TABLE articles (id INTEGER, title TEXT, site_name TEXT, url TEXT, text TEXT, channel_id INTEGER);
+             CREATE TABLE social_accounts (id INTEGER, platform TEXT, display_name TEXT, external_account_id TEXT, enabled INTEGER, status TEXT, credentials_reference TEXT, channel_id INTEGER);
+             INSERT INTO channels VALUES (1, 'qa', 'QA settings workspace', 1);
+             INSERT INTO social_accounts VALUES (7, 'INSTAGRAM', 'QA account', '1784', 1, 'UNVERIFIED', 'qa.json', 1);"
+        ).unwrap();
+        *rt() = Runtime { studio: Some(Ok(studio)), ..Default::default() };
+        let mut app = FilmcraftApp::new(filmcraft_engine::Session::default());
+        app.ui.reel.plugin_open = true;
+        app.ui.reel.plugin_tab = PluginTab::Accounts;
+        let ctx = egui::Context::default();
+        for _ in 0..2 {
+            app.auto.begin_frame();
+            let mut output = ctx
+                .run_ui(egui::RawInput { screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(1000.0, 800.0))), ..Default::default() }, |_ui| {
+                    plugin_settings(&mut app, &ctx)
+                });
+            output.textures_delta.clear();
+        }
+        assert_eq!(app.ui.reel.channel_id, Some(1));
+        assert!(app.auto.find("reel.settings.workspace").is_some());
+        assert!(app.auto.find("reel.accountTest.7").is_some());
+        assert!(app.auto.find("reel.accountToken.7").is_some());
+        assert!(app.auto.find("reel.accountSaveToken.7").is_some());
+        *rt() = Runtime::default();
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

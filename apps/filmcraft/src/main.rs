@@ -254,6 +254,8 @@ fn app_creator(launch: Launch, graphics: graphics::GraphicsStart, created: Arc<A
         if app.workspaces.current.is_empty() {
             app.set_workspace("Reels");
         }
+        // The start-up connection check and due scheduled posts run in the app only.
+        filmcraft_ui_egui::panels::reel::enable_background();
         app.graphics_notice = notice;
         if recover == Some(false) {
             app.dialog = None;

@@ -140,6 +140,25 @@ fn trim_linked_and_ripple_delete() {
 }
 
 #[test]
+fn individual_selection_and_clear_keep_linked_audio_until_explicitly_targeted() {
+    let mut s = demo();
+    let video = s.active_sequence().unwrap().video_tracks[0].items[0].clone();
+    let audio = s.active_sequence().unwrap().audio_tracks.iter().flat_map(|t| &t.items).find(|i| i.link == video.link).unwrap().id;
+    s.execute("timeline.select", json!({"clips": [video.id.0]})).unwrap();
+    assert!(s.state.selection.contains(&audio), "normal selection still includes linked sound");
+    s.execute("timeline.select", json!({"clips": [video.id.0], "linked": false})).unwrap();
+    assert_eq!(s.state.selection, vec![video.id]);
+    s.execute("edit.clear", json!({})).unwrap();
+    assert!(s.active_sequence().unwrap().find_item(video.id).is_none());
+    assert!(s.active_sequence().unwrap().find_item(audio).is_some(), "the individually unselected audio stays");
+    s.undo();
+    assert!(s.active_sequence().unwrap().find_item(video.id).is_some());
+    s.execute("edit.clear", json!({"clips": [video.id.0]})).unwrap();
+    assert!(s.active_sequence().unwrap().find_item(video.id).is_none());
+    assert!(s.active_sequence().unwrap().find_item(audio).is_none(), "explicit command targets retain default linked semantics");
+}
+
+#[test]
 fn slide_moves_linked_audio_with_the_video() {
     let mut s = demo();
     let v = s.active_sequence().unwrap().video_tracks[0].items[1].clone();

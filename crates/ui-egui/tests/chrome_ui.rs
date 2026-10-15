@@ -66,5 +66,3 @@ fn saved_ui_state_without_the_flags_shows_the_chrome() {
     assert!(ui.show_header);
     assert!(ui.show_status_bar);
 }
-
-

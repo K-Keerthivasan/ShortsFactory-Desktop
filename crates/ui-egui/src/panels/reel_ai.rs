@@ -72,7 +72,12 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
 
         // 1. Links and what to make.
         ui.label(RichText::new("1 · Video links").strong());
-        ui.add(egui::TextEdit::multiline(&mut app.ui.reel.ai.links).hint_text("YouTube or other video links, one per line").desired_rows(3).desired_width(f32::INFINITY));
+        ui.add(
+            egui::TextEdit::multiline(&mut app.ui.reel.ai.links)
+                .hint_text("YouTube or other video links, one per line")
+                .desired_rows(3)
+                .desired_width(f32::INFINITY),
+        );
         let w = &mut app.ui.reel.ai.wants;
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new("Make").small());
@@ -114,7 +119,10 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         let links: Vec<String> = app.ui.reel.ai.links.lines().map(str::trim).filter(|l| l.starts_with("http")).map(str::to_string).collect();
         let runs = rt().ai_runs.clone();
         let busy = lock(&runs).iter().any(|r| r.error.is_none() && r.segments.is_empty() && r.stage != "Done");
-        let b = ui.add_enabled(ctx.channel.is_some() && !busy && !links.is_empty() && links.len() <= 10, egui::Button::new(if busy { "Working…" } else { "Find Reels" }));
+        let b = ui.add_enabled(
+            ctx.channel.is_some() && !busy && !links.is_empty() && links.len() <= 10,
+            egui::Button::new(if busy { "Working…" } else { "Find Reels" }),
+        );
         app.auto.add_response("ai.find", &b, "Find Reels");
         if links.len() > 10 {
             ui.label(RichText::new("At most ten links at a time.").small().color(t.text_dim));
@@ -129,7 +137,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         }
 
         // 2 and 3. What the AI chose, to review and make.
-        let list: Vec<Run> = lock(&runs).clone();
+        let list: Vec<Run> = lock(&runs).iter().filter(|run| ctx.channel == Some(run.channel)).cloned().collect();
         if !list.is_empty() {
             ui.separator();
             ui.label(RichText::new("2 · Review the parts, then make the Reels").strong());
@@ -143,9 +151,13 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         ui.label(RichText::new("3 · Approve and publish").strong());
         let n = app.ui.reel.accounts.len();
         ui.label(
-            RichText::new(if n == 0 { "No account chosen to publish to (choose accounts in Reel Studio)".to_string() } else { format!("Publishes to {n} account(s) chosen in Reel Studio") })
-                .small()
-                .color(t.text_dim),
+            RichText::new(if n == 0 {
+                "No account chosen to publish to (choose accounts in Reel Studio)".to_string()
+            } else {
+                format!("Publishes to {n} account(s) chosen in Reel Studio")
+            })
+            .small()
+            .color(t.text_dim),
         );
         let waiting: Vec<_> = rt()
             .library
@@ -197,10 +209,12 @@ fn find(s: &Studio, channel: i64, links: Vec<String>, wants: Wants, options: fil
                 }
             };
             let Some(job) = lock(&runs).iter().find(|x| x.id == id).map(|x| x.import.clone()) else { continue };
-            let update = |j: &Import| set(&|x| {
-                x.import = j.clone();
-                x.stage = if j.stage == "Downloading" { format!("Downloading {:.0}%", j.progress) } else { j.stage.clone() };
-            });
+            let update = |j: &Import| {
+                set(&|x| {
+                    x.import = j.clone();
+                    x.stage = if j.stage == "Downloading" { format!("Downloading {:.0}%", j.progress) } else { j.stage.clone() };
+                })
+            };
             let done = filmcraft_studio::ytdlp::run(&st, channel, job, &update);
             if let Some(e) = done.error.clone() {
                 set(&|x| {
@@ -291,7 +305,11 @@ fn review(app: &mut FilmcraftApp, ui: &mut egui::Ui, ctx: &super::Ctx, runs: &Ru
 }
 
 /// One Reel per ticked part, from the one downloaded file; queued for the library if asked.
-fn make_reels(app: &mut FilmcraftApp, ctx: &super::Ctx, run: &Run) -> usize {
+pub(super) fn make_reels(app: &mut FilmcraftApp, ctx: &super::Ctx, run: &Run) -> usize {
+    if ctx.channel != Some(run.channel) {
+        app.ui.status = "Switch to this video's workspace before making its Reels".into();
+        return 0;
+    }
     let Some(file) = run.import.file.clone() else { return 0 };
     let template = if app.ui.reel.ai.template.is_empty() { ctx.brand.default_layout.clone() } else { app.ui.reel.ai.template.clone() };
     let format = app.ui.reel.ai.format;

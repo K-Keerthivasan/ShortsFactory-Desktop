@@ -103,6 +103,8 @@ impl Brand {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Card {
+    /// Per-field font families; absent entries retain the template's typography.
+    pub fonts: std::collections::BTreeMap<String, String>,
     pub title: String,
     pub caption: String,
     pub attribution: String,
@@ -225,7 +227,15 @@ pub fn secs(s: f64) -> Tick {
 pub fn plan(template: &str, brand: &Brand, card: &Card, seconds: f64) -> Result<ReelPlan, String> {
     let info = find(template).ok_or_else(|| format!("unknown Reel template `{template}`"))?;
     let seconds = if seconds.is_finite() && seconds > 0.0 { seconds.min(86_400.0) } else { 30.0 };
-    Ok((info.build)(&layers::Ctx::new(info.id, brand, card, seconds)))
+    let mut plan = (info.build)(&layers::Ctx::new(info.id, brand, card, seconds));
+    for control in &plan.controls {
+        if let Some(font) = card.fonts.get(&control.id).filter(|f| !f.trim().is_empty()) {
+            for layer in plan.over.iter_mut().chain(plan.under.iter_mut()).filter(|e| e.layer.as_ref().is_some_and(|l| l.uid == control.layer)) {
+                layer.params.insert("font".into(), filmcraft_project::Param::new(filmcraft_project::ParamValue::Text(font.clone())));
+            }
+        }
+    }
+    Ok(plan)
 }
 
 #[cfg(test)]

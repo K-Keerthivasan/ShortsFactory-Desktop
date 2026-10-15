@@ -43,6 +43,25 @@ fn spec(id: &'static str, label: &'static str, params: &'static str, journal: bo
 pub fn register() {
     filmcraft_engine::host::register([
         spec("studio.workspaces", "Workspaces", "{}", false, |_, _| to_value(studio()?.channels().map_err(err)?)),
+        spec("studio.downloaderCheck", "Check Downloader", "{}", false, |_, _| {
+            let s = studio()?;
+            Ok(json!({"version": crate::ytdlp::version(&s).map_err(err)?, "ffmpeg": crate::ytdlp::ffmpeg(&s)}))
+        }),
+        spec("studio.downloaderInstall", "Install Downloader", "{} (downloads official yt-dlp release)", true, |_, _| {
+            let s = studio()?;
+            let path = crate::ytdlp::install(&s).map_err(err)?;
+            Ok(json!({"path": path, "version": crate::ytdlp::version(&s).map_err(err)?}))
+        }),
+        spec("studio.workspaceFolder", "Workspace Folder", r#"{"channel":n}"#, false, |_, p| {
+            to_value(studio()?.workspace_folder(int(p, "channel")?).map_err(err)?)
+        }),
+        spec("studio.removeClip", "Remove Clip from Create", r#"{"channel":n,"asset":n} (keeps file)"#, true, |_, p| {
+            studio()?.remove_clip(int(p, "channel")?, int(p, "asset")?).map_err(err)?;
+            Ok(json!({"removed": true, "fileKept": true}))
+        }),
+        spec("studio.restoreClips", "Restore Removed Clips", r#"{"channel":n}"#, true, |_, p| {
+            to_value(studio()?.restore_clips(int(p, "channel")?).map_err(err)?)
+        }),
         spec("studio.brand", "Workspace Brand", r#"{"channel":n}"#, false, |_, p| to_value(studio()?.brand(int(p, "channel")?).map_err(err)?)),
         spec("studio.media", "Workspace Media", r#"{"channel":n,"filter":str?}"#, false, |_, p| {
             let filter = p.get("filter").and_then(Value::as_str).unwrap_or("").to_lowercase();
@@ -63,7 +82,8 @@ pub fn register() {
         }),
         spec("studio.writeCard", "Write a Card with AI", r#"{"channel":n,"text":str (notes, transcript or article),"source":str?}"#, false, |_, p| {
             let s = studio()?;
-            let card = crate::ai::write_card(&s, int(p, "channel")?, text(p, "text")?, p.get("source").and_then(Value::as_str).unwrap_or("Uploaded video")).map_err(err)?;
+            let card = crate::ai::write_card(&s, int(p, "channel")?, text(p, "text")?, p.get("source").and_then(Value::as_str).unwrap_or("Uploaded video"))
+                .map_err(err)?;
             to_value(card)
         }),
         spec(
@@ -74,7 +94,13 @@ pub fn register() {
             |_, p| {
                 let s = studio()?;
                 let options = p.get("options").cloned().map(serde_json::from_value).transpose().map_err(|e| bad(format!("options: {e}")))?.unwrap_or_default();
-                let job = crate::ytdlp::Import { url: text(p, "url")?.to_string(), notes: p.get("notes").and_then(Value::as_str).unwrap_or("").to_string(), options, no_draft: p.get("noDraft").and_then(Value::as_bool).unwrap_or(false), ..Default::default() };
+                let job = crate::ytdlp::Import {
+                    url: text(p, "url")?.to_string(),
+                    notes: p.get("notes").and_then(Value::as_str).unwrap_or("").to_string(),
+                    options,
+                    no_draft: p.get("noDraft").and_then(Value::as_bool).unwrap_or(false),
+                    ..Default::default()
+                };
                 let done = crate::ytdlp::run(&s, int(p, "channel")?, job, &|_| {});
                 if let Some(e) = &done.error {
                     return Err(bad(e.clone()));
@@ -89,7 +115,8 @@ pub fn register() {
             false,
             |_, p| {
                 let s = studio()?;
-                let wants: crate::autopilot::Wants = p.get("wants").cloned().map(serde_json::from_value).transpose().map_err(|e| bad(format!("wants: {e}")))?.unwrap_or_default();
+                let wants: crate::autopilot::Wants =
+                    p.get("wants").cloned().map(serde_json::from_value).transpose().map_err(|e| bad(format!("wants: {e}")))?.unwrap_or_default();
                 let meta = crate::ytdlp::analyze(&s, text(p, "url")?, &crate::ytdlp::Options::default()).map_err(err)?;
                 let duration = p.get("duration").and_then(Value::as_f64).or_else(|| meta.get("duration").and_then(Value::as_f64)).unwrap_or(0.0);
                 let (segments, fallback) = crate::autopilot::plan(&s, int(p, "channel")?, &meta, duration, &wants);
@@ -123,13 +150,20 @@ pub fn register() {
                 .collect();
             Ok(json!({"results": results}))
         }),
-        spec("studio.schedule", "Schedule on the Local Queue", r#"{"channel":n,"render":n,"accounts":[n],"at":"ISO UTC or local YYYY-MM-DD HH:MM"}"#, true, |_, p| {
-            let s = studio()?;
-            let at = text(p, "at")?;
-            let at = if at.ends_with('Z') || at.contains('+') { at.to_string() } else { crate::local_to_utc_iso(at).ok_or_else(|| bad("unreadable `at`"))? };
-            let n = s.schedule(int(p, "channel")?, int(p, "render")?, &ints(p, "accounts"), &at).map_err(err)?;
-            Ok(json!({"scheduled": n, "at": at}))
-        }),
+        spec(
+            "studio.schedule",
+            "Schedule on the Local Queue",
+            r#"{"channel":n,"render":n,"accounts":[n],"at":"ISO UTC or local YYYY-MM-DD HH:MM"}"#,
+            true,
+            |_, p| {
+                let s = studio()?;
+                let at = text(p, "at")?;
+                let at =
+                    if at.ends_with('Z') || at.contains('+') { at.to_string() } else { crate::local_to_utc_iso(at).ok_or_else(|| bad("unreadable `at`"))? };
+                let n = s.schedule(int(p, "channel")?, int(p, "render")?, &ints(p, "accounts"), &at).map_err(err)?;
+                Ok(json!({"scheduled": n, "at": at}))
+            },
+        ),
         spec(
             "studio.cloudSchedule",
             "Schedule in the Cloud",
@@ -149,18 +183,37 @@ pub fn register() {
                 crate::cloud::schedule(&s, ch, render, text(p, "account")?, &caption, &at, now).map_err(err)
             },
         ),
-        spec("studio.cloud", "Cloud Publishing Call", r#"{"action":"accounts|listSchedules|getSchedule|cancelPost|publishNow|retryPost|reschedulePost|instagramStatus|extendInstagramToken|history", …params}"#, true, |_, p| {
-            let action = text(p, "action")?.to_string();
-            let allowed = ["accounts", "listSchedules", "getSchedule", "cancelPost", "publishNow", "retryPost", "reschedulePost", "instagramStatus", "extendInstagramToken", "history", "reconcile", "deleteDraft"];
-            if !allowed.contains(&action.as_str()) {
-                return Err(bad(format!("`{action}` is not a cloud action")));
-            }
-            let mut body = p.clone();
-            if let Some(o) = body.as_object_mut() {
-                o.remove("action");
-            }
-            crate::cloud::call(&studio()?, &action, body).map_err(err)
-        }),
+        spec(
+            "studio.cloud",
+            "Cloud Publishing Call",
+            r#"{"action":"accounts|listSchedules|getSchedule|cancelPost|publishNow|retryPost|reschedulePost|instagramStatus|extendInstagramToken|history", …params}"#,
+            true,
+            |_, p| {
+                let action = text(p, "action")?.to_string();
+                let allowed = [
+                    "accounts",
+                    "listSchedules",
+                    "getSchedule",
+                    "cancelPost",
+                    "publishNow",
+                    "retryPost",
+                    "reschedulePost",
+                    "instagramStatus",
+                    "extendInstagramToken",
+                    "history",
+                    "reconcile",
+                    "deleteDraft",
+                ];
+                if !allowed.contains(&action.as_str()) {
+                    return Err(bad(format!("`{action}` is not a cloud action")));
+                }
+                let mut body = p.clone();
+                if let Some(o) = body.as_object_mut() {
+                    o.remove("action");
+                }
+                crate::cloud::call(&studio()?, &action, body).map_err(err)
+            },
+        ),
         spec("studio.calendar", "Publishing Calendar", r#"{"channel":n?,"from":"ISO","to":"ISO"}"#, false, |_, p| {
             let channel = p.get("channel").and_then(Value::as_i64);
             to_value(studio()?.calendar(channel, text(p, "from")?, text(p, "to")?).map_err(err)?)
@@ -175,9 +228,21 @@ fn send_to_library(s: &mut Session, p: &Value) -> Result<Value> {
     let dir = st.root.join("Editor").join("exports");
     std::fs::create_dir_all(&dir).map_err(|e| bad(e.to_string()))?;
     let seq = s.state.active_sequence.ok_or(EngineError::NoSequence)?;
-    let name: String = s.project.item(seq).map(|i| i.name.clone()).unwrap_or_else(|| "Reel".into()).chars().map(|c| if c.is_alphanumeric() { c } else { '_' }).take(60).collect();
+    let name: String = s
+        .project
+        .item(seq)
+        .map(|i| i.name.clone())
+        .unwrap_or_else(|| "Reel".into())
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '_' })
+        .take(60)
+        .collect();
     let path = dir.join(format!("{name}-{}.mp4", crate::now_iso().replace([':', '.'], "-")));
-    let preset = p.get("preset").and_then(Value::as_str).unwrap_or(if info.format == "post" { "Match Source – Adaptive High Bitrate" } else { "Social Vertical 1080×1920" });
+    let preset = p.get("preset").and_then(Value::as_str).unwrap_or(if info.format == "post" {
+        "Match Source – Adaptive High Bitrate"
+    } else {
+        "Social Vertical 1080×1920"
+    });
     s.execute("export.quick", json!({"preset": preset, "path": path.to_string_lossy(), "range": "entire", "wait": true}))?;
     let thumb = path.with_extension("png");
     let _ = s.execute("file.exportFrame", json!({"path": thumb.to_string_lossy(), "format": "png", "time": filmcraft_reel::secs(1.0).0}));

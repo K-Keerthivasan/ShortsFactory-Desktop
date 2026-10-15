@@ -80,6 +80,28 @@ pub struct Account {
 const SETTINGS_DEFAULT_PLATFORMS: &[&str] = &[];
 
 impl Studio {
+    /// The selected workspace's own folder, never the entire library.
+    pub fn workspace_folder(&self, channel: i64) -> Result<PathBuf> {
+        let ch = self.channel(&self.connect()?, channel)?;
+        if ch.slug.is_empty() || !ch.slug.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
+            return err("Workspace has an invalid folder slug");
+        }
+        Ok(self.storage.join("channels").join(ch.slug))
+    }
+
+    /// Remove a clip from Create without deleting files or breaking existing Reels.
+    /// Retaining the row also prevents a folder scan from importing it again.
+    pub fn remove_clip(&self, channel: i64, asset: i64) -> Result<()> {
+        let c = self.connect()?;
+        if c.execute("UPDATE media_assets SET tags = json_insert(CASE WHEN json_valid(tags) THEN tags ELSE '[]' END, '$[#]', 'shorts-hidden-from-create') WHERE id = ?1 AND channel_id = ?2 AND asset_type = 'VIDEO'", params![asset, channel])? != 1 {
+            return err("Choose a video owned by this workspace");
+        }
+        Ok(())
+    }
+
+    pub fn restore_clips(&self, channel: i64) -> Result<usize> {
+        Ok(self.connect()?.execute("UPDATE media_assets SET tags = (SELECT json_group_array(value) FROM json_each(media_assets.tags) WHERE value != 'shorts-hidden-from-create') WHERE channel_id = ?1 AND json_valid(tags) AND EXISTS (SELECT 1 FROM json_each(media_assets.tags) WHERE value = 'shorts-hidden-from-create')", [channel])?)
+    }
     pub fn rename_post(&self, channel: i64, story: i64, name: &str) -> Result<()> {
         let name = name.trim();
         if name.is_empty() || name.chars().count() > 180 {
@@ -396,7 +418,7 @@ impl Studio {
         let c = self.connect()?;
         let mut q = c.prepare(
             "SELECT id, COALESCE(label, ''), asset_type, file_path, duration, width, height, created_at FROM media_assets
-             WHERE channel_id = ?1 OR channel_id IS NULL ORDER BY id DESC",
+             WHERE (channel_id = ?1 OR channel_id IS NULL) AND NOT EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(tags) THEN tags ELSE '[]' END) WHERE value = 'shorts-hidden-from-create') ORDER BY id DESC",
         )?;
         let rows = q.query_map([channel], |r| {
             Ok((
@@ -487,15 +509,19 @@ impl Studio {
         .ok_or_else(|| StudioError::Other("publishing account not found".into()))
     }
 
-    /// Reads an account's secret file. Only a publisher calls this; the values are never logged.
-    pub(crate) fn secret(&self, reference: &str) -> Result<Value> {
+    pub(crate) fn credential_path(&self, reference: &str) -> Result<std::path::PathBuf> {
         let ok = !reference.is_empty()
             && reference.ends_with(".json")
             && reference.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'.');
         if !ok || reference.contains("..") {
             return err("invalid credential reference");
         }
-        let text = std::fs::read_to_string(self.secrets.join(reference))
+        Ok(self.secrets.join(reference))
+    }
+
+    /// Reads an account's secret file. Only a publisher calls this; the values are never logged.
+    pub(crate) fn secret(&self, reference: &str) -> Result<Value> {
+        let text = std::fs::read_to_string(self.credential_path(reference)?)
             .map_err(|_| StudioError::Other("account credentials missing; connect the account first".into()))?;
         serde_json::from_str(&text).map_err(|_| StudioError::Other("account credentials are unreadable".into()))
     }

@@ -4,6 +4,47 @@ use crate::Session;
 use filmcraft_project::{ClipId, ParamValue, TrackItem};
 use filmcraft_reel::TEMPLATES;
 
+#[test]
+fn applying_a_workspace_logo_puts_it_in_brand_assets_without_duplicates() {
+    let (mut s, _) = reel("quoteCard");
+    let dir = std::env::temp_dir().join(format!("reel-logo-bin-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let logo = dir.join("logo.png");
+    s.execute("file.exportFrame", json!({"path": logo.to_string_lossy(), "format": "png", "time": 0})).unwrap();
+    let mut brand = crate::reel::current(&s).unwrap().brand;
+    brand.logo_path = Some(logo.to_string_lossy().into_owned());
+    for _ in 0..2 {
+        s.execute("reel.setBrand", json!({"brand": brand})).unwrap();
+    }
+    let bins: Vec<_> = s
+        .project
+        .root
+        .children
+        .iter()
+        .filter_map(|e| match e {
+            filmcraft_project::BinEntry::Bin(b) if b.name == "Brand Assets" => Some(b),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(bins.len(), 1);
+    assert_eq!(bins[0].children.len(), 1);
+}
+
+#[test]
+fn changing_card_fonts_keeps_clips_and_is_undoable() {
+    let (mut s, _) = reel("quoteCard");
+    let original = track_items(&s, 3)[0].clone();
+    s.execute("reel.setCard", json!({"fonts": {"title": "Georgia"}})).unwrap();
+    let overlay = track_items(&s, 3)[0].clone();
+    assert_eq!(overlay.id, original.id, "changing fonts does not rebuild the timeline");
+    let control = overlay.graphic.as_ref().unwrap().template.as_ref().unwrap().controls.iter().find(|c| c.id == "title").unwrap();
+    let title = overlay.effects.iter().find(|e| e.layer.as_ref().is_some_and(|l| l.uid == control.layer)).unwrap();
+    assert_eq!(title.params["font"].value, ParamValue::Text("Georgia".into()));
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(track_items(&s, 3)[0], original);
+    assert!(s.execute("reel.setCard", json!({"fonts": {"title": "x".repeat(257)}})).is_err());
+}
+
 /// A fresh Reel built around procedural demo footage (no media files needed).
 fn reel(template: &str) -> (Session, Value) {
     let mut s = Session::default();

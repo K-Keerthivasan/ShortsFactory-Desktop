@@ -98,9 +98,12 @@ impl Studio {
             return err("Paste the whole access token");
         }
         let (_, a) = self.account(account)?;
-        let mut secret = self.secret(&a.credentials_reference).unwrap_or_else(|_| json!({}));
+        let file = self.credential_path(&a.credentials_reference)?;
+        let mut secret = if file.exists() { self.secret(&a.credentials_reference)? } else { json!({}) };
+        if !secret.is_object() {
+            return err("Account credentials must be a JSON object; the existing file was kept");
+        }
         secret["accessToken"] = json!(token);
-        let file = self.secrets.join(&a.credentials_reference);
         let tmp = file.with_extension("json.tmp");
         std::fs::write(&tmp, secret.to_string())?;
         std::fs::rename(tmp, file)?;

@@ -64,7 +64,9 @@ pub fn write_card(studio: &Studio, channel: i64, text: &str, source: &str) -> Re
     let input = json!({"channelName": name, "articleText": text, "title": title, "source": source, "business": business});
     let reply = match ask(studio, &instruction, &input, &card_schema())? {
         Some(r) => r,
-        None => json!({"title": title.chars().take(160).collect::<String>(), "caption": "", "attribution": "", "instagramCaption": title, "hashtags": [], "topic": ""}),
+        None => {
+            json!({"title": title.chars().take(160).collect::<String>(), "caption": "", "attribution": "", "instagramCaption": title, "hashtags": [], "topic": ""})
+        }
     };
     card_from(&reply)
 }
@@ -100,9 +102,11 @@ fn codex(studio: &Studio, instruction: &str, input: &Value, schema: &Value) -> R
         "INPUT:",
         &input.to_string(),
     ]
-    .join("
+    .join(
+        "
 
-");
+",
+    );
     let home = std::env::temp_dir().join(format!("reel-studio-codex-{}-{}", std::process::id(), crate::clock::now_ms()));
     std::fs::create_dir_all(&home)?;
     let last = home.join("last.txt");
@@ -111,12 +115,19 @@ fn codex(studio: &Studio, instruction: &str, input: &Value, schema: &Value) -> R
     if let Some(m) = studio.var("CODEX_MODEL") {
         c.args(["-m", m]);
     }
-    let out = c.arg("-").current_dir(&home).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().and_then(|mut child| {
-        if let Some(mut i) = child.stdin.take() {
-            std::io::Write::write_all(&mut i, prompt.as_bytes())?;
-        }
-        child.wait_with_output()
-    });
+    let out = c
+        .arg("-")
+        .current_dir(&home)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            if let Some(mut i) = child.stdin.take() {
+                std::io::Write::write_all(&mut i, prompt.as_bytes())?;
+            }
+            child.wait_with_output()
+        });
     let text = std::fs::read_to_string(&last).unwrap_or_default();
     let _ = std::fs::remove_dir_all(&home);
     let out = out.map_err(|e| {

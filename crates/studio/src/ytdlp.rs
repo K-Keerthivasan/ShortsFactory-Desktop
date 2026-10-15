@@ -52,6 +52,7 @@ impl Default for Options {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Import {
+    pub channel_id: Option<i64>,
     pub url: String,
     pub notes: String,
     pub options: Options,
@@ -123,9 +124,27 @@ pub fn install(studio: &Studio) -> Result<PathBuf> {
     Ok(target)
 }
 
+/// Run the installed tool, rather than treating the presence of a file as a successful setup.
+pub fn version(studio: &Studio) -> Result<String> {
+    let out = base(studio, &Options::default())?.arg("--version").stdin(Stdio::null()).output()?;
+    if !out.status.success() {
+        return err("yt-dlp did not start. Install it again from Downloads.");
+    }
+    let version = String::from_utf8_lossy(&out.stdout).trim().chars().take(100).collect::<String>();
+    if version.is_empty() {
+        return err("yt-dlp returned no version");
+    }
+    Ok(version)
+}
+
 fn base(studio: &Studio, o: &Options) -> Result<Command> {
     let bin = binary(studio).ok_or_else(|| StudioError::Other("yt-dlp is not installed. Use \"Install yt-dlp\" in the panel, or set YTDLP_PATH.".into()))?;
     let mut c = Command::new(bin);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        c.creation_flags(0x08000000);
+    }
     c.args(["--no-playlist", "--no-warnings", "--no-color"]);
     if !o.cookies_from.trim().is_empty() {
         let b = o.cookies_from.trim().to_ascii_lowercase();
@@ -176,6 +195,7 @@ pub fn format_for(o: &Options, can_merge: bool) -> String {
 /// Runs (or resumes) one import. `update` sees every stage; the import is returned whatever
 /// happened, with `error` set if it stopped.
 pub fn run(studio: &Studio, channel: i64, mut job: Import, update: &dyn Fn(&Import)) -> Import {
+    job.channel_id = Some(channel);
     job.error = None;
     if let Err(e) = step(studio, channel, &mut job, update) {
         job.error = Some(e.to_string());

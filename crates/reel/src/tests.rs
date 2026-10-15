@@ -1,6 +1,21 @@
 use super::*;
 use filmcraft_project::graphic::{SHAPE_LAYER, TEXT_LAYER};
 
+#[test]
+fn field_fonts_override_every_template_and_survive_serialization() {
+    let mut card = full_card();
+    card.fonts.insert("title".into(), "Georgia".into());
+    card.fonts.insert("caption".into(), "Consolas".into());
+    let card: Card = serde_json::from_value(serde_json::to_value(card).unwrap()).unwrap();
+    for template in TEMPLATES {
+        let p = plan(template.id, &Brand::default(), &card, 15.0).unwrap();
+        for c in p.controls.iter().filter(|c| card.fonts.contains_key(&c.id)) {
+            let layer = p.over.iter().find(|e| e.layer.as_ref().is_some_and(|l| l.uid == c.layer)).unwrap();
+            assert_eq!(layer.params["font"].value, filmcraft_project::ParamValue::Text(card.fonts[&c.id].clone()), "{} {}", template.id, c.id);
+        }
+    }
+}
+
 fn full_card() -> Card {
     Card {
         title: "A clip worth watching twice".into(),

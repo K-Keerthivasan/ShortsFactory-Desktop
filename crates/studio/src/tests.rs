@@ -2,6 +2,26 @@ use super::*;
 use filmcraft_reel::{Card, ReelInfo};
 use serde_json::json;
 
+#[test]
+fn removing_workspace_clips_keeps_files_and_references_and_can_be_restored() {
+    let s = fixture("remove-clips");
+    let file = s.media(1).unwrap().into_iter().find(|m| m.id == 2).unwrap().path;
+    assert!(s.remove_clip(2, 2).is_err(), "another workspace cannot remove this clip");
+    assert!(s.remove_clip(1, 1).is_err(), "logos cannot be removed as footage");
+    s.remove_clip(1, 2).unwrap();
+    assert!(file.is_file());
+    assert!(!s.media(1).unwrap().iter().any(|m| m.id == 2));
+    let c = s.connect().unwrap();
+    assert_eq!(c.query_row("SELECT asset_type FROM media_assets WHERE id = 2", [], |r| r.get::<_, String>(0)).unwrap(), "VIDEO");
+    assert_eq!(s.scan_media(1).unwrap().0, 0, "refresh does not re-import removed clips");
+    assert_eq!(s.restore_clips(1).unwrap(), 1);
+    assert!(s.media(1).unwrap().iter().any(|m| m.id == 2));
+    assert_eq!(s.restore_clips(1).unwrap(), 0);
+    assert!(s.workspace_folder(1).unwrap().ends_with("channels/jkr"));
+    c.execute("UPDATE channels SET slug = '../escape' WHERE id = 1", []).unwrap();
+    assert!(s.workspace_folder(1).is_err());
+}
+
 /// The tables Reel Studio touches, as the earlier app's migrations create them.
 const SCHEMA: &str = "
 CREATE TABLE channels (id integer PRIMARY KEY AUTOINCREMENT, created_at text NOT NULL DEFAULT '', updated_at text NOT NULL DEFAULT '', slug text NOT NULL UNIQUE, name text NOT NULL, description text NOT NULL DEFAULT '', enabled integer NOT NULL DEFAULT 1);
@@ -354,7 +374,8 @@ fn the_ai_workflow_keeps_parts_inside_the_video_in_order_and_apart() {
     use crate::autopilot::{Mode, Segment, Wants, clean};
     let w = Wants { mode: Mode::Multiple, max_reels: 3, min_seconds: 10.0, max_seconds: 30.0, notes: String::new() };
     let seg = |a: f64, b: f64| Segment { start: a, end: b, ..Default::default() };
-    let out = clean(vec![seg(50.0, 70.0), seg(0.0, 100.0), seg(60.0, 80.0), seg(f64::NAN, 5.0), seg(90.0, 95.0), seg(110.0, 140.0), seg(130.0, 150.0)], 120.0, &w);
+    let out =
+        clean(vec![seg(50.0, 70.0), seg(0.0, 100.0), seg(60.0, 80.0), seg(f64::NAN, 5.0), seg(90.0, 95.0), seg(110.0, 140.0), seg(130.0, 150.0)], 120.0, &w);
     let got: Vec<(f64, f64)> = out.iter().map(|s| (s.start, s.end)).collect();
     // Too long is shortened, overlaps and too-short parts are dropped, the end is the video's.
     assert_eq!(got, vec![(0.0, 30.0), (50.0, 70.0), (110.0, 120.0)]);
@@ -387,4 +408,31 @@ fn captions_become_timed_lines() {
         {"tStartMs": 2000, "segs": [{"utf8": "friends"}]},
         {"tStartMs": 9000, "segs": [{"utf8": "Next   part"}]}]});
     assert_eq!(crate::autopilot::json3_lines(&body), vec![(0.0, "Hello there friends".to_string()), (9.0, "Next part".to_string())]);
+}
+
+#[test]
+fn replacing_an_account_token_preserves_other_fields_and_validates_the_destination() {
+    let s = fixture("replace-token");
+    let file = s.secrets.join("instagram-jkr.json");
+    std::fs::write(&file, r#"{"accessToken":"old","accountId":"1784","other":"keep"}"#).unwrap();
+    let token = "temporary-regression-test-token";
+    s.set_account_token(1, token).unwrap();
+    let saved = s.secret("instagram-jkr.json").unwrap();
+    assert_eq!(saved["accessToken"], token);
+    assert_eq!(saved["other"], "keep");
+    assert_eq!(saved["accountId"], "1784");
+    assert_eq!(s.account(1).unwrap().1.status, "UNVERIFIED");
+    assert!(s.set_account_token(1, "partial").is_err());
+    for contents in ["[]", "null", "broken json"] {
+        std::fs::write(&file, contents).unwrap();
+        let result = std::panic::catch_unwind(|| s.set_account_token(1, token));
+        assert!(result.is_ok(), "malformed credentials must not panic");
+        assert!(result.unwrap().is_err());
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), contents);
+    }
+    let outside = s.root.join("outside.json");
+    std::fs::write(&outside, "keep").unwrap();
+    s.connect().unwrap().execute("UPDATE social_accounts SET credentials_reference = '../outside.json' WHERE id = 1", []).unwrap();
+    assert!(s.set_account_token(1, token).is_err());
+    assert_eq!(std::fs::read_to_string(outside).unwrap(), "keep");
 }
