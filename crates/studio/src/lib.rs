@@ -17,7 +17,9 @@ pub mod cloud;
 pub mod commands;
 pub mod data;
 pub mod instagram;
+mod instagram_cloud;
 pub mod meta_token;
+pub mod notifications;
 pub mod settings;
 pub mod youtube;
 pub mod ytdlp;
@@ -158,7 +160,19 @@ fn run_job(studio: &Studio, job: i64, channel: i64, render: i64, account: i64) -
                     .get("accessToken")
                     .and_then(serde_json::Value::as_str)
                     .ok_or_else(|| instagram::PublishError::Retry("missing Meta token; reconnect the account".into()))?;
-                instagram::publish(studio, job, channel, &a.external_id, token, &file, &caption)
+                let cloud_pending = studio.remote_state(job)?.get("cloudKey").is_some();
+                if cloud_pending || (cloud::configured(studio) && instagram::can_replace_upload(studio, job, &a.external_id, token)?) {
+                    return instagram_cloud::publish(studio, job, channel, render, &a.external_id, &caption);
+                }
+                let result = instagram::publish(studio, job, channel, &a.external_id, token, &file, &caption);
+                if matches!(result, Err(instagram::PublishError::Retry(_)))
+                    && cloud::configured(studio)
+                    && instagram::can_replace_upload(studio, job, &a.external_id, token).unwrap_or(false)
+                {
+                    instagram_cloud::publish(studio, job, channel, render, &a.external_id, &caption)
+                } else {
+                    result
+                }
             }
             "YOUTUBE" => {
                 let script = studio

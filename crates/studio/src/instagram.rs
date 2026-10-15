@@ -23,6 +23,17 @@ impl From<StudioError> for PublishError {
 }
 pub type Published = std::result::Result<(String, Option<String>), PublishError>;
 
+/// Declare the binary media type and exact remaining length for both fresh and resumed uploads.
+fn upload_request(agent: &ureq::Agent, url: &str, token: &str, size: u64, offset: u64, remaining: usize) -> ureq::Request {
+    agent
+        .post(url)
+        .set("Authorization", &format!("OAuth {token}"))
+        .set("Content-Type", "application/octet-stream")
+        .set("Content-Length", &remaining.to_string())
+        .set("offset", &offset.to_string())
+        .set("file_size", &size.to_string())
+}
+
 fn graph(studio: &Studio) -> Result<String> {
     let v = studio.var("META_GRAPH_VERSION").unwrap_or("v26.0");
     let ok = v.strip_prefix('v').is_some_and(|r| r.split('.').count() == 2 && r.split('.').all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit())));
@@ -75,21 +86,18 @@ impl Meta {
         }
         let data = std::fs::read(file).map_err(|e| PublishError::Retry(format!("cannot read the video: {e}")))?;
         let size = data.len() as u64;
-        if offset >= size {
+        if size == 0 || offset > size {
+            return Err(PublishError::Retry("the video is empty or the upload offset is beyond its end".into()));
+        }
+        if offset == size {
             return Ok(());
         }
         let body = data.get(offset as usize..).unwrap_or_default();
-        let r = self
-            .agent
-            .post(url)
-            .set("Authorization", &format!("OAuth {}", self.token))
-            .set("offset", &offset.to_string())
-            .set("file_size", &size.to_string())
-            .send_bytes(body);
+        let r = upload_request(&self.agent, url, &self.token, size, offset, body.len()).send_bytes(body);
         let (code, text) = match r {
             Ok(r) => (r.status(), r.into_string().unwrap_or_default()),
             Err(ureq::Error::Status(c, r)) => (c, r.into_string().unwrap_or_default()),
-            Err(e) => return Err(PublishError::Retry(format!("Meta upload connection failed: {e}"))),
+            Err(_) => return Err(PublishError::Retry("Meta upload connection failed; no automatic second upload was attempted".into())),
         };
         let v: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
         if !(200..300).contains(&code) || v.get("success") != Some(&Value::Bool(true)) {
@@ -100,13 +108,39 @@ impl Meta {
     }
 }
 
+/// Only an explicitly failed, empty upload is safe to replace with another transport.
+fn empty_failed_upload(status: &Value) -> bool {
+    status.get("status_code").and_then(Value::as_str) != Some("PUBLISHED")
+        && status.pointer("/video_status/uploading_phase/status").and_then(Value::as_str).is_some_and(|s| s.eq_ignore_ascii_case("error"))
+        && status.pointer("/video_status/uploading_phase/bytes_transferred").and_then(Value::as_u64) == Some(0)
+        && status
+            .pointer("/video_status/uploading_phase/errors")
+            .and_then(Value::as_array)
+            .is_some_and(|errors| errors.iter().any(|e| e.get("code").and_then(Value::as_u64) == Some(1363008)))
+}
+
+pub(crate) fn can_replace_upload(studio: &Studio, job: i64, account: &str, token: &str) -> std::result::Result<bool, PublishError> {
+    let state = studio.remote_state(job)?;
+    if state.get("phase").and_then(Value::as_str) != Some("UPLOADING") || state.get("publishedId").is_some() {
+        return Ok(false);
+    }
+    let Some(remote) = state.get("remoteId").and_then(Value::as_str) else { return Ok(false) };
+    let meta = Meta {
+        version: graph(studio)?,
+        account: account.into(),
+        token: token.into(),
+        agent: ureq::AgentBuilder::new().timeout(Duration::from_secs(30)).redirects(0).build(),
+    };
+    Ok(empty_failed_upload(&meta.status(remote)?))
+}
+
 /// Publishes `file` as a Reel on the Instagram account, resuming from `job`'s checkpoints.
 pub fn publish(studio: &Studio, job: i64, channel: i64, account_id: &str, token: &str, file: &Path, caption: &str) -> Published {
     let meta = Meta {
         version: graph(studio)?,
         account: account_id.to_string(),
         token: token.to_string(),
-        agent: ureq::AgentBuilder::new().timeout_connect(Duration::from_secs(30)).timeout(Duration::from_secs(600)).build(),
+        agent: ureq::AgentBuilder::new().timeout_connect(Duration::from_secs(30)).timeout(Duration::from_secs(600)).redirects(0).build(),
     };
     let mut state = studio.remote_state(job)?;
     let phase = |s: &Value| s.get("phase").and_then(Value::as_str).unwrap_or_default().to_string();
@@ -196,4 +230,70 @@ pub fn publish(studio: &Studio, job: i64, channel: i64, account_id: &str, token:
     checkpoint(&state)?;
     let link = meta.request(&id, &[("fields", "permalink")], false).ok().and_then(|v| v.get("permalink").and_then(Value::as_str).map(str::to_string));
     Ok((id, link))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    #[test]
+    fn cloud_replacement_requires_explicit_empty_failed_upload() {
+        let failed =
+            json!({"status_code":"IN_PROGRESS","video_status":{"uploading_phase":{"status":"error","bytes_transferred":0,"errors":[{"code":1363008}]}}});
+        assert!(empty_failed_upload(&failed));
+        for status in [json!({}), json!({"status_code":"PUBLISHED"}), json!({"video_status":{"uploading_phase":{"status":"error"}}})] {
+            assert!(!empty_failed_upload(&status));
+        }
+        for (pointer, value) in [
+            ("/status_code", json!("PUBLISHED")),
+            ("/video_status/uploading_phase/bytes_transferred", json!(1)),
+            ("/video_status/uploading_phase/status", json!("in_progress")),
+        ] {
+            let mut other = failed.clone();
+            *other.pointer_mut(pointer).unwrap() = value;
+            assert!(!empty_failed_upload(&other));
+        }
+    }
+
+    #[test]
+    fn binary_upload_wire_format_has_exact_body_type_length_and_resume_headers() {
+        let bytes = b"\0raw-video\xff&not=form%20data\r\n";
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/upload", listener.local_addr().unwrap());
+        let worker = std::thread::spawn(move || {
+            for offset in [0usize, 7] {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                let mut headers = Vec::new();
+                while !headers.ends_with(b"\r\n\r\n") && headers.len() < 8192 {
+                    let mut byte = [0u8];
+                    stream.read_exact(&mut byte).unwrap();
+                    headers.push(byte[0]);
+                }
+                let text = String::from_utf8(headers).unwrap().to_ascii_lowercase();
+                assert!(text.starts_with("post /upload http/1.1\r\n"));
+                assert!(text.contains("content-type: application/octet-stream\r\n"));
+                assert!(text.contains(&format!("content-length: {}\r\n", bytes.len() - offset)));
+                assert!(text.contains(&format!("file_size: {}\r\n", bytes.len())));
+                assert!(text.contains(&format!("offset: {offset}\r\n")));
+                assert!(text.contains("authorization: oauth test-only\r\n"));
+                assert!(!text.contains("transfer-encoding:") && !text.contains("file_url:"));
+                let mut body = vec![0u8; bytes.len() - offset];
+                stream.read_exact(&mut body).unwrap();
+                assert_eq!(&body, &bytes[offset..]);
+                let reply = br#"{"success":true}"#;
+                write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", reply.len()).unwrap();
+                stream.write_all(reply).unwrap();
+            }
+        });
+        let agent = ureq::AgentBuilder::new().timeout(Duration::from_secs(5)).redirects(0).build();
+        for offset in [0usize, 7] {
+            let response =
+                upload_request(&agent, &url, "test-only", bytes.len() as u64, offset as u64, bytes.len() - offset).send_bytes(&bytes[offset..]).unwrap();
+            assert_eq!(response.into_json::<Value>().unwrap()["success"], true);
+        }
+        worker.join().unwrap();
+    }
 }

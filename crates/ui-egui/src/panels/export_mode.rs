@@ -228,7 +228,7 @@ fn queue_column(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                     let (label, col) = match status {
                         "ready" => (tl!("Ready").to_string(), t.text_dim),
                         "encoding" => {
-                            (tlf!("Encoding {n}%", n = format!("{:.0}", it["progress"].as_f64().unwrap_or(0.0) * 100.0)) + &super::eta_suffix(it), t.accent)
+                            (tlf!("Encoding {n}%", n = format!("{:.0}", it["progress"].as_f64().unwrap_or(0.0) * 100.0)) + &super::timing_suffix(it), t.accent)
                         }
                         "done" => (tl!("Done").to_string(), t.render_green),
                         "failed" => (tlf!("Failed: {e}", e = it["error"].as_str().unwrap_or("")), t.danger),
@@ -1151,7 +1151,11 @@ fn preview_column(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, seq_id:
     reg.add("export.button", go, "Export");
     reg.flush(app);
     if resp.clicked() {
-        let r = app.session.execute("file.exportMedia", export_params(app));
+        let params = export_params(app);
+        if !super::reel::guard_render(app, "file.exportMedia", &params) {
+            return;
+        }
+        let r = app.session.execute("file.exportMedia", params);
         match r {
             Ok(v) => app.ui.status = tlf!("Exporting {path}", path = v["path"].as_str().unwrap_or("")),
             Err(e) => app.ui.status = e.to_string(),
@@ -1162,6 +1166,9 @@ fn preview_column(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, seq_id:
         if app.ui.export.preset != CUSTOM {
             // the queue shows which preset an item came from
             p["preset"] = json!(app.ui.export.preset);
+        }
+        if !super::reel::guard_render(app, "export.queue.add", &p) {
+            return;
         }
         match app.session.execute("export.queue.add", p) {
             Ok(_) => app.ui.status = tl!("Added to the export queue").into(),
@@ -1481,6 +1488,10 @@ pub fn quick_export(app: &mut FilmcraftApp, ctx: &egui::Context, anchor: egui::P
     }
     if go {
         let p = json!({"preset": app.ui.export.quick_preset, "path": app.ui.export.quick_path});
+        if !super::reel::guard_render(app, "export.quick", &p) {
+            app.ui.export.quick_open = false;
+            return;
+        }
         match app.session.execute("export.quick", p) {
             Ok(v) => app.ui.status = tlf!("Quick Export: {path}", path = v["path"].as_str().unwrap_or("")),
             Err(e) => app.ui.status = e.to_string(),

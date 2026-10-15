@@ -212,75 +212,18 @@ pub(super) fn publish_page(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect
     frame(ui, left, "sf-publish-settings", |ui| {
         let Some(ctx) = prelude(app, ui) else { return };
         workspace_line(app, ui, &ctx);
-        let mut tab = app.ui.reel.publish_tab;
-        tab_bar(
-            app,
-            ui,
-            &mut tab,
-            "reel.publish",
-            &[
-                (PublishTab::Now, "now", "Publish"),
-                (PublishTab::Queue, "queue", "Queue"),
-                (PublishTab::Calendar, "calendar", "Calendar"),
-                (PublishTab::Cloud, "cloud", "Cloud"),
-            ],
-        );
-        app.ui.reel.publish_tab = tab;
-        let Some(info) = ctx.info else {
-            ui.label("Open a Reel to publish it.");
-            return;
+        // Cloud publishing on a calendar, and the render queue behind it.
+        let mut tab = match app.ui.reel.publish_tab {
+            PublishTab::Queue => PublishTab::Queue,
+            _ => PublishTab::Now,
         };
-        has_reel = true;
-        ui.heading("Publish Reel");
-        ui.label("Accounts");
-        let accounts = rt().accounts.clone();
-        for account in accounts {
-            let mut selected = app.ui.reel.accounts.contains(&account.id);
-            let check = ui.add_enabled(account.enabled, egui::Checkbox::new(&mut selected, format!("{} · {}", account.display_name, account.platform)));
-            app.auto.add_response(&format!("reel.publish.account.{}", account.id), &check, &account.display_name);
-            if check.changed() {
-                app.ui.reel.accounts.retain(|id| *id != account.id);
-                if selected {
-                    app.ui.reel.accounts.push(account.id);
-                }
-            }
-            ui.label(RichText::new(account.status.to_lowercase()).small().color(app.tokens.text_dim));
-        }
-        if rt().accounts.is_empty() {
-            ui.label("Connect an account in Plugin Settings → Accounts & keys.");
-        }
-        section(ui, "Post caption", true, |ui| {
-            ui.label(&info.card.instagram_caption);
-            ui.label(info.card.hashtags.join(" "));
-        });
-        if app.ui.reel.schedule_at.is_empty() {
-            app.ui.reel.schedule_at = filmcraft_studio::local_in(60);
-        }
-        ui.label("Schedule time (local)");
-        let time = ui.add(egui::TextEdit::singleline(&mut app.ui.reel.schedule_at).hint_text("YYYY-MM-DD HH:MM"));
-        app.auto.add_response("reel.publish.time", &time, "Schedule time");
-        ui.separator();
-        let ready = !app.ui.reel.accounts.is_empty() && info.channel_id == ctx.channel && ctx.channel.is_some();
-        ui.horizontal_wrapped(|ui| {
-            let queue = ui.add_enabled(ready, egui::Button::new("Schedule"));
-            app.auto.add_response("reel.publish.scheduleReel", &queue, "Render and schedule Reel");
-            if queue.clicked() {
-                match filmcraft_studio::local_to_utc_iso(&app.ui.reel.schedule_at) {
-                    Some(at) => enqueue(app, &info, QueueAction::Schedule(app.ui.reel.accounts.clone(), at)),
-                    None => app.ui.status = "Use YYYY-MM-DD HH:MM for the schedule time".into(),
-                }
-            }
-            let publish = ui.add_enabled(ready, egui::Button::new("Publish now").fill(app.tokens.accent));
-            app.auto.add_response("reel.publish.renderNow", &publish, "Render and publish Reel");
-            if publish.clicked() {
-                enqueue(app, &info, QueueAction::PublishNow(app.ui.reel.accounts.clone()));
-            }
-        });
-        ui.label(RichText::new("Renders the current Reel, approves it, then publishes to the selected accounts.").small().color(app.tokens.text_dim));
-        let library = ui.button("Render to library only");
-        app.auto.add_response("reel.publish.libraryOnly", &library, "Render to library without publishing");
-        if library.clicked() {
-            enqueue(app, &info, QueueAction::LibraryOnly);
+        tab_bar(app, ui, &mut tab, "reel.publish", &[(PublishTab::Now, "schedule", "Schedule"), (PublishTab::Queue, "queue", "Queue")]);
+        app.ui.reel.publish_tab = tab;
+        if tab == PublishTab::Queue {
+            queue_view(app, ui, &ctx);
+        } else {
+            has_reel = ctx.info.is_some();
+            super::schedule::show(app, ui, &ctx);
         }
         activity(app, ui);
     });

@@ -32,6 +32,13 @@ use crate::FilmcraftApp;
 mod ai;
 #[path = "reel_delivery.rs"]
 mod delivery;
+#[path = "reel_gaps.rs"]
+mod gaps;
+#[path = "reel_schedule.rs"]
+mod schedule;
+pub(crate) fn guard_render(app: &mut FilmcraftApp, command: &str, params: &serde_json::Value) -> bool {
+    gaps::command_guard(app, command, params)
+}
 pub use ai::{AiDraft, show as show_ai};
 
 /// What the panel is editing (UI state; serde so agents can read it).
@@ -66,6 +73,8 @@ pub struct ReelDraft {
     pub download: filmcraft_studio::ytdlp::Options,
     /// The cloud Instagram account (Supabase id) schedules go to.
     pub cloud_account: Option<String>,
+    pub use_cloud: bool,
+    pub instagram_guides: bool,
     /// The card was loaded from this project's Reel info (so a project switch reloads it).
     pub loaded_for: Option<String>,
     /// The AI panel's links and choices.
@@ -82,6 +91,10 @@ pub struct ReelDraft {
     pub reuse: Option<ReusePrompt>,
     pub calendar_month: Option<(i32, u32)>,
     pub calendar_all: bool,
+    /// The day picked on the publishing calendar (local `YYYY-MM-DD`).
+    pub calendar_day: Option<String>,
+    /// The time a Reel is scheduled at on that day (local `HH:MM`).
+    pub schedule_time: String,
     /// Plugin Settings fields being edited (never saved in the workspace state).
     #[serde(skip)]
     pub env_drafts: std::collections::BTreeMap<String, String>,
@@ -164,12 +177,12 @@ enum CardPart {
 #[derive(Clone, Debug, PartialEq)]
 enum QueueAction {
     LibraryOnly,
-    PublishNow(Vec<i64>),
-    /// Accounts, UTC ISO time.
-    Schedule(Vec<i64>, String),
+    /// Book it in the cloud: the cloud account, UTC ISO time, publish at once.
+    Cloud(String, String, bool),
 }
 
 struct QueueItem {
+    range: Option<(i64, i64)>,
     id: u64,
     sequence: u64,
     name: String,
@@ -201,6 +214,8 @@ pub enum ReelPage {
 }
 
 enum Done {
+    CloudQueued(u64, Result<bool, String>, bool),
+    Updates(Result<filmcraft_studio::notifications::Updates, String>),
     Preview(std::path::PathBuf, Result<Box<delivery::Preview>, String>),
     CloudAccounts(Result<Vec<serde_json::Value>, String>),
     CloudPosts(Result<Vec<serde_json::Value>, String>),
@@ -261,6 +276,10 @@ struct PendingExport {
 /// Library data and background work. Not UI state: it is rebuilt from the library on demand.
 #[derive(Default)]
 struct Runtime {
+    gap_prompt: Option<gaps::Prompt>,
+    last_updates: Option<f64>,
+    publication_updates: Vec<filmcraft_studio::notifications::Notification>,
+    updates_open: bool,
     previews: std::collections::HashMap<std::path::PathBuf, Result<Option<std::sync::Arc<delivery::Preview>>, String>>,
     studio: Option<Result<Studio, String>>,
     channels: Vec<Channel>,
@@ -401,6 +420,57 @@ pub fn poll(app: &mut FilmcraftApp, now: f64) {
     });
     for (label, d) in finished {
         match d {
+            Done::CloudQueued(id, result, now) => {
+                match result {
+                    Ok(true) => {
+                        if let Some(q) = r.queue.iter_mut().find(|q| q.id == id) {
+                            q.status = if now { "Cloud processing" } else { "Scheduled in cloud" }.into();
+                        }
+                        notify(
+                            &mut r,
+                            if now {
+                                "Video uploaded to cloud. Waiting for Instagram publication."
+                            } else {
+                                "Video uploaded and scheduled in cloud. Safe to close the app."
+                            },
+                            true,
+                        );
+                    }
+                    Ok(false) => fail_queued(&mut r, Some(id), "Cloud has not confirmed the upload yet; check Calendar before retrying.".into()),
+                    Err(e) => {
+                        fail_queued(&mut r, Some(id), e.clone());
+                        notify(&mut r, format!("Cloud upload failed: {e}"), false);
+                    }
+                }
+                r.last_updates = None;
+            }
+            Done::Updates(result) => match result {
+                Ok(batch) => {
+                    for post in &batch.cloud_posts {
+                        let content = post.get("local_content_id").and_then(|v| v.as_str()).unwrap_or_default();
+                        let status = post.get("status").and_then(|v| v.as_str()).unwrap_or_default();
+                        for q in &mut r.queue {
+                            if let (Some(ch), Some(render)) = (q.info.channel_id, q.render)
+                                && content == format!("{ch}:{render}")
+                            {
+                                if status == "published" {
+                                    q.status = "Published".into();
+                                }
+                                if status == "failed" {
+                                    q.status = "Failed".into();
+                                    q.error = Some("Cloud publication failed; check Calendar.".into());
+                                }
+                            }
+                        }
+                    }
+                    r.updates_open |= batch.notifications.iter().any(|n| !n.read);
+                    r.publication_updates = batch.notifications;
+                    if !batch.cloud_error {
+                        r.cloud_posts = batch.cloud_posts;
+                    }
+                }
+                Err(e) => log(&mut r, format!("Publication updates: {e}")),
+            },
             Done::Preview(path, result) => {
                 if r.previews.contains_key(&path) {
                     r.previews.insert(path, result.map(|p| Some(std::sync::Arc::from(p))));
@@ -412,7 +482,15 @@ pub fn poll(app: &mut FilmcraftApp, now: f64) {
                     continue;
                 }
                 let keep = app.ui.reel.card.clone();
-                app.ui.reel.card = Card { badge: keep.badge, bullets: keep.bullets, cta: keep.cta, ..*card };
+                app.ui.reel.card = Card {
+                    badge: keep.badge,
+                    bullets: keep.bullets,
+                    cta: keep.cta,
+                    fonts: keep.fonts,
+                    text_styles: keep.text_styles,
+                    text_timing: keep.text_timing,
+                    ..*card
+                };
                 log(&mut r, "The AI wrote the card");
                 if reel_info(app).is_some() {
                     let c = app.ui.reel.card.clone();
@@ -498,6 +576,9 @@ pub fn poll(app: &mut FilmcraftApp, now: f64) {
             Done::CloudAccounts(Err(e)) | Done::CloudPosts(Err(e)) => r.cloud_error = e,
             Done::Message(m) if m == "__imports_done" => r.imports_running = false,
             Done::Message(m) => {
+                if m.starts_with("Cloud") {
+                    r.last_updates = None;
+                }
                 let ok = m.starts_with("Published") || m.starts_with("Scheduled in cloud");
                 let failed = m.starts_with("Publishing failed") || m.starts_with("Cloud scheduling failed");
                 if ok || failed {
@@ -584,12 +665,18 @@ pub fn poll(app: &mut FilmcraftApp, now: f64) {
             });
         }
     }
+    if background() && r.last_updates.is_none_or(|last| now - last >= 30.0) && !r.tasks.iter().any(|(label, _)| label == "Publication updates") {
+        r.last_updates = Some(now);
+        if let Some(s) = studio(&mut r) {
+            spawn(&mut r, "Publication updates", move || Done::Updates(filmcraft_studio::notifications::refresh(&s).map_err(|e| e.to_string())));
+        }
+    }
     advance_queue(app, &mut r);
     r.log.retain(|l| !l.is_empty());
 }
 
 fn card_params(c: &Card) -> serde_json::Value {
-    json!({"fonts": c.fonts, "title": c.title, "caption": c.caption, "attribution": c.attribution, "badge": c.badge, "bullets": c.bullets, "cta": c.cta, "instagramCaption": c.instagram_caption, "hashtags": c.hashtags})
+    json!({"reflow":true,"fonts": c.fonts, "textStyles":c.text_styles, "textTiming":c.text_timing, "title": c.title, "caption": c.caption, "attribution": c.attribution, "badge": c.badge, "bullets": c.bullets, "cta": c.cta, "instagramCaption": c.instagram_caption, "hashtags": c.hashtags})
 }
 
 fn section(ui: &mut egui::Ui, title: &str, open: bool, body: impl FnOnce(&mut egui::Ui)) {
@@ -679,9 +766,24 @@ fn tab_bar<T: PartialEq + Copy>(app: &mut FilmcraftApp, ui: &mut egui::Ui, curre
     ui.separator();
 }
 
-fn activity(app: &FilmcraftApp, ui: &mut egui::Ui) {
+fn activity(app: &mut FilmcraftApp, ui: &mut egui::Ui) {
     let t = app.tokens;
-    let r = rt();
+    let mut r = rt();
+    let unread = r.publication_updates.iter().filter(|n| !n.read).count();
+    let updates = ui.button(if unread > 0 { format!("Publishing updates ({unread})") } else { "Publishing updates".into() });
+    app.auto.add_response("reel.updates.open", &updates, "Publishing updates");
+    if updates.clicked() {
+        r.updates_open = true;
+    }
+    if let Some(pending) = &r.export
+        && let Some(job) = app.session.jobs.iter().find(|j| j.id == pending.job)
+    {
+        let progress = job.to_json();
+        let bar = ui.add(egui::ProgressBar::new(job.progress.fraction()).show_percentage());
+        app.auto.add_response("reel.render.progress", &bar, "Render progress");
+        let timing = ui.label(super::timing_suffix(&progress).trim_start_matches(" · "));
+        app.auto.add_response("reel.render.timing", &timing, "Render elapsed time and ETA");
+    }
     if !r.tasks.is_empty() || r.export.is_some() {
         ui.horizontal(|ui| {
             ui.spinner();
@@ -1103,6 +1205,11 @@ pub fn show_design(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     // Layout, card and caption work on the open Reel without the library; only Use AI needs it.
     let ctx = prelude(app, ui);
     let info = ctx.as_ref().map_or_else(|| reel_info(app), |c| c.info.clone());
+    gaps::warning(app, ui);
+    let guide = ui.checkbox(&mut app.ui.reel.instagram_guides, "Instagram safe-area guides").on_hover_text(
+        "Preview only: reserves space for Instagram's top controls, right-side buttons and bottom captions. Expanded descriptions may cover more of the video.",
+    );
+    app.auto.add_response("reel.design.instagramGuides", &guide, "Instagram safe-area guides");
     let t = app.tokens;
     let previous = app.ui.reel.design_tab;
     let mut tab = previous;
@@ -1195,6 +1302,9 @@ pub fn show_downloads(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
 /// The tabs across the top of Export mode. Returns the area left for FilmCraft's own export
 /// screen, or None when Library or Publish is showing.
 pub fn export_tabs(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) -> Option<Rect> {
+    if app.ui.reel.publish_tab == PublishTab::Cloud {
+        app.ui.reel.publish_tab = PublishTab::Now;
+    }
     let bar = Rect::from_min_size(rect.min, vec2(rect.width(), 34.0));
     let rest = Rect::from_min_max(egui::pos2(rect.min.x, bar.max.y + 4.0), rect.max);
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(bar.shrink2(vec2(10.0, 4.0))));
@@ -1215,37 +1325,8 @@ pub fn export_tabs(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) -> Opt
             None
         }
         ExportTab::Publish => {
-            if app.ui.reel.publish_tab == PublishTab::Now {
-                delivery::publish_page(app, ui, rest);
-                return None;
-            }
-            ui.painter().rect_filled(rest, app.tokens.radius, app.tokens.panel_bg);
-            frame(ui, rest, "sf-publish", |ui| {
-                let Some(ctx) = prelude(app, ui) else { return };
-                workspace_line(app, ui, &ctx);
-                let mut tab = app.ui.reel.publish_tab;
-                tab_bar(
-                    app,
-                    ui,
-                    &mut tab,
-                    "reel.publish",
-                    &[
-                        (PublishTab::Now, "now", "Publish"),
-                        (PublishTab::Queue, "queue", "Queue"),
-                        (PublishTab::Calendar, "calendar", "Calendar"),
-                        (PublishTab::Cloud, "cloud", "Cloud"),
-                    ],
-                );
-                app.ui.reel.publish_tab = tab;
-                match tab {
-                    PublishTab::Now => deliver(app, ui, ctx.info.as_ref(), ctx.channel, &ctx.s),
-                    PublishTab::Queue => queue_view(app, ui, &ctx),
-                    PublishTab::Calendar => calendar(app, ui, &ctx),
-                    PublishTab::Cloud => cloud(app, ui, ctx.info.as_ref(), ctx.channel, &ctx.s),
-                }
-                ui.separator();
-                activity(app, ui);
-            });
+            // Schedule (cloud publishing on a calendar) and the queue.
+            delivery::publish_page(app, ui, rest);
             None
         }
     }
@@ -1257,15 +1338,24 @@ pub fn export_tabs(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) -> Opt
 
 /// Adds the open Reel to the render-and-publish queue.
 fn enqueue(app: &mut FilmcraftApp, info: &ReelInfo, action: QueueAction) {
+    if !gaps::queue_guard(app, info, &action) {
+        return;
+    }
+    enqueue_range(app, info, action, None);
+}
+fn enqueue_range(app: &mut FilmcraftApp, info: &ReelInfo, action: QueueAction, range: Option<(i64, i64)>) {
     let Some(seq) = app.session.state.active_sequence else { return };
     let name = app.session.project.item(seq).map(|i| i.name.clone()).unwrap_or_else(|| "Reel".into());
     let item = QueueItem {
+        range,
         id: crate::panels::reel::next_id(),
         sequence: seq.0,
         name,
         info: info.clone(),
         footage: footage(app, info),
-        duration: app.session.active_sequence().map_or(0.0, |q| q.duration().seconds()),
+        duration: range
+            .map(|(a, b)| filmcraft_time::Tick(b.saturating_sub(a)).seconds())
+            .unwrap_or_else(|| app.session.active_sequence().map_or(0.0, |q| q.duration().seconds())),
         project: app.session.project.clone(),
         action,
         status: "Waiting to render".into(),
@@ -1293,6 +1383,13 @@ fn advance_queue(app: &mut FilmcraftApp, r: &mut Runtime) {
     // The Reel renders as it is now (edits made while it waited are kept); one that was deleted
     // or opened from another project fails.
     let seq = filmcraft_project::ItemId(q.sequence);
+    if !std::sync::Arc::ptr_eq(&q.project, &app.session.project)
+        && (q.range.is_some() || filmcraft_engine::edge_gaps::inspect(&app.session.project, seq).is_some())
+    {
+        q.status = "Failed".into();
+        q.error = Some("The Reel changed after its empty-edge check. Queue it again to review the render range.".into());
+        return;
+    }
     let same_file = project_is_open(app, &q.project);
     match filmcraft_engine::reel::for_sequence(app.session.project.reel.as_ref(), seq) {
         Some(info) if same_file && app.session.project.item(seq).is_some() => {
@@ -1309,8 +1406,19 @@ fn advance_queue(app: &mut FilmcraftApp, r: &mut Runtime) {
     let _ = std::fs::create_dir_all(&dir);
     let safe: String = q.name.chars().map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).take(60).collect();
     let path = dir.join(format!("{safe}-{}.mp4", filmcraft_studio::now_iso().replace([':', '.'], "-")));
+    if let Err(e) = app.session.execute("file.saveCopy", json!({"path":path.with_extension("fcproj").to_string_lossy()})) {
+        q.status = "Failed".into();
+        q.error = Some(format!("Could not save the editable project: {e}"));
+        return;
+    }
     let preset = if q.info.format == "post" { "Match Source – Adaptive High Bitrate" } else { "Social Vertical 1080×1920" };
-    match app.session.execute("export.quick", json!({"preset": preset, "path": path.to_string_lossy(), "range": "entire", "sequence": q.sequence})) {
+    let mut params = json!({"preset":preset,"path":path.to_string_lossy(),"range":"entire","sequence":q.sequence});
+    if let Some((start, end)) = q.range {
+        params["range"] = json!("custom");
+        params["startTime"] = json!(start);
+        params["endTime"] = json!(end);
+    }
+    match app.session.execute("export.quick", params) {
         Ok(v) => match v["job"].as_u64() {
             Some(job) => {
                 q.status = "Rendering".into();
@@ -1358,51 +1466,31 @@ fn queue_sent(r: &mut Runtime, id: u64, render: i64) {
     let Some(ch) = q.info.channel_id else { return };
     match q.action.clone() {
         QueueAction::LibraryOnly => q.status = "In the library".into(),
-        QueueAction::Schedule(accounts, at) => match s.schedule(ch, render, &accounts, &at) {
-            Ok(n) => {
-                q.status = format!("Scheduled on {n} account(s)");
-                notify(r, format!("Scheduled: {}", r.queue.iter().find(|q| q.id == id).map(|q| q.name.clone()).unwrap_or_default()), true);
-            }
-            Err(e) => {
-                q.status = "Failed".into();
-                q.error = Some(e.to_string());
-            }
-        },
-        QueueAction::PublishNow(accounts) => {
+        QueueAction::Cloud(account, at, now) => {
             q.status = "Publishing".into();
-            let name = q.name.clone();
-            for a in accounts {
-                let st = s.clone();
-                let name = name.clone();
-                spawn(r, "Publishing", move || Done::Published(name, filmcraft_studio::publish_now(&st, ch, render, a).map_err(|e| e.to_string()), Some(id)));
-            }
+            spawn(r, "Cloud scheduling", move || {
+                Done::CloudQueued(
+                    id,
+                    (|| {
+                        let caption = s.caption_for(render)?;
+                        let response = filmcraft_studio::cloud::schedule(&s, ch, render, &account, &caption, &at, now)?;
+                        Ok(response.get("cloudConfirmed") == Some(&serde_json::Value::Bool(true)))
+                    })()
+                    .map_err(|e: filmcraft_studio::StudioError| e.to_string()),
+                    now,
+                )
+            });
         }
     }
 }
 
-fn queue_view(app: &mut FilmcraftApp, ui: &mut egui::Ui, ctx: &Ctx) {
+fn queue_view(app: &mut FilmcraftApp, ui: &mut egui::Ui, _ctx: &Ctx) {
     let t = app.tokens;
-    ui.label(RichText::new("Reels in the queue render one after another, go to the library approved, and are then published or scheduled on the accounts chosen in Reel Studio.").small().color(t.text_dim));
-    if let Some(info) = ctx.info.clone() {
-        ui.horizontal_wrapped(|ui| {
-            let accounts = app.ui.reel.accounts.clone();
-            if ui.button("Queue: render + library").clicked() {
-                enqueue(app, &info, QueueAction::LibraryOnly);
-            }
-            if ui.add_enabled(!accounts.is_empty(), egui::Button::new("Queue: render + publish now")).clicked() {
-                enqueue(app, &info, QueueAction::PublishNow(accounts.clone()));
-            }
-            ui.add(egui::TextEdit::singleline(&mut app.ui.reel.schedule_at).desired_width(130.0).hint_text("YYYY-MM-DD HH:MM"));
-            if ui.add_enabled(!accounts.is_empty(), egui::Button::new("Queue: render + schedule")).clicked() {
-                match filmcraft_studio::local_to_utc_iso(&app.ui.reel.schedule_at) {
-                    Some(at) => enqueue(app, &info, QueueAction::Schedule(accounts.clone(), at)),
-                    None => app.ui.status = "Type the time as YYYY-MM-DD HH:MM".into(),
-                }
-            }
-        });
-    } else {
-        ui.label(RichText::new("Open a Reel to add it to the queue.").small().color(t.text_dim));
-    }
+    ui.label(
+        RichText::new("Reels scheduled from the Schedule tab render here one after another, then go to the library approved and are booked in the cloud.")
+            .small()
+            .color(t.text_dim),
+    );
     ui.separator();
     ui.label(RichText::new("Render queue").strong());
     let items: Vec<(u64, String, String, Option<String>)> = rt().queue.iter().map(|q| (q.id, q.name.clone(), q.status.clone(), q.error.clone())).collect();
@@ -1429,20 +1517,22 @@ fn queue_view(app: &mut FilmcraftApp, ui: &mut egui::Ui, ctx: &Ctx) {
         });
     }
     ui.separator();
-    ui.label(RichText::new("Publish queue").strong());
-    let now = filmcraft_studio::now_iso();
-    match ctx.s.calendar(ctx.channel, &now, "9999-12-31T00:00:00.000Z") {
-        Ok(entries) if entries.is_empty() => {
-            ui.label(RichText::new("No upcoming publications.").small().color(t.text_dim));
-        }
-        Ok(entries) => {
-            for e in entries.iter().take(40) {
-                ui.label(RichText::new(format!("{} · {} · {} · {}", local_time(&e.at), e.title, e.platform.to_lowercase(), e.status.to_lowercase())).small());
-            }
-        }
-        Err(e) => {
-            ui.label(RichText::new(e.to_string()).small());
-        }
+    ui.label(RichText::new("Upcoming in the cloud").strong());
+    let mut upcoming: Vec<serde_json::Value> = rt()
+        .cloud_posts
+        .iter()
+        .filter(|p| matches!(p.get("status").and_then(|v| v.as_str()), Some("scheduled" | "processing" | "publishing")))
+        .cloned()
+        .collect();
+    upcoming.sort_by_key(|p| p.get("scheduled_for").and_then(|v| v.as_str()).unwrap_or("").to_string());
+    if upcoming.is_empty() {
+        ui.label(RichText::new("Nothing scheduled. Pick a day in the Schedule tab.").small().color(t.text_dim));
+    }
+    for p in upcoming.iter().take(40) {
+        let at = p.get("scheduled_for").and_then(|v| v.as_str()).unwrap_or_default();
+        let title = p.get("title").and_then(|v| v.as_str()).unwrap_or("Reel");
+        let status = p.get("status").and_then(|v| v.as_str()).unwrap_or_default();
+        ui.label(RichText::new(format!("{} · {title} · {status}", local_time(at))).small());
     }
 }
 
@@ -1453,116 +1543,6 @@ fn local_time(iso: &str) -> String {
         .and_then(|ms| chrono::Local.timestamp_millis_opt(ms).single())
         .map(|d| d.format("%Y-%m-%d %H:%M").to_string())
         .unwrap_or_else(|| iso.to_string())
-}
-
-// ------------------------------------------------------------------------------------------------
-// Calendar
-// ------------------------------------------------------------------------------------------------
-
-fn calendar(app: &mut FilmcraftApp, ui: &mut egui::Ui, ctx: &Ctx) {
-    use chrono::{Datelike, Local, NaiveDate, TimeZone};
-    let t = app.tokens;
-    let today = Local::now().date_naive();
-    let (mut y, mut m) = app.ui.reel.calendar_month.unwrap_or((today.year(), today.month()));
-    ui.horizontal(|ui| {
-        if ui.small_button("◀").clicked() {
-            (y, m) = if m == 1 { (y - 1, 12) } else { (y, m - 1) };
-        }
-        ui.label(
-            RichText::new(format!(
-                "{} {y}",
-                ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"]
-                    .get(m as usize - 1)
-                    .copied()
-                    .unwrap_or("")
-            ))
-            .strong(),
-        );
-        if ui.small_button("▶").clicked() {
-            (y, m) = if m == 12 { (y + 1, 1) } else { (y, m + 1) };
-        }
-        if ui.small_button("Today").clicked() {
-            (y, m) = (today.year(), today.month());
-        }
-        ui.checkbox(&mut app.ui.reel.calendar_all, "All workspaces");
-    });
-    app.ui.reel.calendar_month = Some((y, m));
-    let Some(first) = NaiveDate::from_ymd_opt(y, m, 1) else { return };
-    let next = if m == 12 { NaiveDate::from_ymd_opt(y + 1, 1, 1) } else { NaiveDate::from_ymd_opt(y, m + 1, 1) };
-    let Some(next) = next else { return };
-    let to_iso = |d: NaiveDate| {
-        d.and_hms_opt(0, 0, 0)
-            .and_then(|n| Local.from_local_datetime(&n).earliest())
-            .map(|l| filmcraft_studio::iso_ms(l.timestamp_millis()))
-            .unwrap_or_default()
-    };
-    let channel = if app.ui.reel.calendar_all { None } else { ctx.channel };
-    let mut entries = ctx.s.calendar(channel, &to_iso(first), &to_iso(next)).unwrap_or_default();
-    // Cloud schedules (all accounts of the Supabase user) join the local ones.
-    for p in rt().cloud_posts.iter() {
-        let at = p.get("scheduled_for").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-        if at.is_empty() {
-            continue;
-        }
-        entries.push(filmcraft_studio::settings::CalendarEntry {
-            at,
-            channel: 0,
-            title: p.get("title").and_then(|v| v.as_str()).unwrap_or("Reel").to_string(),
-            platform: "INSTAGRAM".into(),
-            status: p.get("status").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
-            link: p.get("instagram_permalink").and_then(|v| v.as_str()).map(str::to_string),
-            render: 0,
-            cloud: true,
-        });
-    }
-    let by_day = |d: NaiveDate| -> Vec<&filmcraft_studio::settings::CalendarEntry> {
-        entries.iter().filter(|e| local_time(&e.at).get(..10) == Some(d.format("%Y-%m-%d").to_string().as_str())).collect()
-    };
-    let width = ((ui.available_width() - 6.0 * 4.0) / 7.0).max(60.0);
-    egui::Grid::new("sf-calendar").spacing([4.0, 4.0]).show(ui, |ui| {
-        for d in ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"] {
-            ui.label(RichText::new(d).small().color(t.text_dim));
-        }
-        ui.end_row();
-        let lead = first.weekday().num_days_from_monday();
-        for _ in 0..lead {
-            ui.label("");
-        }
-        let mut col = lead;
-        let mut day = first;
-        while day < next {
-            let items = by_day(day);
-            egui::Frame::group(ui.style()).show(ui, |ui| {
-                ui.set_width(width);
-                ui.set_min_height(64.0);
-                let label = RichText::new(day.day().to_string()).small();
-                ui.label(if day == today { label.strong().color(t.accent) } else { label });
-                for e in items.iter().take(3) {
-                    let colour = match e.status.as_str() {
-                        "PUBLISHED" | "published" => egui::Color32::from_rgb(0x4a, 0xde, 0x80),
-                        "PUBLISH_FAILED" | "failed" | "NEEDS_RECONCILIATION" => egui::Color32::from_rgb(0xff, 0x6b, 0x6b),
-                        _ => t.text,
-                    };
-                    let text = format!("{} {}{}", local_time(&e.at).get(11..).unwrap_or(""), if e.cloud { "☁ " } else { "" }, e.title);
-                    ui.add(egui::Label::new(RichText::new(text).small().color(colour)).truncate()).on_hover_text(format!(
-                        "{} · {} · {}",
-                        e.title,
-                        e.platform.to_lowercase(),
-                        e.status.to_lowercase()
-                    ));
-                }
-                if items.len() > 3 {
-                    ui.label(RichText::new(format!("+{} more", items.len() - 3)).small().color(t.text_dim));
-                }
-            });
-            col += 1;
-            if col == 7 {
-                ui.end_row();
-                col = 0;
-            }
-            day = day.succ_opt().unwrap_or(next);
-        }
-    });
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -1588,8 +1568,60 @@ fn notify(r: &mut Runtime, text: impl Into<String>, ok: bool) {
 
 /// Pop-ups drawn over the whole window: the start-up check, notifications, the reuse question
 /// and the Plugin Settings window. Called every frame.
+fn publication_updates_popup(app: &mut FilmcraftApp, ctx: &egui::Context) {
+    let (mut open, events) = {
+        let r = rt();
+        (r.updates_open, r.publication_updates.clone())
+    };
+    if !open {
+        return;
+    }
+    let mut dismiss = false;
+    egui::Window::new("Publishing updates").id(egui::Id::new("reel-publication-updates")).open(&mut open).default_width(420.0).show(ctx, |ui| {
+        if events.is_empty() {
+            ui.label("No publishing updates yet.");
+        }
+        egui::ScrollArea::vertical().max_height(340.0).show(ui, |ui| {
+            for event in &events {
+                ui.group(|ui| {
+                    ui.label(RichText::new(format!("{} {}", if event.ok { "✓" } else { "!" }, event.title)).strong());
+                    ui.label(&event.message);
+                    ui.label(RichText::new(local_time(&event.at)).small());
+                    if let Some(link) = &event.link {
+                        let response = ui.hyperlink_to("Open published video", link);
+                        app.auto.add_response(&format!("reel.updates.link.{}", event.id), &response, "Open published video");
+                    }
+                });
+            }
+        });
+        let b = ui.button("Mark read and close");
+        app.auto.add_response("reel.updates.dismiss", &b, "Mark updates read and close");
+        dismiss = b.clicked();
+    });
+    let mut r = rt();
+    r.updates_open = open && !dismiss;
+    if !open || dismiss {
+        let ids: Vec<String> = events.iter().filter(|e| !e.read).map(|e| e.id.clone()).collect();
+        for event in &mut r.publication_updates {
+            event.read = true;
+        }
+        if !ids.is_empty()
+            && let Some(s) = studio(&mut r)
+        {
+            spawn(&mut r, "Mark updates read", move || {
+                Done::Message(match filmcraft_studio::notifications::acknowledge(&s, &ids) {
+                    Ok(()) => String::new(),
+                    Err(e) => format!("Could not save notification acknowledgement: {e}"),
+                })
+            });
+        }
+    }
+}
+
 pub fn overlays(app: &mut FilmcraftApp, ctx: &egui::Context) {
     let now = ctx.input(|i| i.time);
+    publication_updates_popup(app, ctx);
+    gaps::overlay(app, ctx);
     // The start-up check, once per run.
     {
         let mut r = rt();
@@ -1818,6 +1850,9 @@ fn plugin_settings(app: &mut FilmcraftApp, ctx: &egui::Context) {
                             ("META_APP_SECRET", "Meta app secret", true),
                         ],
                     );
+                    ui.separator();
+                    ui.label("Local and cloud tokens are stored separately. You can use the same valid Meta token for both, but replacing one does not update the other.");
+                    cloud(app,ui,None,channel,&s,true);
                 }
                 PluginTab::Downloads => {
                     env_fields(
@@ -2150,14 +2185,39 @@ fn card(app: &mut FilmcraftApp, ui: &mut egui::Ui, is_reel: bool, part: CardPart
     }
     let mut changed = false;
     if part == CardPart::Card {
-        let fonts_panel = egui::CollapsingHeader::new("Fonts").default_open(false).show(ui, |ui| {
+        let fonts_panel = egui::CollapsingHeader::new("Fonts & text styling").default_open(false).show(ui, |ui| {
             if !filmcraft_text::fonts::system_scanned() {
                 filmcraft_text::fonts::scan_system();
             }
             let families = filmcraft_text::fonts::families();
             let info = reel_info(app).unwrap_or_default();
             let controls = filmcraft_reel::plan(&info.template, &info.brand, &app.ui.reel.card, 15.0).map(|p| p.controls).unwrap_or_default();
-            ui.label(RichText::new("Fonts for text in this template. Closing text uses the headline font.").small().color(t.text_dim));
+            ui.label(
+                RichText::new("Standard: Inter Bold headlines · Inter Regular supporting text. Channel styling stays separate.").small().color(t.text_dim),
+            );
+            let reset = ui.button("Use standard text fonts");
+            app.auto.add_response("reel.card.fonts.standard", &reset, "Use standard text fonts");
+            if reset.clicked() {
+                app.ui.reel.card.fonts.retain(|field, _| !matches!(field.as_str(), "title" | "caption" | "point1" | "point2" | "point3" | "point4"));
+                app.ui.reel.card.text_styles.retain(|field, _| !matches!(field.as_str(), "title" | "caption" | "point1" | "point2" | "point3" | "point4"));
+                changed = true;
+            }
+            let timing = egui::ComboBox::from_id_salt("reel-text-timing")
+                .selected_text(match app.ui.reel.card.text_timing {
+                    filmcraft_reel::TextTiming::Always => "Text throughout the video",
+                    filmcraft_reel::TextTiming::IntroOutro => "Opening and closing only",
+                })
+                .show_ui(ui, |ui| {
+                    for (value, label) in [
+                        (filmcraft_reel::TextTiming::Always, "Text throughout the video"),
+                        (filmcraft_reel::TextTiming::IntroOutro, "Opening and closing only"),
+                    ] {
+                        let response = ui.selectable_value(&mut app.ui.reel.card.text_timing, value, label);
+                        changed |= response.changed();
+                        app.auto.add_response(&format!("reel.card.timing.{value:?}"), &response, label);
+                    }
+                });
+            app.auto.add_response("reel.card.timing", &timing.response, "Text visibility");
             for control in controls.iter().filter(|c| c.param == "text") {
                 let (field, label) = (control.id.as_str(), control.name.as_str());
                 let font = app.ui.reel.card.fonts.entry(field.into()).or_default();
@@ -2176,6 +2236,79 @@ fn card(app: &mut FilmcraftApp, ui: &mut egui::Ui, is_reel: bool, part: CardPart
                         }
                     });
                 app.auto.add_response(&format!("reel.card.font.{field}"), &combo.response, label);
+                let styles = egui::CollapsingHeader::new(format!("{label} styling")).id_salt(("text-style", field)).show(ui, |ui| {
+                    let style = app.ui.reel.card.text_styles.entry(field.into()).or_default();
+                    ui.horizontal_wrapped(|ui| {
+                        for (name, size) in [("Small", 32.0), ("Medium", 48.0), ("Large", 64.0), ("XL", 80.0)] {
+                            let b = ui.selectable_label(style.size == Some(size), name);
+                            app.auto.add_response(&format!("reel.card.style.{field}.preset.{name}"), &b, name);
+                            if b.clicked() {
+                                style.size = Some(size);
+                                changed = true;
+                            }
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        let mut size = style.size.unwrap_or(if field == "title" { 56.0 } else { 32.0 });
+                        ui.label("Size");
+                        let r = ui.add(egui::DragValue::new(&mut size).range(16.0..=160.0).suffix(" px"));
+                        app.auto.add_response(&format!("reel.card.style.{field}.size"), &r, "Text size");
+                        if r.changed() {
+                            style.size = Some(size);
+                            changed = true;
+                        }
+                        let r = ui.small_button("Auto");
+                        app.auto.add_response(&format!("reel.card.style.{field}.auto"), &r, "Template text size");
+                        if r.clicked() {
+                            style.size = None;
+                            changed = true;
+                        }
+                    });
+                    ui.horizontal_wrapped(|ui| {
+                        for (id, label, value, default) in
+                            [("caps", "ALL CAPS", &mut style.uppercase, field == "title"), ("bold", "Bold", &mut style.bold, field == "title")]
+                        {
+                            let mut checked = value.unwrap_or(default);
+                            let r = ui.checkbox(&mut checked, label);
+                            app.auto.add_response(&format!("reel.card.style.{field}.{id}"), &r, label);
+                            if r.changed() {
+                                *value = Some(checked);
+                                changed = true;
+                            }
+                        }
+                        let r = ui.checkbox(&mut style.italic, "Italic");
+                        app.auto.add_response(&format!("reel.card.style.{field}.italic"), &r, "Italic");
+                        changed |= r.changed();
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Character limit");
+                        let r = ui.add(egui::DragValue::new(&mut style.max_chars).range(0..=2000));
+                        app.auto.add_response(&format!("reel.card.style.{field}.limit"), &r, "Character limit; zero is unlimited");
+                        changed |= r.changed();
+                    });
+                    ui.label(RichText::new("0 = unlimited. Excess text is shortened in the video; your original text is kept.").small());
+                    ui.horizontal(|ui| {
+                        ui.label("Tracking");
+                        let r = ui.add(egui::DragValue::new(&mut style.tracking).range(-100.0..=500.0));
+                        app.auto.add_response(&format!("reel.card.style.{field}.tracking"), &r, "Letter spacing");
+                        changed |= r.changed();
+                        ui.label("Line gap");
+                        let r = ui.add(egui::DragValue::new(&mut style.line_spacing).range(-10.0..=80.0));
+                        app.auto.add_response(&format!("reel.card.style.{field}.leading"), &r, "Line spacing");
+                        changed |= r.changed();
+                    });
+                    ui.horizontal_wrapped(|ui| {
+                        for (align, label) in [(0, "Left"), (1, "Center"), (2, "Right")] {
+                            let r = ui.selectable_label(style.align == Some(align), label);
+                            app.auto.add_response(&format!("reel.card.style.{field}.align.{align}"), &r, label);
+                            if r.clicked() {
+                                style.align = Some(align);
+                                changed = true;
+                            }
+                        }
+                    });
+                });
+                app.auto.add_response(&format!("reel.card.style.{field}"), &styles.header_response, label);
             }
             let add = ui.button("Add font…");
             app.auto.add_response("reel.card.addFont", &add, "Add font to brand assets");
@@ -2220,7 +2353,7 @@ fn card(app: &mut FilmcraftApp, ui: &mut egui::Ui, is_reel: bool, part: CardPart
         });
         app.auto.add_response("reel.card.fonts", &fonts_panel.header_response, "Fonts");
         changed |= line(ui, app, "title", "Headline", true, |c| &mut c.title);
-        changed |= line(ui, app, "caption", "Supporting line", false, |c| &mut c.caption);
+        changed |= line(ui, app, "caption", "Supporting line", true, |c| &mut c.caption);
         changed |= line(ui, app, "attribution", "Credit (Original: @creator)", false, |c| &mut c.attribution);
         section(ui, "Additional text", true, |ui| {
             changed |= line(ui, app, "badge", "Badge", false, |c| &mut c.badge);
@@ -2305,86 +2438,6 @@ fn write_card(app: &mut FilmcraftApp, ui: &mut egui::Ui, channel: Option<i64>, s
     }
 }
 
-fn deliver(app: &mut FilmcraftApp, ui: &mut egui::Ui, info: Option<&ReelInfo>, channel: Option<i64>, s: &Studio) {
-    let t = app.tokens;
-    let Some(info) = info else {
-        ui.label(RichText::new("Start a Reel to export and publish it.").small().color(t.text_dim));
-        return;
-    };
-    if let Some(p) = info.post {
-        ui.label(RichText::new(format!("Library post {} · version {}", p.story_id, p.script_id)).small().color(t.text_dim));
-    }
-    ui.checkbox(&mut app.ui.reel.approve_on_send, "Approve for publishing when sent");
-    let exporting = rt().export.is_some();
-    let b = ui.add_enabled(!exporting && info.channel_id.is_some(), egui::Button::new(if exporting { "Exporting…" } else { "Export and send to the library" }));
-    app.auto.add_response("reel.export", &b, "Export and send to the library");
-    if info.channel_id.is_none() {
-        ui.label(RichText::new("Choose the workspace above first.").small().color(t.text_dim));
-    }
-    if b.clicked() {
-        let dir = s.root.join("Editor").join("exports");
-        if let Err(e) = std::fs::create_dir_all(&dir) {
-            app.ui.status = format!("Could not create the export folder: {e}");
-            return;
-        }
-        let safe: String = app.session.project.name.chars().map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).take(60).collect();
-        let path = dir.join(format!("{safe}-{}.mp4", filmcraft_studio::now_iso().replace([':', '.'], "-")));
-        if let Err(e) = app.session.execute("file.saveCopy", json!({"path": path.with_extension("fcproj").to_string_lossy()})) {
-            app.ui.status = format!("Could not save the editable project: {e}");
-            return;
-        }
-        let preset = if info.format == "post" { "Match Source – Adaptive High Bitrate" } else { "Social Vertical 1080×1920" };
-        match app.session.execute("export.quick", json!({"preset": preset, "path": path.to_string_lossy(), "range": "entire"})) {
-            Ok(r) => match r["job"].as_u64() {
-                Some(job) => {
-                    rt().export = Some(PendingExport {
-                        job,
-                        path,
-                        approve: app.ui.reel.approve_on_send,
-                        info: info.clone(),
-                        footage: footage(app, info),
-                        duration: app.session.active_sequence().map_or(0.0, |q| q.duration().seconds()),
-                        queue: None,
-                        sequence: app.session.state.active_sequence.map_or(0, |q| q.0),
-                        finished_at: None,
-                        project: app.session.project.clone(),
-                    })
-                }
-                None => app.ui.status = "The export did not start".into(),
-            },
-            Err(e) => app.ui.status = e.to_string(),
-        }
-    }
-    // Accounts and schedule time for the publish buttons in the library list.
-    let accounts: Vec<Account> = rt().accounts.clone();
-    ui.label(RichText::new("Publish on").small().color(t.text_dim));
-    for a in &accounts {
-        let mut on = app.ui.reel.accounts.contains(&a.id);
-        let label = format!("{} · {} ({})", a.platform, a.display_name, a.status.to_lowercase());
-        if ui.add_enabled(a.enabled, egui::Checkbox::new(&mut on, label)).changed() {
-            app.ui.reel.accounts.retain(|x| *x != a.id);
-            if on {
-                app.ui.reel.accounts.push(a.id);
-            }
-        }
-    }
-    if accounts.is_empty() {
-        ui.label(RichText::new("No publishing accounts are connected for this workspace.").small().color(t.text_dim));
-    }
-    if app.ui.reel.schedule_at.is_empty() {
-        app.ui.reel.schedule_at = filmcraft_studio::local_in(60);
-    }
-    ui.horizontal(|ui| {
-        ui.label(RichText::new("Schedule at").small().color(t.text_dim));
-        ui.add(egui::TextEdit::singleline(&mut app.ui.reel.schedule_at).desired_width(140.0).hint_text("YYYY-MM-DD HH:MM"));
-    });
-    // The Reel's own post, with its newest render.
-    let post = info.post.and_then(|p| rt().library.iter().find(|x| x.story_id == p.story_id).cloned());
-    if let Some(p) = post {
-        render_actions(app, ui, &p, channel, s);
-    }
-}
-
 fn render_actions(app: &mut FilmcraftApp, ui: &mut egui::Ui, p: &LibraryPost, channel: Option<i64>, s: &Studio) {
     let t = app.tokens;
     let Some(r) = p.render.clone() else { return };
@@ -2405,7 +2458,8 @@ fn render_actions(app: &mut FilmcraftApp, ui: &mut egui::Ui, p: &LibraryPost, ch
             }
         }
         if r.approved && !app.ui.reel.accounts.is_empty() {
-            let b = ui.small_button("Publish now");
+            let publishing = rt().tasks.iter().any(|(label, _)| label == "Publishing");
+            let b = ui.add_enabled(!publishing, egui::Button::new(if publishing { "Publishing…" } else { "Publish now" }));
             app.auto.add_response(&format!("reel.publish.{}", r.id), &b, "Publish now");
             if b.clicked()
                 && let Some(ch) = channel
@@ -2800,7 +2854,7 @@ fn imports(app: &mut FilmcraftApp, ui: &mut egui::Ui, channel: Option<i64>, s: &
     }
 }
 
-fn cloud(app: &mut FilmcraftApp, ui: &mut egui::Ui, info: Option<&ReelInfo>, channel: Option<i64>, s: &Studio) {
+fn cloud(app: &mut FilmcraftApp, ui: &mut egui::Ui, info: Option<&ReelInfo>, channel: Option<i64>, s: &Studio, accounts_only: bool) {
     let t = app.tokens;
     if !filmcraft_studio::cloud::configured(s) {
         ui.label(RichText::new("Cloud publishing is not configured. It uses the CLOUD_SUPABASE_URL, CLOUD_SUPABASE_ANON_KEY, CLOUD_AUTH_EMAIL and CLOUD_AUTH_PASSWORD settings in the library's .env file.").small().color(t.text_dim));
@@ -2875,6 +2929,22 @@ fn cloud(app: &mut FilmcraftApp, ui: &mut egui::Ui, info: Option<&ReelInfo>, cha
                 }
             }
         });
+        let local = rt().accounts.iter().find(|local| local.platform == "INSTAGRAM" && local.external_id == ig_user).map(|local| local.id);
+        if let Some(local) = local {
+            let b = ui
+                .button("Use this workspace's local token")
+                .on_hover_text("Validates and copies the local credential to this same Instagram profile in the cloud. Local storage is unchanged.");
+            app.auto.add_response(&format!("reel.cloudUseLocalToken.{id}"), &b, "Use the matching local Instagram token in cloud");
+            if b.clicked() {
+                let (st, cloud) = (s.clone(), id.clone());
+                spawn(&mut rt(), "Cloud credential", move || {
+                    Done::Notice(match filmcraft_studio::cloud::use_local_token(&st, local, &cloud) {
+                        Ok(message) => (message, true),
+                        Err(e) => (e.to_string(), false),
+                    })
+                });
+            }
+        }
         // A fresh token (Graph API Explorer) replaces the stored one and is extended at once.
         ui.horizontal(|ui| {
             let key = format!("cloud-token:{id}");
@@ -2900,6 +2970,9 @@ fn cloud(app: &mut FilmcraftApp, ui: &mut egui::Ui, info: Option<&ReelInfo>, cha
         });
     }
     // Schedule the current Reel's approved render.
+    if accounts_only {
+        return;
+    }
     let render = info.and_then(|i| i.post).and_then(|p| rt().library.iter().find(|x| x.story_id == p.story_id).and_then(|x| x.render.clone()));
     match (render, channel, app.ui.reel.cloud_account.clone()) {
         (Some(r), Some(ch), Some(account)) if r.approved => {
@@ -2989,6 +3062,71 @@ mod tests {
     fn test_guard() -> std::sync::MutexGuard<'static, ()> {
         static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
         GUARD.get_or_init(Default::default).lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Publish ▸ Schedule: cloud posts on their day, the day's actions, and scheduling the open
+    /// Reel on a picked day — with no local publishing or Publish now, and no network (the cloud
+    /// data is already loaded).
+    fn schedule_frame(app: &mut FilmcraftApp, ctx: &egui::Context) {
+        app.auto.begin_frame();
+        let mut output = ctx.run_ui(egui::RawInput { screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(1500.0, 2400.0))), ..Default::default() }, |ui| {
+            delivery::publish_page(app, ui, ui.available_rect_before_wrap());
+        });
+        output.textures_delta.clear();
+    }
+
+    #[test]
+    fn cloud_schedule_lives_on_the_calendar() {
+        use chrono::{Duration, Local};
+        let _guard = test_guard();
+        let mut app = FilmcraftApp::new(filmcraft_engine::Session::default());
+        app.session.execute("reel.new", json!({"channelId": 1, "card": {"title": "Trailer"}})).unwrap();
+        app.ui.reel.channel_id = Some(1);
+        app.ui.reel.export_tab = ExportTab::Publish;
+        app.ui.reel.publish_tab = PublishTab::Now;
+        let tomorrow = Local::now().date_naive() + Duration::days(1);
+        let day = tomorrow.format("%Y-%m-%d").to_string();
+        let post_at = schedule::at_local(tomorrow, "09:15").unwrap();
+        let expires = filmcraft_studio::iso_ms(filmcraft_studio::clock_ms(&filmcraft_studio::now_iso()).unwrap() + 30 * 86_400_000);
+        let mut env = std::collections::HashMap::new();
+        for k in ["CLOUD_SUPABASE_URL", "CLOUD_SUPABASE_ANON_KEY", "CLOUD_AUTH_EMAIL", "CLOUD_AUTH_PASSWORD"] {
+            env.insert(k.to_string(), "test".to_string());
+        }
+        let studio = Studio { root: Default::default(), database: ":memory:".into(), storage: Default::default(), secrets: Default::default(), env };
+        *rt() = Runtime {
+            studio: Some(Ok(studio)),
+            channels: vec![Channel { id: 1, slug: "qa".into(), name: "QA".into() }],
+            loaded_channel: Some(1),
+            brand: Some(Brand::default()),
+            cloud_loaded: true,
+            cloud_accounts: vec![json!({"id": "acc1", "account_name": "jkr_studio_", "token_expires_at": expires})],
+            cloud_posts: vec![json!({"id": "p1", "title": "Earlier trailer", "status": "scheduled", "scheduled_for": post_at, "instagram_account_id": "acc1"})],
+            ..Default::default()
+        };
+        app.ui.reel.calendar_day = Some(day.clone());
+        app.ui.reel.schedule_time = "18:00".into();
+        let ctx = egui::Context::default();
+        for _ in 0..2 {
+            schedule_frame(&mut app, &ctx);
+        }
+        let find = |app: &FilmcraftApp, id: &str| app.auto.find(id).cloned();
+        assert!(find(&app, &format!("reel.schedule.day.{day}")).is_some(), "the month shows the day");
+        assert!(find(&app, "reel.schedule.cancel.p1").is_some() && find(&app, "reel.schedule.reschedule.p1").is_some(), "the day's post can be cancelled or rescheduled");
+        assert_eq!(app.ui.reel.cloud_account.as_deref(), Some("acc1"), "the only account is chosen");
+        assert_eq!(find(&app, "reel.schedule.submit").and_then(|e| e.enabled), Some(true), "tomorrow 18:00 can be scheduled");
+        assert!(find(&app, "reel.publish.delivery.local").is_none() && find(&app, "reel.publish.renderNow").is_none(), "no local publishing or Publish now");
+        // A day in the past cannot be booked.
+        app.ui.reel.calendar_day = Some((Local::now().date_naive() - Duration::days(1)).format("%Y-%m-%d").to_string());
+        schedule_frame(&mut app, &ctx);
+        schedule_frame(&mut app, &ctx);
+        assert_eq!(find(&app, "reel.schedule.submit").and_then(|e| e.enabled), Some(false));
+        // Nor a time after the account's token expires.
+        app.ui.reel.calendar_day = Some((Local::now().date_naive() + Duration::days(40)).format("%Y-%m-%d").to_string());
+        app.ui.reel.calendar_month = None;
+        schedule_frame(&mut app, &ctx);
+        schedule_frame(&mut app, &ctx);
+        assert_eq!(find(&app, "reel.schedule.submit").and_then(|e| e.enabled), Some(false), "the token expires first");
+        *rt() = Runtime::default();
     }
 
     #[test]

@@ -4,7 +4,7 @@
 
 use filmcraft_project::{Interpolation, ParamValue};
 
-use crate::layers::{BLACK, Builder, Ctx, MONO, Rgba, Style, WHITE, Z, fit_size, text_height, text_height_w, with_alpha};
+use crate::layers::{BLACK, Builder, Ctx, MONO, Rgba, Style, WHITE, Z, text_height, text_height_w, with_alpha};
 use crate::{Backdrop, Fit, LogoSpot, Rect, ReelPlan};
 
 /// One entry of the template gallery.
@@ -76,9 +76,9 @@ fn quote_card(c: &Ctx<'_>) -> ReelPlan {
     let top = 650.0;
     let mut b = Builder::new(c, Rect::new(0.0, top, 1080.0, 1920.0 - top));
     b.rect(Z::Under, "Card", Rect::FULL, c.card_bg, 0.0);
-    b.brand_row(58.0, 60.0, 104.0, 42.0, 34.0);
-    let size = (c.brand.card_title_size * if c.title().chars().count() > 220 { 0.72 } else { 1.0 }).round();
-    title_and_caption(&mut b, 58.0, 230.0, 964.0, size, 1.26, Style { weight: "SemiBold", ..Style::regular() }, Some(top - 34.0));
+    b.brand_row(64.0, 220.0, 88.0, 36.0, 30.0);
+    let size = c.title_size(c.brand.card_title_size).round();
+    title_and_caption(&mut b, 64.0, 350.0, 820.0, size, 1.26, Style { weight: "SemiBold", ..Style::regular() }, None);
     b.finish()
 }
 
@@ -86,45 +86,45 @@ fn full_bleed(c: &Ctx<'_>) -> ReelPlan {
     let mut b = Builder::new(c, Rect::FULL);
     b.gradient(Z::Over, "Top scrim", Rect::new(0.0, 0.0, 1080.0, 430.0), with_alpha(BLACK, 0.8), with_alpha(BLACK, 0.0), 90.0);
     b.gradient(Z::Over, "Bottom scrim", Rect::new(0.0, 990.0, 1080.0, 930.0), with_alpha(BLACK, 0.0), with_alpha(BLACK, 0.92), 90.0);
-    b.brand_row(56.0, 54.0, 78.0, 34.0, 30.0);
-    let size = fit_size(c.title(), 78.0);
+    b.brand_row(64.0, 220.0, 78.0, 34.0, 30.0);
+    let size = c.title_size(78.0);
     let caption = c.card.caption.trim();
-    let cap_h = if caption.is_empty() { 0.0 } else { text_height(caption, 30.0, 968.0, 1.4) };
-    let title_h = text_height(c.title(), size, 968.0, 1.08);
-    let y = 1800.0 - if cap_h > 0.0 { cap_h + 22.0 } else { 0.0 } - title_h;
+    let cap_h = if caption.is_empty() { 0.0 } else { text_height(caption, 30.0, 820.0, 1.4) };
+    let title_h = text_height(c.title(), size, 820.0, 1.08);
+    let y = 1420.0 - if cap_h > 0.0 { cap_h + 22.0 } else { 0.0 } - title_h;
     let bar = b.rect(Z::Over, "Accent", Rect::new(56.0, y - 32.0, 96.0, 6.0), c.accent, 3.0);
-    let t = b.text(Z::Over, "Title", c.title(), 56.0, y, 968.0, size, Style { weight: "ExtraBold", leading: -6.0, ..Style::regular() });
+    let t = b.text(Z::Over, "Title", c.title(), 64.0, y, 820.0, size, Style { weight: "ExtraBold", leading: -6.0, ..Style::regular() });
     b.control("title", "Headline", t, "text");
     b.reveal(t, 0.0, 0.6, 0.0);
     if cap_h > 0.0 {
-        let cap = b.text(Z::Over, "Caption", caption, 56.0, 1800.0 - cap_h, 968.0, 30.0, Style { opacity: 80.0, ..Style::mono() });
+        let cap = b.text(Z::Over, "Caption", caption, 64.0, 1420.0 - cap_h, 820.0, 30.0, Style { opacity: 88.0, ..Style::regular() });
         b.control("caption", "Caption", cap, "text");
-        b.bottom_at(cap, 1800.0);
+        b.bottom_at(cap, 1420.0);
         b.pin(t, cap, [false, false, false, true], [0.0, 0.0, 0.0, -(cap_h + 22.0)]);
     } else {
-        b.bottom_at(t, 1800.0);
+        b.bottom_at(t, 1420.0);
     }
     b.pin(bar, t, [false, true, false, false], [0.0, -32.0, 0.0, 0.0]);
     b.finish()
 }
 
 fn headline(c: &Ctx<'_>) -> ReelPlan {
-    let size = fit_size(c.title(), 92.0);
-    let title_y = 70.0 + 72.0 + 46.0;
-    let title_h = text_height(c.title(), size, 940.0, 1.05);
+    let size = c.title_size(92.0);
+    let title_y = 220.0 + 72.0 + 46.0;
+    let title_h = text_height(c.title(), size, 820.0, 1.05);
     let caption = c.card.caption.trim();
-    let caption_h = if caption.is_empty() { 0.0 } else { 34.0 + text_height(caption, 31.0, 940.0, 1.45) };
+    let caption_h = if caption.is_empty() { 0.0 } else { 34.0 + text_height(caption, 31.0, 820.0, 1.45) };
     let slot_y = title_y + title_h + 44.0;
-    let slot_h = (1920.0 - 70.0 - caption_h - slot_y).max(400.0);
-    let mut b = Builder::new(c, Rect::new(70.0, slot_y, 940.0, slot_h));
+    let slot_h = (1420.0 - caption_h - slot_y).max(240.0);
+    let mut b = Builder::new(c, Rect::new(64.0, slot_y, 820.0, slot_h));
     b.gradient(Z::Under, "Card", Rect::FULL, c.card_bg, c.background, 75.0);
-    b.brand_row(70.0, 70.0, 72.0, 32.0, 28.0);
-    let t = b.text(Z::Over, "Title", c.title(), 70.0, title_y, 940.0, size, Style { weight: "ExtraBold", leading: -6.0, ..Style::regular() });
+    b.brand_row(64.0, 220.0, 72.0, 32.0, 28.0);
+    let t = b.text(Z::Over, "Title", c.title(), 64.0, title_y, 820.0, size, Style { weight: "ExtraBold", leading: -6.0, ..Style::regular() });
     b.control("title", "Headline", t, "text");
     b.reveal(t, 0.0, 0.6, 18.0);
-    b.rect(Z::Over, "Accent rule", Rect::new(70.0, slot_y + slot_h - 5.0, 940.0, 5.0), c.accent, 0.0);
+    b.rect(Z::Over, "Accent rule", Rect::new(64.0, slot_y + slot_h - 5.0, 820.0, 5.0), c.accent, 0.0);
     if !caption.is_empty() {
-        let cap = b.text(Z::Over, "Caption", caption, 70.0, slot_y + slot_h + 34.0, 940.0, 31.0, Style { align: 1, opacity: 82.0, ..Style::mono() });
+        let cap = b.text(Z::Over, "Caption", caption, 64.0, slot_y + slot_h + 34.0, 820.0, 31.0, Style { align: 1, opacity: 88.0, ..Style::regular() });
         b.control("caption", "Caption", cap, "text");
     }
     b.finish()
@@ -142,7 +142,7 @@ fn bullets(b: &mut Builder<'_, '_>, x: f64, mut y: f64, width: f64, size: f64) -
 }
 
 fn numbered(c: &Ctx<'_>) -> ReelPlan {
-    let mut b = Builder::new(c, Rect::new(0.0, 0.0, 1080.0, 1060.0));
+    let mut b = Builder::new(c, Rect::new(0.0, 180.0, 1080.0, 700.0));
     b.rect(Z::Under, "Card", Rect::FULL, c.card_bg, 0.0);
     b.gradient(Z::Over, "Fade", Rect::new(0.0, 0.0, 1080.0, 1062.0), with_alpha(BLACK, 0.0), c.card_bg, 90.0);
     let badge = b.text(
@@ -150,47 +150,47 @@ fn numbered(c: &Ctx<'_>) -> ReelPlan {
         "Badge",
         &c.badge(),
         56.0,
-        54.0,
+        220.0,
         300.0,
         30.0,
         Style { tracking: 70.0, plate: Some(([1.0, 1.0, 1.0, 0.12], 12.0, 30.0)), ..Style::mono() },
     );
     b.control("badge", "Badge", badge, "text");
-    let size = fit_size(c.title(), 72.0);
-    let t = b.text(Z::Over, "Title", c.title(), 66.0, 1060.0, 948.0, size, Style { weight: "ExtraBold", leading: -4.0, ..Style::regular() });
+    let size = c.title_size(72.0);
+    let t = b.text(Z::Over, "Title", c.title(), 64.0, 900.0, 820.0, size, Style { weight: "ExtraBold", leading: -4.0, ..Style::regular() });
     b.control("title", "Headline", t, "text");
-    let y = 1060.0 + text_height(c.title(), size, 948.0, 1.08) + 26.0;
-    bullets(&mut b, 66.0, y, 948.0, 33.0);
-    b.logo = Some(LogoSpot { center: (430.0, 1830.0), size: 54.0, opacity: 100.0 });
-    let h = b.text(Z::Over, "Handle", &c.brand.handle_line(), 470.0, 1814.0, 500.0, 30.0, Style { opacity: 70.0, ..Style::regular() });
+    let y = 900.0 + text_height(c.title(), size, 820.0, 1.08) + 26.0;
+    bullets(&mut b, 64.0, y, 820.0, 33.0);
+    b.logo = Some(LogoSpot { center: (100.0, 1390.0), size: 54.0, opacity: 100.0 });
+    let h = b.text(Z::Over, "Handle", &c.brand.handle_line(), 148.0, 1374.0, 700.0, 30.0, Style { opacity: 70.0, ..Style::regular() });
     b.control("handle", "Handle", h, "text");
     b.finish()
 }
 
 fn framed(c: &Ctx<'_>) -> ReelPlan {
-    let size = fit_size(c.title(), 56.0);
+    let size = c.title_size(56.0);
     let caption = c.card.caption.trim();
-    let footer = 30.0 + text_height(c.title(), size, 968.0, 1.14) + if caption.is_empty() { 0.0 } else { 16.0 + 40.0 } + 44.0;
-    let slot_y = 6.0 + 34.0 + 66.0 + 26.0;
-    let slot = Rect::new(56.0, slot_y, 968.0, (1920.0 - slot_y - footer).max(500.0));
+    let footer = 30.0 + text_height(c.title(), size, 820.0, 1.14) + if caption.is_empty() { 0.0 } else { 16.0 + text_height(caption, 28.0, 820.0, 1.3) } + 24.0;
+    let slot_y = 320.0;
+    let slot = Rect::new(64.0, slot_y, 820.0, (1420.0 - slot_y - footer).max(300.0));
     let mut b = Builder::new(c, slot);
     b.rect(Z::Under, "Card", Rect::FULL, c.card_bg, 0.0);
-    b.rect(Z::Over, "Top rule", Rect::new(0.0, 0.0, 1080.0, 6.0), c.accent, 0.0);
-    b.logo = Some(LogoSpot { center: (56.0 + 33.0, 40.0 + 33.0), size: 66.0, opacity: 100.0 });
-    let h = b.text(Z::Over, "Handle", &c.brand.handle_line(), 540.0, 56.0, 484.0, 28.0, Style { align: 2, opacity: 70.0, ..Style::regular() });
+    b.rect(Z::Over, "Top rule", Rect::new(64.0, 200.0, 820.0, 6.0), c.accent, 0.0);
+    b.logo = Some(LogoSpot { center: (100.0, 260.0), size: 66.0, opacity: 100.0 });
+    let h = b.text(Z::Over, "Handle", &c.brand.handle_line(), 450.0, 246.0, 434.0, 28.0, Style { align: 2, opacity: 80.0, ..Style::regular() });
     b.control("handle", "Handle", h, "text");
     b.outline(Z::Over, "Frame", slot, with_alpha(c.accent, 0.33), 2.0, 20.0);
     let ty = slot.y + slot.h + 30.0;
-    let t = b.text(Z::Over, "Title", c.title(), 56.0, ty, 968.0, size, Style { weight: "ExtraBold", align: 1, ..Style::regular() });
+    let t = b.text(Z::Over, "Title", c.title(), 64.0, ty, 820.0, size, Style { weight: "ExtraBold", align: 1, ..Style::regular() });
     b.control("title", "Headline", t, "text");
     if !caption.is_empty() {
         let cap = b.text(
             Z::Over,
             "Caption",
             caption,
-            56.0,
-            ty + text_height(c.title(), size, 968.0, 1.14) + 16.0,
-            968.0,
+            64.0,
+            ty + text_height(c.title(), size, 820.0, 1.14) + 16.0,
+            820.0,
             28.0,
             Style { align: 1, opacity: 72.0, ..Style::mono() },
         );
@@ -201,32 +201,32 @@ fn framed(c: &Ctx<'_>) -> ReelPlan {
 
 fn brief(c: &Ctx<'_>) -> ReelPlan {
     let contact = c.brand.contact_line.trim();
-    let slot_y = if contact.is_empty() { 26.0 } else { 34.0 + 30.0 + 26.0 };
-    let mut b = Builder::new(c, Rect::new(0.0, slot_y, 1080.0, 760.0));
+    let slot_y = if contact.is_empty() { 200.0 } else { 280.0 };
+    let mut b = Builder::new(c, Rect::new(0.0, slot_y, 1080.0, 620.0));
     b.rect(Z::Under, "Card", Rect::FULL, c.card_bg, 0.0);
     b.gradient(Z::Over, "Fade in", Rect::new(0.0, slot_y, 1080.0, 170.0), c.card_bg, with_alpha(c.card_bg, 0.0), 90.0);
     b.gradient(Z::Over, "Fade out", Rect::new(0.0, slot_y + 470.0, 1080.0, 292.0), with_alpha(c.card_bg, 0.0), c.card_bg, 90.0);
     if !contact.is_empty() {
-        let l = b.text(Z::Over, "Contact", contact, 56.0, 34.0, 968.0, 24.0, Style { align: 1, tracking: 40.0, opacity: 50.0, ..Style::mono() });
+        let l = b.text(Z::Over, "Contact", contact, 64.0, 220.0, 820.0, 24.0, Style { align: 1, tracking: 40.0, opacity: 75.0, ..Style::regular() });
         b.control("contact", "Contact Line", l, "text");
     }
-    let top = slot_y + 760.0 + 10.0;
+    let top = slot_y + 620.0 + 10.0;
     let badge = b.text(Z::Over, "Badge", &c.badge(), 66.0, top, 400.0, 30.0, Style { color: Some(c.accent), tracking: 100.0, ..Style::mono() });
     b.control("badge", "Badge", badge, "text");
-    let size = fit_size(c.title(), 68.0);
-    let t = b.text(Z::Over, "Title", c.title(), 66.0, top + 48.0, 948.0, size, Style { weight: "ExtraBold", leading: -4.0, ..Style::regular() });
+    let size = c.title_size(68.0);
+    let t = b.text(Z::Over, "Title", c.title(), 64.0, top + 48.0, 820.0, size, Style { weight: "ExtraBold", leading: -4.0, ..Style::regular() });
     b.control("title", "Headline", t, "text");
-    bullets(&mut b, 66.0, top + 48.0 + text_height(c.title(), size, 948.0, 1.08) + 24.0, 948.0, 31.0);
-    b.logo = Some(LogoSpot { center: (380.0, 1846.0), size: 52.0, opacity: 100.0 });
-    let n = b.text(Z::Over, "Channel", &c.channel(), 420.0, 1828.0, 600.0, 30.0, Style::bold());
+    bullets(&mut b, 64.0, top + 48.0 + text_height(c.title(), size, 820.0, 1.08) + 24.0, 820.0, 31.0);
+    b.logo = Some(LogoSpot { center: (100.0, 1390.0), size: 52.0, opacity: 100.0 });
+    let n = b.text(Z::Over, "Channel", &c.channel(), 148.0, 1370.0, 700.0, 30.0, Style::bold());
     b.control("channel", "Channel Name", n, "text");
     b.finish()
 }
 
 fn logo_only(c: &Ctx<'_>) -> ReelPlan {
     let mut b = Builder::new(c, Rect::FULL);
-    b.rect(Z::Over, "Logo plate", Rect::new(1080.0 - 54.0 - 162.0, 1920.0 - 86.0 - 162.0, 162.0, 162.0), with_alpha(BLACK, 0.4), 18.0);
-    b.logo = Some(LogoSpot { center: (1080.0 - 54.0 - 81.0, 1920.0 - 86.0 - 81.0), size: 126.0, opacity: 100.0 });
+    b.rect(Z::Over, "Logo plate", Rect::new(64.0, 220.0, 126.0, 126.0), with_alpha(BLACK, 0.4), 18.0);
+    b.logo = Some(LogoSpot { center: (127.0, 283.0), size: 100.0, opacity: 100.0 });
     b.finish()
 }
 
@@ -394,31 +394,19 @@ fn design(c: &Ctx<'_>) -> ReelPlan {
     } else {
         b.gradient(Z::Over, "Bottom shade", Rect::new(0.0, 960.0, 1080.0, 960.0), with_alpha(BLACK, 0.0), with_alpha(BLACK, 0.86), 90.0);
     }
-    // Branding: the logo and the channel name inside the safe area.
-    b.logo = Some(LogoSpot { center: (72.0 + 28.0, 96.0 + 28.0), size: 56.0, opacity: 100.0 });
-    let name = b.text(
-        Z::Over,
-        "Channel",
-        &c.channel(),
-        72.0 + 70.0,
-        96.0 + 10.0,
-        700.0,
-        30.0,
-        Style { weight: "Bold", shadow: Some([0.0, 0.0, 0.0, 0.6]), ..Style::regular() },
-    );
-    b.control("channel", "Channel Name", name, "text");
+    b.brand_row(64.0, 220.0, 56.0, 30.0, 24.0);
     // The words. Safe area: 72 px left, 180 px right, 300 px above the bottom. Bottom-placed
     // words are pinned by their bottom edge, so a headline of any length grows upwards from the
     // caption and never runs into it; the plate, rule and bar follow the headline.
-    let (left, width) = (72.0, 1080.0 - 72.0 - 180.0);
-    let size = fit_size(c.title(), r.max_size).max(32.0);
+    let (left, width) = (64.0, 820.0);
+    let size = c.title_size(r.max_size);
     let style = title_style(&r, c);
     let em = if matches!(r.look, Look::Condensed | Look::Outline | Look::Stacked) { 0.7 } else { 0.56 };
     let title_h = text_height_w(c.title(), size, width, 1.12, em);
     let caption = c.card.caption.trim();
     let cap_text_h = if caption.is_empty() { 0.0 } else { text_height(caption, 32.0, width, 1.35) };
     let caption_h = if caption.is_empty() { 0.0 } else { 18.0 + cap_text_h };
-    let base = 1920.0 - 300.0;
+    let base = 1420.0;
     let y = if r.top { 330.0 + 46.0 } else { base - caption_h - title_h };
     let mut words: Vec<u64> = Vec::new();
     if r.top {
@@ -514,7 +502,7 @@ fn design(c: &Ctx<'_>) -> ReelPlan {
     // The hook shows the words, the body leaves the footage clear, the close is the call to
     // action. Short Reels keep the words throughout.
     let end = c.seconds;
-    if end >= 8.0 && c.id != "jkr-minimal-v2" {
+    if end >= 8.0 && c.id != "jkr-minimal-v2" && c.card.text_timing == crate::TextTiming::IntroOutro {
         for w in &words {
             b.animate(
                 *w,
@@ -530,10 +518,12 @@ fn design(c: &Ctx<'_>) -> ReelPlan {
                 Interpolation::Linear,
             );
         }
+    } else if c.card.text_timing == crate::TextTiming::IntroOutro {
+        b.reveal(t, 0.0, 0.5, 0.0);
+    }
+    if end >= 8.0 && c.id != "jkr-minimal-v2" {
         let cta = c.cta();
         b.animate(t, "text", &[(0.0, ParamValue::Text(c.title().into())), (end - 3.0, ParamValue::Text(cta))], Interpolation::Hold);
-    } else {
-        b.reveal(t, 0.0, 0.5, 0.0);
     }
     if r.progress {
         b.progress(1920.0 - 7.0, 7.0, accent);

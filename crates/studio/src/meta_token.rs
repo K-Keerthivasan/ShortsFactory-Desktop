@@ -161,7 +161,9 @@ impl Studio {
             .into_json()
             .map_err(|_| StudioError::Other("Meta's answer was unreadable".into()))?;
         let long = long.get("access_token").and_then(Value::as_str).filter(|t| t.len() > 20).map(str::to_string).ok_or_else(|| {
-            StudioError::Other("Meta did not extend this token (a Page token, or one from another Meta app, cannot be exchanged); the old token was kept".into())
+            StudioError::Other(
+                "Meta did not extend this token (a Page token, or one from another Meta app, cannot be exchanged); the old token was kept".into(),
+            )
         })?;
         // The Page token from a long-lived user token does not expire.
         let page = agent()

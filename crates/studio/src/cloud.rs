@@ -140,7 +140,7 @@ pub fn valid_upload_target(url: &str, project: &str, provider: &str, bucket: &st
     }
 }
 
-fn new_key() -> String {
+pub(crate) fn new_key() -> String {
     // A v4-shaped UUID from the clock and a counter: unique per reservation, not a secret.
     static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let mut x = (now_ms() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
@@ -163,6 +163,22 @@ pub fn local_timezone() -> String {
 
 /// Schedules an approved render in the cloud: reserve, upload, finalize. Returns the cloud post.
 pub fn schedule(studio: &Studio, channel: i64, render: i64, account: &str, caption: &str, scheduled_for_iso: &str, publish_now: bool) -> Result<Value> {
+    let key = keys().entry(render).or_insert_with(new_key).clone();
+    schedule_with_key(studio, channel, render, account, caption, scheduled_for_iso, publish_now, &key)
+}
+
+/// A persisted key lets a local publication resume the same cloud reservation after a restart.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn schedule_with_key(
+    studio: &Studio,
+    channel: i64,
+    render: i64,
+    account: &str,
+    caption: &str,
+    scheduled_for_iso: &str,
+    publish_now: bool,
+    key: &str,
+) -> Result<Value> {
     let c = studio.connect()?;
     let (status, approved, file, demo, name): (String, Option<String>, Option<String>, i64, Option<String>) = c
         .query_row(
@@ -184,7 +200,6 @@ pub fn schedule(studio: &Studio, channel: i64, render: i64, account: &str, capti
     if parse_iso(scheduled_for_iso).is_none() {
         return err("unreadable schedule time");
     }
-    let key = keys().entry(render).or_insert_with(new_key).clone();
     let filename = file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "reel.mp4".into());
     let reserved = call(
         studio,
@@ -281,9 +296,30 @@ pub fn replace_token(studio: &Studio, account_id: &str, instagram_user_id: &str,
     let connected = call(studio, "connectInstagram", json!({"instagramUserId": instagram_user_id, "accessToken": token}))?;
     match call(studio, "extendInstagramToken", json!({"id": account_id})) {
         Ok(h) => Ok(format!("token replaced and extended, valid {}", expiry_text(h.get("expires").and_then(Value::as_str)))),
-        Err(e) => Ok(format!(
-            "token replaced, valid {}; extending it failed: {e}",
-            expiry_text(connected.get("token_expires_at").and_then(Value::as_str))
-        )),
+        Err(e) => Ok(format!("token replaced, valid {}; extending it failed: {e}", expiry_text(connected.get("token_expires_at").and_then(Value::as_str)))),
     }
+}
+
+/// Explicitly reuse this workspace's local credential for the matching cloud account only.
+pub fn use_local_token(studio: &Studio, local_account: i64, cloud_account: &str) -> Result<String> {
+    let (_, account) = studio.account(local_account)?;
+    if account.platform != "INSTAGRAM" {
+        return err("choose an Instagram account");
+    }
+    let accounts = call(studio, "accounts", json!({}))?;
+    if !accounts.as_array().is_some_and(|list| {
+        list.iter().any(|a| {
+            a.get("id").and_then(Value::as_str) == Some(cloud_account)
+                && a.get("instagram_user_id").and_then(Value::as_str) == Some(account.external_id.as_str())
+        })
+    }) {
+        return err("the local and cloud accounts do not refer to the same Instagram profile");
+    }
+    let secret = studio.secret(&account.credentials_reference)?;
+    let token = secret
+        .get("accessToken")
+        .and_then(Value::as_str)
+        .filter(|s| !s.trim().is_empty())
+        .ok_or_else(|| StudioError::Other("the local account has no token".into()))?;
+    replace_token(studio, cloud_account, &account.external_id, token)
 }

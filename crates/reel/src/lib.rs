@@ -105,6 +105,8 @@ impl Brand {
 pub struct Card {
     /// Per-field font families; absent entries retain the template's typography.
     pub fonts: std::collections::BTreeMap<String, String>,
+    pub text_styles: std::collections::BTreeMap<String, TextStyle>,
+    pub text_timing: TextTiming,
     pub title: String,
     pub caption: String,
     pub attribution: String,
@@ -117,6 +119,40 @@ pub struct Card {
     /// What the post says on Instagram (not drawn on the video).
     pub instagram_caption: String,
     pub hashtags: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TextTiming {
+    #[default]
+    Always,
+    IntroOutro,
+}
+
+/// Per-field typography, stored with the editable Reel. Zero limit means unrestricted text.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct TextStyle {
+    pub size: Option<f64>,
+    pub max_chars: u32,
+    pub uppercase: Option<bool>,
+    pub bold: Option<bool>,
+    pub italic: bool,
+    pub tracking: f64,
+    pub line_spacing: f64,
+    pub align: Option<u32>,
+}
+
+impl Card {
+    pub fn render_text(&self, field: &str, text: &str) -> String {
+        let limit = self.text_styles.get(field).map_or(0, |s| s.max_chars) as usize;
+        if limit == 0 || text.chars().count() <= limit {
+            return text.to_string();
+        }
+        let mut result: String = text.chars().take(limit.saturating_sub(1)).collect();
+        result.push('…');
+        result
+    }
 }
 
 /// The library post a project publishes as (rows of the shared studio database).
@@ -227,11 +263,56 @@ pub fn secs(s: f64) -> Tick {
 pub fn plan(template: &str, brand: &Brand, card: &Card, seconds: f64) -> Result<ReelPlan, String> {
     let info = find(template).ok_or_else(|| format!("unknown Reel template `{template}`"))?;
     let seconds = if seconds.is_finite() && seconds > 0.0 { seconds.min(86_400.0) } else { 30.0 };
-    let mut plan = (info.build)(&layers::Ctx::new(info.id, brand, card, seconds));
+    let mut display = card.clone();
+    display.title = card.render_text("title", &card.title);
+    display.caption = card.render_text("caption", &card.caption);
+    display.cta = card.render_text("title", &card.cta);
+    for (i, text) in display.bullets.iter_mut().enumerate() {
+        *text = card.render_text(&format!("point{}", i + 1), text);
+    }
+    let mut plan = (info.build)(&layers::Ctx::new(info.id, brand, &display, seconds));
     for control in &plan.controls {
-        if let Some(font) = card.fonts.get(&control.id).filter(|f| !f.trim().is_empty()) {
-            for layer in plan.over.iter_mut().chain(plan.under.iter_mut()).filter(|e| e.layer.as_ref().is_some_and(|l| l.uid == control.layer)) {
-                layer.params.insert("font".into(), filmcraft_project::Param::new(filmcraft_project::ParamValue::Text(font.clone())));
+        let standard = matches!(control.id.as_str(), "title" | "caption" | "point1" | "point2" | "point3" | "point4");
+        let custom = card.fonts.get(&control.id).filter(|f| !f.trim().is_empty());
+        for layer in plan.over.iter_mut().chain(plan.under.iter_mut()).filter(|e| e.layer.as_ref().is_some_and(|l| l.uid == control.layer)) {
+            if standard {
+                layer.params.insert(
+                    "font_style".into(),
+                    filmcraft_project::Param::new(filmcraft_project::ParamValue::Text(if control.id == "title" { "Bold" } else { "Regular" }.into())),
+                );
+            }
+            if let Some(font) = custom.map(String::as_str).or(standard.then_some("Inter")) {
+                layer.params.insert("font".into(), filmcraft_project::Param::new(filmcraft_project::ParamValue::Text(font.to_string())));
+            }
+            if control.id == "channel" && brand.logo_path.as_ref().is_some_and(|p| !p.trim().is_empty()) {
+                layer.params.insert("text".into(), filmcraft_project::Param::new(filmcraft_project::ParamValue::Text(String::new())));
+            }
+            let style = card.text_styles.get(&control.id).cloned().unwrap_or_default();
+            if standard || card.text_styles.contains_key(&control.id) {
+                use filmcraft_project::{Param, ParamValue};
+                let title = control.id == "title";
+                let bold = style.bold.unwrap_or(title);
+                let face = match (bold, style.italic) {
+                    (true, true) => "Bold Italic",
+                    (true, false) => "Bold",
+                    (false, true) => "Italic",
+                    (false, false) => "Regular",
+                };
+                layer.params.insert("font_style".into(), Param::new(ParamValue::Text(face.into())));
+                layer.params.insert("caps".into(), Param::new(ParamValue::Choice(u32::from(style.uppercase.unwrap_or(title)))));
+                layer.params.insert(
+                    "tracking".into(),
+                    Param::new(ParamValue::Float(if style.tracking.is_finite() { style.tracking.clamp(-100.0, 500.0) } else { 0.0 })),
+                );
+                if !title && let Some(size) = style.size.filter(|s| s.is_finite()) {
+                    layer.params.insert("size".into(), Param::new(ParamValue::Float(size.clamp(16.0, 160.0))));
+                }
+                if style.line_spacing.is_finite() && style.line_spacing != 0.0 {
+                    layer.params.insert("leading".into(), Param::new(ParamValue::Float(style.line_spacing.clamp(-10.0, 80.0))));
+                }
+                if let Some(align) = style.align {
+                    layer.params.insert("align".into(), Param::new(ParamValue::Choice(align.min(2))));
+                }
             }
         }
     }

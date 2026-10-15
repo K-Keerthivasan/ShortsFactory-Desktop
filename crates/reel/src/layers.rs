@@ -83,6 +83,10 @@ impl<'a> Ctx<'a> {
         let b = self.card.badge.trim();
         if b.is_empty() { "01".into() } else { b.to_string() }
     }
+    pub fn title_size(&self, base: f64) -> f64 {
+        let size = self.card.text_styles.get("title").and_then(|s| s.size).filter(|s| s.is_finite()).unwrap_or(base).clamp(16.0, 160.0);
+        fit_size(self.title(), size)
+    }
 }
 
 /// Shrinks a headline as it gets longer, so a long one never runs off its area.
@@ -145,7 +149,21 @@ impl<'c, 'a> Builder<'c, 'a> {
     pub fn new(c: &'c Ctx<'a>, slot: Rect) -> Self {
         Builder { c, next_uid: 1, slot, fit: Fit::Cover, backdrop: Backdrop::None, under: Vec::new(), over: Vec::new(), controls: Vec::new(), logo: None }
     }
-    pub fn finish(self) -> ReelPlan {
+    pub fn finish(mut self) -> ReelPlan {
+        if self.c.id != "logoOnly" && !self.c.card.attribution.trim().is_empty() {
+            let text = self.c.card.render_text("attribution", self.c.card.attribution.trim());
+            let credit = self.text(
+                Z::Over,
+                "Credit",
+                &text,
+                420.0,
+                310.0,
+                464.0,
+                20.0,
+                Style { align: 2, opacity: 80.0, shadow: Some([0.0, 0.0, 0.0, 0.6]), ..Style::regular() },
+            );
+            self.control("attribution", "Credit", credit, "text");
+        }
         ReelPlan {
             template: self.c.id,
             slot: self.slot,

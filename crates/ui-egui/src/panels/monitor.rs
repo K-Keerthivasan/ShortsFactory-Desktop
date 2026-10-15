@@ -263,6 +263,20 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, which: Which)
             ui.painter().line_segment([c - vec2(8.0, 0.0), c + vec2(8.0, 0.0)], Stroke::new(1.0, Color32::from_white_alpha(120)));
             ui.painter().line_segment([c - vec2(0.0, 8.0), c + vec2(0.0, 8.0)], Stroke::new(1.0, Color32::from_white_alpha(120)));
         }
+        if which == Which::Program && app.ui.reel.instagram_guides && frame_size.1 > frame_size.0 {
+            let a = egui::pos2(pic.left() + pic.width() * 64.0 / 1080.0, pic.top() + pic.height() * 220.0 / 1920.0);
+            let b = egui::pos2(pic.left() + pic.width() * 884.0 / 1080.0, pic.top() + pic.height() * 1420.0 / 1920.0);
+            let safe = Rect::from_min_max(a, b);
+            ui.painter().rect_stroke(safe, 0.0, Stroke::new(1.5, Color32::from_rgb(80, 220, 180)), StrokeKind::Inside);
+            for reserved in [
+                Rect::from_min_max(pic.min, egui::pos2(pic.max.x, a.y)),
+                Rect::from_min_max(egui::pos2(b.x, a.y), pic.max),
+                Rect::from_min_max(egui::pos2(pic.min.x, b.y), pic.max),
+            ] {
+                ui.painter().rect_filled(reserved, 0.0, Color32::from_rgba_unmultiplied(220, 70, 70, 30));
+            }
+            app.auto.add("program.instagramSafeArea", safe, "Instagram text-safe area; guides are not exported");
+        }
         if display != DisplayMode::Composite && !compare {
             let label = match display {
                 DisplayMode::Composite => tl!("Composite"),

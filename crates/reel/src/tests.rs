@@ -1,4 +1,84 @@
 use super::*;
+
+#[test]
+fn headline_styles_limits_and_logo_lockups_work_across_the_catalog() {
+    use filmcraft_project::ParamValue;
+    let brand = Brand { logo_path: Some("own-logo.png".into()), social_handle: "mychannel".into(), ..Brand::default() };
+    let mut card = full_card();
+    for template in TEMPLATES {
+        let p = plan(template.id, &brand, &card, 30.0).unwrap();
+        for control in &p.controls {
+            let e = p.over.iter().find(|e| e.layer.as_ref().is_some_and(|l| l.uid == control.layer)).unwrap();
+            if control.id == "channel" {
+                assert_eq!(e.params["text"].value, ParamValue::Text(String::new()), "{} duplicates its logo name", template.id);
+            }
+            if control.id == "title" {
+                assert_eq!(e.params["caps"].value, ParamValue::Choice(1));
+            }
+            if template.family == "Design" && matches!(control.id.as_str(), "title" | "caption") {
+                assert!(
+                    !e.params.get("opacity").is_some_and(|p| p.keyframes.iter().any(|k| k.time > secs(1.0) && k.value == ParamValue::Float(0.0))),
+                    "{} hides text during footage",
+                    template.id
+                );
+            }
+        }
+    }
+    card.text_styles
+        .insert("title".into(), TextStyle { max_chars: 12, uppercase: Some(false), bold: Some(false), italic: true, size: Some(80.0), ..Default::default() });
+    let card: Card = serde_json::from_value(serde_json::to_value(card).unwrap()).unwrap();
+    for template in TEMPLATES.iter().filter(|t| t.id != "logoOnly") {
+        let p = plan(template.id, &brand, &card, 30.0).unwrap();
+        let c = p.controls.iter().find(|c| c.id == "title").unwrap();
+        let e = p.over.iter().find(|e| e.layer.as_ref().is_some_and(|l| l.uid == c.layer)).unwrap();
+        assert_eq!(e.params["caps"].value, ParamValue::Choice(0));
+        assert_eq!(e.params["font_style"].value, ParamValue::Text("Italic".into()));
+        let ParamValue::Text(text) = &e.params["text"].value else { panic!("missing text") };
+        assert!(text.chars().count() <= 12);
+    }
+}
+
+#[test]
+fn important_text_avoids_the_instagram_right_rail_and_caption_area() {
+    use filmcraft_project::ParamValue;
+    for template in TEMPLATES {
+        let p = plan(template.id, &Brand::default(), &full_card(), 30.0).unwrap();
+        for control in p.controls.iter().filter(|c| matches!(c.id.as_str(), "title" | "caption" | "handle" | "channel")) {
+            let e = p.over.iter().find(|e| e.layer.as_ref().is_some_and(|l| l.uid == control.layer)).unwrap();
+            let ParamValue::Vec2(position) = e.params["position"].value else {
+                continue;
+            };
+            let width = match e.params.get("box_width").map(|p| &p.value) {
+                Some(ParamValue::Float(w)) => *w,
+                _ => 0.0,
+            };
+            assert!(position.x >= 56.0 && position.x + width <= 900.01, "{} {} leaves the horizontal text area: {position:?} {width}", template.id, control.id);
+            assert!(position.y >= 200.0 && position.y <= 1420.0, "{} {} leaves the vertical text area: {position:?}", template.id, control.id);
+        }
+    }
+}
+
+#[test]
+fn standard_card_type_is_bundled_inter_and_keeps_the_channel_brand_font() {
+    let brand = Brand { font: "Georgia".into(), ..Brand::default() };
+    let card = Card { title: "A clear headline".into(), caption: "A supporting line".into(), ..Card::default() };
+    for template in TEMPLATES.iter().filter(|t| t.id != "logoOnly") {
+        let p = plan(template.id, &brand, &card, 10.0).unwrap();
+        for control in &p.controls {
+            let layer = p.over.iter().find(|e| e.layer.as_ref().is_some_and(|l| l.uid == control.layer)).unwrap();
+            if matches!(control.id.as_str(), "title" | "caption") {
+                assert_eq!(layer.params["font"].value, filmcraft_project::ParamValue::Text("Inter".into()), "{} {}", template.id, control.id);
+                assert_eq!(
+                    layer.params["font_style"].value,
+                    filmcraft_project::ParamValue::Text(if control.id == "title" { "Bold" } else { "Regular" }.into())
+                );
+            }
+            if control.id == "channel" {
+                assert_eq!(layer.params["font"].value, filmcraft_project::ParamValue::Text("Georgia".into()));
+            }
+        }
+    }
+}
 use filmcraft_project::graphic::{SHAPE_LAYER, TEXT_LAYER};
 
 #[test]

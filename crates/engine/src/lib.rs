@@ -17,6 +17,7 @@ pub mod clip_ops;
 pub mod color;
 pub mod commands;
 pub mod demo;
+pub mod edge_gaps;
 pub mod essential_sound;
 pub mod export_tools;
 pub mod graphic_templates;
@@ -479,6 +480,7 @@ impl Job {
             "progress": self.progress.fraction(),
             // seconds left at the job's recent speed; null until it can tell
             "etaSeconds": self.progress.eta().map(|d| d.as_secs_f64()),
+            "elapsedSeconds": res.as_ref().and_then(|r|r.as_ref().ok()).map(|r|r.seconds).unwrap_or_else(||self.progress.elapsed().as_secs_f64()),
             "done": self.progress.done.load(Ordering::Relaxed),
             "total": self.progress.total.load(Ordering::Relaxed),
             "status": self.progress.status.lock().unwrap_or_else(|e| e.into_inner()).clone(),

@@ -42,6 +42,13 @@ pub fn commands() -> Vec<CommandSpec> {
             Ok(json!({"templates": TEMPLATES.iter().map(|t| json!({"id": t.id, "name": t.name, "note": t.note, "family": t.family})).collect::<Vec<_>>()}))
         }),
         query("reel.info", "Reel Info", r#"{}"#, |s, _| Ok(json!({"reel": current(s).map(|r| r.to_value()).unwrap_or(Value::Null)}))),
+        query("reel.edgeGaps", "Inspect Empty Video Edges", "{}", |s, _| {
+            Ok(s.state
+                .active_sequence
+                .and_then(|seq| crate::edge_gaps::inspect(&s.project, seq))
+                .and_then(|g| serde_json::to_value(g).ok())
+                .unwrap_or(Value::Null))
+        }),
         spec(
             "reel.new",
             "New Reel…",
@@ -457,6 +464,27 @@ fn ensure_tracks(pr: &mut Project, seq: ItemId) -> Result<()> {
 fn set_card(s: &mut Session, p: &Value) -> Result<Value> {
     let mut reel = info(s);
     let mut card = reel.card.clone();
+    let styles: Option<std::collections::BTreeMap<String, filmcraft_reel::TextStyle>> = parse(p, "textStyles", "reel.setCard")?;
+    if let Some(styles) = styles {
+        if styles.len() > 16
+            || styles.iter().any(|(key, s)| {
+                key.len() > 32
+                    || s.max_chars > 2000
+                    || s.size.is_some_and(|v| !v.is_finite() || !(16.0..=160.0).contains(&v))
+                    || !s.tracking.is_finite()
+                    || !(-100.0..=500.0).contains(&s.tracking)
+                    || !s.line_spacing.is_finite()
+                    || !(-10.0..=80.0).contains(&s.line_spacing)
+                    || s.align.is_some_and(|a| a > 2)
+            })
+        {
+            return Err(bad("reel.setCard", "Invalid text style or text limit"));
+        }
+        card.text_styles = styles;
+    }
+    if let Some(timing) = parse(p, "textTiming", "reel.setCard")? {
+        card.text_timing = timing;
+    }
     let fonts: Option<std::collections::BTreeMap<String, String>> = parse(p, "fonts", "reel.setCard")?;
     if let Some(fonts) = fonts {
         if fonts.len() > 16 || fonts.iter().any(|(k, v)| k.len() > 32 || v.len() > 256) {
@@ -491,25 +519,109 @@ fn set_card(s: &mut Session, p: &Value) -> Result<Value> {
         card.hashtags = v;
     }
     let values: Vec<(&str, String)> = vec![
-        ("title", card.title.clone()),
-        ("caption", card.caption.clone()),
+        ("title", card.render_text("title", &card.title)),
+        ("caption", card.render_text("caption", &card.caption)),
+        ("attribution", card.render_text("attribution", &card.attribution)),
         ("badge", card.badge.clone()),
-        ("point1", card.bullets.first().cloned().unwrap_or_default()),
-        ("point2", card.bullets.get(1).cloned().unwrap_or_default()),
-        ("point3", card.bullets.get(2).cloned().unwrap_or_default()),
-        ("point4", card.bullets.get(3).cloned().unwrap_or_default()),
+        ("point1", card.render_text("point1", card.bullets.first().map(String::as_str).unwrap_or_default())),
+        ("point2", card.render_text("point2", card.bullets.get(1).map(String::as_str).unwrap_or_default())),
+        ("point3", card.render_text("point3", card.bullets.get(2).map(String::as_str).unwrap_or_default())),
+        ("point4", card.render_text("point4", card.bullets.get(3).map(String::as_str).unwrap_or_default())),
     ];
     let cta = if card.cta.trim().is_empty() { reel.brand.cta.clone().unwrap_or_default() } else { card.cta.clone() };
-    let fonts_changed = reel.card.fonts != card.fonts;
+    let previous_fonts = reel.card.fonts.clone();
+    let style_changed =
+        reel.card.text_styles != card.text_styles || reel.card.text_timing != card.text_timing || p.get("reflow").and_then(Value::as_bool) == Some(true);
     reel.card = card;
-    let font_plan =
-        if fonts_changed { Some(filmcraft_reel::plan(&reel.template, &reel.brand, &reel.card, 15.0).map_err(|e| bad("reel.setCard", e))?) } else { None };
+    let font_plan = filmcraft_reel::plan(&reel.template, &reel.brand, &reel.card, 15.0).map_err(|e| bad("reel.setCard", e))?;
     let value = reel.to_value();
     let seq = s.state.active_sequence.ok_or(EngineError::NoSequence)?;
     s.edit("Edit Reel Card", |pr, _| {
         // Only this sequence's Reel: other sequences are other Reels with their own cards.
         if let Some(q) = pr.sequence_mut(seq) {
+            let height = q.settings.height;
+            let width = q.settings.width;
             for ti in q.video_tracks.iter_mut().flat_map(|t| t.items.iter_mut()).filter(|i| i.name == MADE[2]) {
+                // Older/empty cards have no optional supporting-text layers. Reflow the graphic
+                // in place when one is added; keep the clip, footage, trims and audio intact.
+                let needs_caption = font_plan
+                    .controls
+                    .iter()
+                    .filter(|c| c.param == "text")
+                    .any(|control| !ti.graphic.as_ref().and_then(|g| g.template.as_ref()).is_some_and(|l| l.controls.iter().any(|c| c.id == control.id)));
+                if needs_caption || style_changed {
+                    let mut plan =
+                        filmcraft_reel::plan_for(&reel.template, &reel.brand, &reel.card, ti.duration.seconds(), height).map_err(|e| bad("reel.setCard", e))?;
+                    // The channel row is independent of the card's standard typography.
+                    if let Some(old) = ti.graphic.as_ref().and_then(|g| g.template.as_ref()) {
+                        for control in old.controls.iter().filter(|c| matches!(c.id.as_str(), "channel" | "handle")) {
+                            let Some(source) = ti.effects.iter().find(|e| e.layer.as_ref().is_some_and(|l| l.uid == control.layer)) else { continue };
+                            let Some(new) = plan.controls.iter().find(|c| c.id == control.id) else { continue };
+                            if let Some(target) = plan.over.iter_mut().find(|e| e.layer.as_ref().is_some_and(|l| l.uid == new.layer)) {
+                                let text = target.params.get("text").cloned();
+                                target.params = source.params.clone();
+                                if control.id == "channel"
+                                    && reel.brand.logo_path.as_ref().is_some_and(|p| !p.is_empty())
+                                    && let Some(text) = text
+                                {
+                                    target.params.insert("text".into(), text);
+                                }
+                            }
+                        }
+                    }
+                    // Keep existing layer IDs (and independently added layers), so selections,
+                    // custom graphics and pins survive insertion of the supporting line.
+                    let mut next_uid = ti.effects.iter().filter_map(|e| e.layer.as_ref().map(|l| l.uid)).max().unwrap_or(0);
+                    let mut ids = std::collections::BTreeMap::new();
+                    for layer in &plan.over {
+                        let Some(extra) = layer.layer.as_ref() else { continue };
+                        let existing = ti
+                            .effects
+                            .iter()
+                            .find(|e| e.effect == layer.effect && e.params.get("name") == layer.params.get("name"))
+                            .and_then(|e| e.layer.as_ref())
+                            .map(|l| l.uid);
+                        let uid = match existing {
+                            Some(uid) => uid,
+                            None => {
+                                next_uid = next_uid.checked_add(1).ok_or_else(|| bad("reel.setCard", "graphic layer IDs exhausted"))?;
+                                next_uid
+                            }
+                        };
+                        ids.insert(extra.uid, uid);
+                    }
+                    for control in &mut plan.controls {
+                        if let Some(uid) = ids.get(&control.layer) {
+                            control.layer = *uid;
+                        }
+                    }
+                    for mut layer in plan.over {
+                        if let Some(extra) = layer.layer.as_mut() {
+                            if let Some(uid) = ids.get(&extra.uid) {
+                                extra.uid = *uid;
+                            }
+                            if let Some(pin) = extra.pin.as_mut()
+                                && let filmcraft_project::graphic_design::PinTarget::Layer(target) = &mut pin.to
+                                && let Some(uid) = ids.get(target)
+                            {
+                                *target = *uid;
+                            }
+                        }
+                        filmcraft_project::resolve_auto_points(&mut layer, (width, height), (width, height));
+                        if let Some(existing) = ti.effects.iter_mut().find(|e| e.layer.as_ref().zip(layer.layer.as_ref()).is_some_and(|(a, b)| a.uid == b.uid))
+                        {
+                            if let (Some(old), Some(new)) = (existing.layer.as_ref(), layer.layer.as_mut()) {
+                                new.runs = old.runs.clone();
+                            }
+                            *existing = layer;
+                        } else {
+                            ti.effects.push(layer);
+                        }
+                    }
+                    if let Some(link) = ti.graphic.as_mut().and_then(|g| g.template.as_mut()) {
+                        link.controls = plan.controls;
+                    }
+                }
                 let Some(link) = ti.graphic.as_ref().and_then(|g| g.template.clone()) else { continue };
                 for (id, v) in &values {
                     let Some(c) = link.controls.iter().find(|c| c.id == *id) else { continue };
@@ -528,12 +640,22 @@ fn set_card(s: &mut Session, p: &Value) -> Result<Value> {
                         k.value = ParamValue::Text(cta.clone());
                     }
                 }
-                if let Some(plan) = &font_plan {
+                {
+                    let plan = &font_plan;
                     for control in &link.controls {
-                        let Some(source) = plan.over.iter().find(|e| e.layer.as_ref().is_some_and(|l| l.uid == control.layer)) else { continue };
-                        let Some(font) = source.params.get("font") else { continue };
+                        if previous_fonts.get(&control.id) == reel.card.fonts.get(&control.id)
+                            && !matches!(control.id.as_str(), "title" | "caption" | "point1" | "point2" | "point3" | "point4")
+                        {
+                            continue;
+                        }
+                        let Some(planned) = plan.controls.iter().find(|c| c.id == control.id) else { continue };
+                        let Some(source) = plan.over.iter().find(|e| e.layer.as_ref().is_some_and(|l| l.uid == planned.layer)) else { continue };
                         if let Some(layer) = ti.effects.iter_mut().find(|e| e.layer.as_ref().is_some_and(|l| l.uid == control.layer)) {
-                            layer.params.insert("font".into(), font.clone());
+                            for key in ["font", "font_style", "caps", "tracking", "leading", "align"] {
+                                if let Some(font) = source.params.get(key) {
+                                    layer.params.insert(key.into(), font.clone());
+                                }
+                            }
                         }
                     }
                 }

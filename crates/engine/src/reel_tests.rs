@@ -45,6 +45,25 @@ fn changing_card_fonts_keeps_clips_and_is_undoable() {
     assert!(s.execute("reel.setCard", json!({"fonts": {"title": "x".repeat(257)}})).is_err());
 }
 
+#[test]
+fn text_styles_reflow_the_existing_graphic_and_reject_invalid_limits() {
+    let (mut s, _) = reel("quoteCard");
+    let footage = track_items(&s, 2);
+    let overlay = track_items(&s, 3)[0].id;
+    s.execute("reel.setCard",json!({"textStyles":{"title":{"size":80,"uppercase":true,"bold":true,"italic":true,"maxChars":14}},"textTiming":"always","attribution":"Original: creator"})).unwrap();
+    assert_eq!(track_items(&s, 2), footage);
+    assert_eq!(track_items(&s, 3)[0].id, overlay);
+    let effects = &track_items(&s, 3)[0].effects;
+    let title = effects.iter().find(|e| e.params.get("name").is_some_and(|p| p.value == ParamValue::Text("Title".into()))).unwrap();
+    assert_eq!(title.params["font_style"].value, ParamValue::Text("Bold Italic".into()));
+    let ParamValue::Text(text) = &title.params["text"].value else { panic!("no title") };
+    assert!(text.chars().count() <= 14);
+    assert!(effects.iter().any(|e| e.params.get("text").is_some_and(|p| p.value == ParamValue::Text("Original: creator".into()))));
+    for styles in [json!({"title":{"size":-1}}), json!({"title":{"maxChars":2001}}), json!({"title":{"align":99}})] {
+        assert!(s.execute("reel.setCard", json!({"textStyles":styles})).is_err());
+    }
+}
+
 /// A fresh Reel built around procedural demo footage (no media files needed).
 fn reel(template: &str) -> (Session, Value) {
     let mut s = Session::default();
@@ -119,6 +138,34 @@ fn editing_the_card_rewrites_the_overlay_text() {
     assert_eq!(title.params["text"].value, ParamValue::Text("A new headline".into()));
     let info = crate::reel::current(&s).unwrap();
     assert_eq!(info.card.title, "A new headline");
+}
+
+#[test]
+fn adding_a_supporting_line_to_an_empty_card_creates_the_layer_in_place() {
+    for template in ["quoteCard", "fullBleed", "headline", "framed", "jkr-clean-v2", "jkr-cinematic-v2"] {
+        let (mut s, _) = reel(template);
+        s.execute("reel.apply", json!({"card":{"title":"A headline without supporting text","caption":""}})).unwrap();
+        let footage = track_items(&s, 2).to_vec();
+        let original = track_items(&s, 3)[0].clone();
+        assert!(!original.graphic.as_ref().unwrap().template.as_ref().unwrap().controls.iter().any(|c| c.id == "caption"));
+        s.execute("reel.setCard", json!({"caption":"A supporting line that must appear"})).unwrap();
+        let overlay = &track_items(&s, 3)[0];
+        assert_eq!(overlay.id, original.id);
+        assert_eq!(overlay.range(), original.range());
+        assert_eq!(track_items(&s, 2), footage);
+        let controls = &overlay.graphic.as_ref().unwrap().template.as_ref().unwrap().controls;
+        let caption = controls.iter().find(|c| c.id == "caption").unwrap();
+        let layer = overlay.effects.iter().find(|e| e.layer.as_ref().is_some_and(|l| l.uid == caption.layer)).unwrap();
+        assert_eq!(layer.params["text"].value, ParamValue::Text("A supporting line that must appear".into()), "{template}");
+        assert_eq!(layer.params["font"].value, ParamValue::Text("Inter".into()));
+        s.execute("reel.setCard", json!({"caption":"","fonts":{"caption":"Georgia"}})).unwrap();
+        s.execute("reel.setCard", json!({"caption":"Visible again"})).unwrap();
+        let overlay = &track_items(&s, 3)[0];
+        let caption = overlay.graphic.as_ref().unwrap().template.as_ref().unwrap().controls.iter().find(|c| c.id == "caption").unwrap();
+        let layer = overlay.effects.iter().find(|e| e.layer.as_ref().is_some_and(|l| l.uid == caption.layer)).unwrap();
+        assert_eq!(layer.params["text"].value, ParamValue::Text("Visible again".into()));
+        assert_eq!(layer.params["font"].value, ParamValue::Text("Georgia".into()));
+    }
 }
 
 #[test]

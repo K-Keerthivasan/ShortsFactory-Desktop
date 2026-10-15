@@ -643,6 +643,7 @@ fn item_json(s: &Session, it: &QueueItem) -> Value {
         "status": it.status,
         "progress": progress,
         "etaSeconds": job.filter(|_| it.status == QueueStatus::Encoding).and_then(|j| j.progress.eta()).map(|d| d.as_secs_f64()),
+        "elapsedSeconds": job.map(|j|j.progress.elapsed().as_secs_f64()),
         "statusText": status_text,
         "job": it.job,
         "error": it.error,

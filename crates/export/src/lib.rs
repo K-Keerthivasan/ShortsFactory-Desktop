@@ -663,6 +663,7 @@ impl ExportSettings {
 /// Shared progress/cancel state of an export job.
 #[derive(Default)]
 pub struct Progress {
+    clock: ProgressClock,
     pub done: AtomicU64,
     pub total: AtomicU64,
     pub cancel: AtomicBool,
@@ -675,7 +676,21 @@ pub struct Progress {
     pace: Mutex<pace::Pace>,
 }
 
+struct ProgressClock {
+    start: web_time::Instant,
+    stopped: Mutex<Option<std::time::Duration>>,
+}
+impl Default for ProgressClock {
+    fn default() -> Self {
+        Self { start: web_time::Instant::now(), stopped: Mutex::new(None) }
+    }
+}
+
 impl Progress {
+    pub fn elapsed(&self) -> std::time::Duration {
+        let mut stopped = self.clock.stopped.lock().unwrap_or_else(|e| e.into_inner());
+        if self.finished.load(Ordering::Relaxed) { *stopped.get_or_insert_with(|| self.clock.start.elapsed()) } else { self.clock.start.elapsed() }
+    }
     pub fn fraction(&self) -> f32 {
         let t = self.total.load(Ordering::Relaxed).max(1);
         self.done.load(Ordering::Relaxed) as f32 / t as f32
