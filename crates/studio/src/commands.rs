@@ -91,7 +91,8 @@ pub fn register() {
             "Download a Video",
             r#"{"channel":n,"url":str,"notes":str?,"noDraft":bool? (skip the one-card draft; for studio.plan),"options":{"quality":"best|1080|720|480","format":str?,"cookiesFrom":str?,"rateLimit":str?,"sectionStart":str?,"sectionEnd":str?}?} (blocks until done: download, checks, library, AI draft)"#,
             true,
-            |_, p| {
+            |session, p| {
+                let s_path = session.path.clone();
                 let s = studio()?;
                 let options = p.get("options").cloned().map(serde_json::from_value).transpose().map_err(|e| bad(format!("options: {e}")))?.unwrap_or_default();
                 let job = crate::ytdlp::Import {
@@ -99,6 +100,7 @@ pub fn register() {
                     notes: p.get("notes").and_then(Value::as_str).unwrap_or("").to_string(),
                     options,
                     no_draft: p.get("noDraft").and_then(Value::as_bool).unwrap_or(false),
+                    save_to: crate::project_folder(s_path.as_deref(), "Downloads").ok(),
                     ..Default::default()
                 };
                 let done = crate::ytdlp::run(&s, int(p, "channel")?, job, &|_| {});
@@ -235,8 +237,8 @@ pub fn register() {
 fn send_to_library(s: &mut Session, p: &Value) -> Result<Value> {
     let st = studio()?;
     let info = filmcraft_engine::reel::current(s).ok_or_else(|| bad("the active sequence is not a Reel"))?;
-    let dir = st.root.join("Editor").join("exports");
-    std::fs::create_dir_all(&dir).map_err(|e| bad(e.to_string()))?;
+    // Renders go to the project's own folder (beside the project file), not the app's.
+    let dir = crate::project_folder(s.path.as_deref(), "Renders").map_err(err)?;
     let seq = s.state.active_sequence.ok_or(EngineError::NoSequence)?;
     let name: String = s
         .project

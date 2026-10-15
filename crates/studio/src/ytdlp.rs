@@ -66,6 +66,10 @@ pub struct Import {
     pub card: Option<Card>,
     pub post: Option<filmcraft_reel::PostLink>,
     pub error: Option<String>,
+    /// The open project's Downloads folder (see `project_folder`); a folder chosen in the
+    /// Downloads panel still wins, and with neither the workspace's clips folder is used.
+    #[serde(default)]
+    pub save_to: Option<PathBuf>,
     /// Stop after the download (the AI workflow writes a card per segment instead of one draft).
     #[serde(default)]
     pub no_draft: bool,
@@ -233,11 +237,16 @@ fn step(studio: &Studio, channel: i64, job: &mut Import, update: &dyn Fn(&Import
         }
         job.title = meta.get("title").and_then(Value::as_str).unwrap_or("Imported video").chars().take(200).collect();
         let (slug,): (String,) = studio.connect()?.query_row("SELECT slug FROM channels WHERE id = ?1", [channel], |r| Ok((r.get(0)?,)))?;
-        // The chosen downloads folder, else the workspace's clips folder.
-        let dir = studio.app_settings().download_dir.unwrap_or_else(|| studio.storage.join("channels").join(&slug).join("assets").join("clips"));
+        // A folder chosen in the Downloads panel, else the project's own, else the workspace's clips.
+        let dir = studio
+            .app_settings()
+            .download_dir
+            .or_else(|| job.save_to.clone())
+            .unwrap_or_else(|| studio.storage.join("channels").join(&slug).join("assets").join("clips"));
         std::fs::create_dir_all(&dir)?;
         let stem = format!("import-{}", now_ms());
-        let work = studio.root.join("Editor").join("downloads");
+        // Partial files stay beside the result (same drive, so the finished file is moved, not copied).
+        let work = if job.save_to.is_some() { dir.join(".downloading") } else { studio.root.join("Editor").join("downloads") };
         std::fs::create_dir_all(&work)?;
         let template = work.join(format!("{stem}.%(ext)s"));
         let merge = ffmpeg(studio);

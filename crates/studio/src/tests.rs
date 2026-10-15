@@ -457,3 +457,17 @@ fn extending_needs_the_meta_app_and_never_calls_out_without_it() {
     assert!(!e.contains("never-logged"), "no token in errors");
     assert!(crate::cloud::replace_token(&s, "x", "123", "short").is_err());
 }
+
+#[test]
+fn project_files_live_beside_the_project() {
+    let dir = std::env::temp_dir().join(format!("sf-project-{}", std::process::id()));
+    let file = dir.join("Trailer cut.fcproj");
+    let file = file.to_string_lossy().into_owned();
+    assert_eq!(crate::project_folder_path(Some(&file), "Renders"), Some(dir.join("Trailer cut Media").join("Renders")));
+    assert!(!dir.join("Trailer cut Media").exists(), "showing the path creates nothing");
+    let made = crate::project_folder(Some(&file), "Downloads").unwrap();
+    assert!(made.is_dir() && made.ends_with("Trailer cut Media/Downloads"));
+    let e = crate::project_folder(None, "Renders").unwrap_err().to_string();
+    assert!(e.contains("Save the project first"), "{e}");
+    let _ = std::fs::remove_dir_all(dir);
+}

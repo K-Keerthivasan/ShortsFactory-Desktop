@@ -28,6 +28,24 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 pub use clock::{iso as iso_ms, local_in, local_to_utc_iso, now_iso, parse_iso as clock_ms};
+
+/// Where the app keeps a project's own files (renders, their thumbnails, downloads): beside the
+/// project file, in `<project folder>/<project name> Media/<part>`. A project that has not been
+/// saved has no folder yet, so nothing is written for it.
+pub fn project_folder(project_file: Option<&str>, part: &str) -> Result<PathBuf> {
+    let Some(dir) = project_folder_path(project_file, part) else {
+        return err("Save the project first (File > Save As): renders and downloads are kept in the project's folder");
+    };
+    std::fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
+
+/// [`project_folder`] without creating it (to show where files will go).
+pub fn project_folder_path(project_file: Option<&str>, part: &str) -> Option<PathBuf> {
+    let file = project_file.map(Path::new).filter(|f| f.parent().is_some_and(|d| !d.as_os_str().is_empty()))?;
+    let name = file.file_stem().and_then(|s| s.to_str()).unwrap_or("Project");
+    Some(file.parent()?.join(format!("{name} Media")).join(part))
+}
 pub use data::{Account, Article, Channel, LibraryPost, MediaRow, RenderRow};
 
 /// Everything that can go wrong talking to the library, the AI or a platform.

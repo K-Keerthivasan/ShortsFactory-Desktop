@@ -157,6 +157,43 @@ pub(super) fn library_page(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect
     });
 }
 
+/// The library as tiles: each post's thumbnail (9:16), title and status; a click previews it.
+pub(super) fn library_grid(app: &mut FilmcraftApp, ui: &mut egui::Ui, posts: &[LibraryPost], channel: Option<i64>) {
+    let t = app.tokens;
+    let gap = 8.0;
+    let per_row = ((ui.available_width() + gap) / (110.0 + gap)).floor().max(1.0);
+    let tile = ((ui.available_width() + gap) / per_row - gap).max(80.0);
+    let thumb = vec2(tile, tile * 16.0 / 9.0);
+    ui.spacing_mut().item_spacing = vec2(gap, gap);
+    ui.horizontal_wrapped(|ui| {
+        for post in posts {
+            let key = channel.map(|ch| (ch, post.story_id));
+            let selected = app.ui.reel.library_selected == key;
+            let (rect, response) = ui.allocate_exact_size(vec2(tile, thumb.y + 40.0), Sense::click());
+            let picture = Rect::from_min_size(rect.min, thumb);
+            let path = post.render.as_ref().and_then(|r| r.thumbnail.as_deref().filter(|p| p.is_file()).or(r.path.as_deref()));
+            ui.painter().rect_filled(picture, t.radius, Color32::from_black_alpha(90));
+            preview(app, ui, picture, path, 0.0, true);
+            if selected {
+                ui.painter().rect_stroke(rect.expand(2.0), t.radius, egui::Stroke::new(2.0, t.accent), egui::StrokeKind::Outside);
+            } else if response.hovered() {
+                ui.painter().rect_stroke(rect.expand(1.0), t.radius, egui::Stroke::new(1.0, t.text_dim), egui::StrokeKind::Outside);
+            }
+            let title = ui.painter().layout(post.title.clone(), egui::FontId::proportional(12.0), t.text, tile);
+            let title_rect = Rect::from_min_size(pos2(rect.min.x, picture.max.y + 4.0), vec2(tile, 16.0));
+            ui.painter().with_clip_rect(title_rect).galley(title_rect.min, title, t.text);
+            let status = if post.published.iter().any(|(_, s, _)| s.eq_ignore_ascii_case("published")) { "published".to_string() } else { post.status.to_lowercase() };
+            ui.painter().text(pos2(rect.min.x, picture.max.y + 22.0), Align2::LEFT_TOP, status, egui::FontId::proportional(11.0), t.text_dim);
+            let response = response.on_hover_text(&post.title);
+            app.auto.add_response(&format!("reel.library.tile.{}", post.story_id), &response, &post.title);
+            if response.clicked() {
+                app.ui.reel.library_selected = key;
+                app.ui.reel.library_preview_time = 0.0;
+            }
+        }
+    });
+}
+
 pub(super) fn library_row(app: &mut FilmcraftApp, ui: &mut egui::Ui, post: &LibraryPost, channel: Option<i64>, studio: &Studio) {
     ui.group(|ui| {
         ui.set_width(ui.available_width());

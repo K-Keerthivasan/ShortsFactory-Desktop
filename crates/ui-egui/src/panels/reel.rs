@@ -95,6 +95,8 @@ pub struct ReelDraft {
     pub calendar_day: Option<String>,
     /// The time a Reel is scheduled at on that day (local `HH:MM`).
     pub schedule_time: String,
+    /// Library as a grid of thumbnails instead of a list.
+    pub library_grid: bool,
     /// Finished cloud posts cleared from the calendar (ids; hidden here only, nothing is deleted).
     pub cleared_posts: Vec<String>,
     /// Show cleared posts again.
@@ -1269,8 +1271,12 @@ pub fn show_downloads(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         let t = app.tokens;
         workspace_line(app, ui, &ctx);
         let settings = ctx.s.app_settings();
-        let folder =
-            settings.download_dir.clone().map(|d| d.display().to_string()).unwrap_or_else(|| "the workspace's clips folder (added to its library)".into());
+        // A chosen folder, else the project's own Downloads folder (a saved project), else the
+        // workspace's clips folder.
+        let project = filmcraft_studio::project_folder_path(app.session.path.as_deref(), "Downloads");
+        let folder = settings.download_dir.clone().or(project).map(|d| d.display().to_string()).unwrap_or_else(|| {
+            "the workspace's clips folder: save the project to keep downloads in its own folder".into()
+        });
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new(format!("Saved to: {folder}")).small().color(t.text_dim));
             let b = ui.small_button("Change…");
@@ -1290,7 +1296,7 @@ pub fn show_downloads(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                     }
                 });
             }
-            if settings.download_dir.is_some() && ui.small_button("Use workspace folder").clicked() {
+            if settings.download_dir.is_some() && ui.small_button("Use the project's folder").clicked() {
                 let mut a = settings.clone();
                 a.download_dir = None;
                 if let Err(e) = ctx.s.save_app_settings(&a) {
@@ -1409,8 +1415,15 @@ fn advance_queue(app: &mut FilmcraftApp, r: &mut Runtime) {
             return;
         }
     }
-    let dir = s.root.join("Editor").join("exports");
-    let _ = std::fs::create_dir_all(&dir);
+    // Renders go to the project's own folder (beside the project file), not the app's.
+    let dir = match filmcraft_studio::project_folder(app.session.path.as_deref(), "Renders") {
+        Ok(d) => d,
+        Err(e) => {
+            q.status = "Failed".into();
+            q.error = Some(e.to_string());
+            return;
+        }
+    };
     let safe: String = q.name.chars().map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).take(60).collect();
     let path = dir.join(format!("{safe}-{}.mp4", filmcraft_studio::now_iso().replace([':', '.'], "-")));
     if let Err(e) = app.session.execute("file.saveCopy", json!({"path":path.with_extension("fcproj").to_string_lossy()})) {
@@ -2565,6 +2578,10 @@ fn library(app: &mut FilmcraftApp, ui: &mut egui::Ui, channel: Option<i64>, s: &
         ui.heading("Library");
         let response = ui.checkbox(&mut app.ui.reel.show_archived, "Archived");
         app.auto.add_response("reel.library.archived", &response, "Show archived posts");
+        let list = ui.selectable_value(&mut app.ui.reel.library_grid, false, "☰ List");
+        app.auto.add_response("reel.library.viewList", &list, "List view");
+        let grid = ui.selectable_value(&mut app.ui.reel.library_grid, true, "▦ Grid");
+        app.auto.add_response("reel.library.viewGrid", &grid, "Grid view");
     });
     let last_archive = rt().archived.filter(|(ch, _)| Some(*ch) == channel);
     if let Some((ch, story)) = last_archive {
@@ -2607,8 +2624,12 @@ fn library(app: &mut FilmcraftApp, ui: &mut egui::Ui, channel: Option<i64>, s: &
     if posts.is_empty() {
         ui.label(RichText::new(if filter.is_empty() { "No posts in this workspace yet." } else { "No posts match your search." }).small().color(t.text_dim));
     }
-    for p in posts {
-        delivery::library_row(app, ui, &p, channel, s);
+    if app.ui.reel.library_grid {
+        delivery::library_grid(app, ui, &posts, channel);
+    } else {
+        for p in posts {
+            delivery::library_row(app, ui, &p, channel, s);
+        }
     }
 }
 
@@ -2847,6 +2868,7 @@ fn imports(app: &mut FilmcraftApp, ui: &mut egui::Ui, channel: Option<i64>, s: &
                     notes: notes.clone(),
                     options: options.clone(),
                     no_draft: !app.ui.reel.draft_downloads,
+                    save_to: filmcraft_studio::project_folder(app.session.path.as_deref(), "Downloads").ok(),
                     stage: "Waiting".into(),
                     ..Default::default()
                 })
