@@ -149,6 +149,11 @@ shows the same steps with buttons that open each page:
    workspace** and allow access in the browser. The refresh token is kept in
    `secrets/youtube-<workspace>.json`; the workspace's YouTube account appears below.
 
+"Access blocked: … can only be used within its organization" (Error 403: `org_internal`) means
+the consent screen's audience is Internal (a Google Workspace project): Audience ▸ **Make
+external** (In production), then connect again. If the organisation does not allow it, create the
+project under "No organization".
+
 Shorts upload as Public. Google's `videos.insert` reference (updated 2026-10-15) states that videos
 uploaded from unverified API projects are not restricted to private viewing; the 2020 rule that
 locked them until an audit no longer applies. The default quota allows about six uploads a day per
