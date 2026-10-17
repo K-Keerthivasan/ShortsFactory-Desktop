@@ -160,7 +160,20 @@ impl Studio {
                     ("refresh_token", get("refreshToken")),
                     ("grant_type", "refresh_token"),
                 ]) {
-                    Ok(_) => Ok(a.display_name.clone()),
+                    // The key works: say which channel it posts to (personal or a Brand Account).
+                    Ok(r) => {
+                        let access = r.into_json::<Value>().ok().and_then(|v| v.get("access_token").and_then(Value::as_str).map(str::to_string)).unwrap_or_default();
+                        let channel = agent
+                            .get("https://www.googleapis.com/youtube/v3/channels")
+                            .set("Authorization", &format!("Bearer {access}"))
+                            .query("part", "snippet")
+                            .query("mine", "true")
+                            .call()
+                            .ok()
+                            .and_then(|r| r.into_json::<Value>().ok())
+                            .and_then(|v| v.pointer("/items/0/snippet/title").and_then(Value::as_str).map(str::to_string));
+                        Ok(channel.map_or_else(|| a.display_name.clone(), |c| format!("YouTube channel “{c}”")))
+                    }
                     Err(ureq::Error::Status(code, _)) => Err(format!("Google refused the key (HTTP {code}); reconnect YouTube")),
                     Err(e) => Err(format!("Google is not reachable: {e}")),
                 }

@@ -329,6 +329,8 @@ struct Runtime {
     pending_start: Option<(String, std::path::PathBuf)>,
     /// The AI panel's links, from download to the parts chosen.
     ai_runs: ai::Runs,
+    /// Stops a YouTube sign-in that is waiting for the browser.
+    youtube_cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// When a card field was last typed in (applied half a second later).
     card_typed_at: Option<f64>,
     /// Local accounts' token expiry, as last read from Meta.
@@ -2315,7 +2317,16 @@ fn accounts_settings(app: &mut FilmcraftApp, ui: &mut egui::Ui, channel: Option<
         let b = ui.add_enabled(channel.is_some() && !connecting, egui::Button::new(if connecting { "Waiting for Google…" } else { "Connect YouTube to this workspace" }));
         app.auto.add_response("reel.youtube.connect", &b, "Connect YouTube");
         if connecting {
-            ui.label(RichText::new("Finish signing in in your browser; this waits up to five minutes.").small().color(t.text_dim));
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new("Finish signing in in your browser (pick the channel, e.g. your JKR brand channel).").small().color(t.text_dim));
+                let cancel = ui.small_button("Cancel");
+                app.auto.add_response("reel.youtube.cancel", &cancel, "Cancel YouTube sign-in");
+                if cancel.clicked()
+                    && let Some(flag) = rt().youtube_cancel.take()
+                {
+                    flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+            });
         }
         if b.clicked()
             && let Some(ch) = channel
@@ -2323,11 +2334,13 @@ fn accounts_settings(app: &mut FilmcraftApp, ui: &mut egui::Ui, channel: Option<
             match filmcraft_studio::youtube_connect::start(s, ch) {
                 Ok(pending) => {
                     let url = pending.url.clone();
+                    rt().youtube_cancel = Some(pending.cancel.clone());
                     crate::links::open(app, ui.ctx(), &url);
                     let st = s.clone();
                     spawn(&mut rt(), "Connect YouTube", move || {
                         Done::Notice(match filmcraft_studio::youtube_connect::finish(&st, pending) {
                             Ok(name) => (format!("YouTube connected: {name}. Tick it in Publish to post Shorts too."), true),
+                            Err(e) if e.to_string() == "cancelled" => ("YouTube sign-in cancelled".into(), false),
                             Err(e) => (format!("YouTube was not connected: {e}"), false),
                         })
                     });

@@ -9,6 +9,8 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use rusqlite::{OptionalExtension, params};
@@ -28,6 +30,8 @@ pub struct Pending {
     channel: i64,
     /// The consent page to open in the browser.
     pub url: String,
+    /// Set to stop waiting (the Cancel button).
+    pub cancel: Arc<AtomicBool>,
 }
 
 fn encode(s: &str) -> String {
@@ -91,21 +95,24 @@ pub fn start(studio: &Studio, channel: i64) -> Result<Pending> {
     let redirect = format!("http://127.0.0.1:{port}");
     let state = random_state();
     let url = format!(
-        "https://accounts.google.com/o/oauth2/v2/auth?client_id={}&redirect_uri={}&response_type=code&scope={}&access_type=offline&prompt=consent&state={}",
+        "https://accounts.google.com/o/oauth2/v2/auth?client_id={}&redirect_uri={}&response_type=code&scope={}&access_type=offline&prompt=select_account%20consent&state={}",
         encode(&client_id),
         encode(&redirect),
         encode(SCOPES),
         state
     );
-    Ok(Pending { listener, redirect, state, client_id, client_secret, channel, url })
+    Ok(Pending { listener, redirect, state, client_id, client_secret, channel, url, cancel: Arc::new(AtomicBool::new(false)) })
 }
 
-/// Waits (up to five minutes) for the browser to come back, then saves the account. Returns the
-/// channel's name. Blocking: call it off the UI thread.
+/// Waits (up to five minutes, or until cancelled) for the browser to come back, then saves the
+/// account. Returns the channel's name. Blocking: call it off the UI thread.
 pub fn finish(studio: &Studio, p: Pending) -> Result<String> {
     p.listener.set_nonblocking(true)?;
     let deadline = Instant::now() + Duration::from_secs(300);
     let code = loop {
+        if p.cancel.load(Ordering::Relaxed) {
+            return err("cancelled");
+        }
         if Instant::now() > deadline {
             return err("Google sign-in timed out; press Connect YouTube again");
         }
