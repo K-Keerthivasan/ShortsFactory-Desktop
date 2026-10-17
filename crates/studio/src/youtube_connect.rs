@@ -82,6 +82,10 @@ fn client(studio: &Studio) -> Result<(String, String)> {
     let id = studio.var("YOUTUBE_CLIENT_ID").map(str::trim).filter(|v| !v.is_empty());
     let secret = studio.var("YOUTUBE_CLIENT_SECRET").map(str::trim).filter(|v| !v.is_empty());
     match (id, secret) {
+        // A common slip: the client ID pasted into the secret field too.
+        (Some(i), Some(s)) if s == i || s.ends_with(".apps.googleusercontent.com") => {
+            err("The Google client secret field holds the client ID. Copy the Client secret (it starts with GOCSPX-) from your Desktop client and Save")
+        }
         (Some(i), Some(s)) => Ok((i.to_string(), s.to_string())),
         _ => err("Add your Google OAuth client (YOUTUBE_CLIENT_ID and YOUTUBE_CLIENT_SECRET) in Plugin Settings > Accounts & keys first"),
     }
@@ -109,7 +113,7 @@ pub fn start(studio: &Studio, channel: i64) -> Result<Pending> {
 pub fn finish(studio: &Studio, p: Pending) -> Result<String> {
     p.listener.set_nonblocking(true)?;
     let deadline = Instant::now() + Duration::from_secs(300);
-    let code = loop {
+    let (code, mut browser) = loop {
         if p.cancel.load(Ordering::Relaxed) {
             return err("cancelled");
         }
@@ -131,30 +135,45 @@ pub fn finish(studio: &Studio, p: Pending) -> Result<String> {
         // "GET /?state=…&code=…&scope=… HTTP/1.1"
         let query = first.split_whitespace().nth(1).and_then(|p| p.split_once('?')).map(|(_, q)| q.to_string()).unwrap_or_default();
         let field = |k: &str| query.split('&').find_map(|kv| kv.split_once('=').filter(|(a, _)| *a == k).map(|(_, v)| decode(v)));
-        let reply = |stream: &mut std::net::TcpStream, msg: &str| {
-            let body = format!("<!doctype html><meta charset=utf-8><title>Shorts Factory Desktop</title><body style=\"font-family:sans-serif;padding:40px\"><h2>{msg}</h2><p>You can close this tab and return to Shorts Factory Desktop.</p>");
-            let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
-        };
         // Browsers also ask for /favicon.ico; only the reply with our state counts.
         if field("state").as_deref() != Some(p.state.as_str()) {
-            reply(&mut stream, "Waiting for Google…");
+            reply(&mut stream, "Waiting for Google…", "");
             continue;
         }
         if let Some(e) = field("error") {
-            reply(&mut stream, "YouTube was not connected.");
+            reply(&mut stream, "YouTube was not connected.", "Google sign-in was not completed.");
             return err(format!("Google sign-in was not completed ({e})"));
         }
         match field("code") {
-            Some(c) if !c.is_empty() => {
-                reply(&mut stream, "YouTube is connected.");
-                break c;
-            }
+            // The browser waits for the real result, sent once the account is saved.
+            Some(c) if !c.is_empty() => break (c, stream),
             _ => {
-                reply(&mut stream, "YouTube was not connected.");
+                reply(&mut stream, "YouTube was not connected.", "Google returned no sign-in code.");
                 return err("Google returned no sign-in code");
             }
         }
     };
+    let result = complete(studio, &p, &code);
+    match &result {
+        Ok(name) => reply(&mut browser, "YouTube is connected.", &format!("Channel: {name}")),
+        Err(e) => reply(&mut browser, "YouTube was not connected.", &e.to_string()),
+    }
+    result
+}
+
+/// The browser's answer page.
+fn reply(stream: &mut std::net::TcpStream, msg: &str, detail: &str) {
+    let html = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+    let body = format!(
+        "<!doctype html><meta charset=utf-8><title>Shorts Factory Desktop</title><body style=\"font-family:sans-serif;padding:40px\"><h2>{}</h2><p>{}</p><p>You can close this tab and return to Shorts Factory Desktop.</p>",
+        html(msg),
+        html(detail)
+    );
+    let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+}
+
+/// Exchanges the sign-in code for a refresh token, reads the channel and saves the account.
+fn complete(studio: &Studio, p: &Pending, code: &str) -> Result<String> {
     let agent = ureq::AgentBuilder::new().timeout(Duration::from_secs(30)).build();
     let net = |what: &str, e: ureq::Error| -> StudioError {
         match e {
@@ -169,7 +188,7 @@ pub fn finish(studio: &Studio, p: Pending) -> Result<String> {
     let tokens: Value = agent
         .post("https://oauth2.googleapis.com/token")
         .send_form(&[
-            ("code", code.as_str()),
+            ("code", code),
             ("client_id", p.client_id.as_str()),
             ("client_secret", p.client_secret.as_str()),
             ("redirect_uri", p.redirect.as_str()),

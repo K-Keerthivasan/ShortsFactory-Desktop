@@ -545,3 +545,15 @@ fn youtube_schedules_upload_now_and_instagram_waits() {
     let (_, other) = s.send_to_library(&reel(), &video, None, None, 8.0, true).unwrap();
     assert_eq!(crate::schedule_everywhere(&s, 1, other, &[1], &soon).unwrap().waiting, 1);
 }
+
+#[test]
+fn a_client_id_in_the_secret_field_is_caught_before_google() {
+    let mut s = fixture("yt-client");
+    let id = "123-abc.apps.googleusercontent.com";
+    s.env.insert("YOUTUBE_CLIENT_ID".into(), id.into());
+    s.env.insert("YOUTUBE_CLIENT_SECRET".into(), id.into());
+    let e = crate::youtube_connect::start(&s, 1).err().map(|e| e.to_string()).unwrap_or_default();
+    assert!(e.contains("holds the client ID"), "{e}");
+    s.env.insert("YOUTUBE_CLIENT_SECRET".into(), "GOCSPX-real".into());
+    assert!(crate::youtube_connect::start(&s, 1).is_ok());
+}
