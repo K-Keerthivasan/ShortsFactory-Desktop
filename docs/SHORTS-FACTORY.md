@@ -154,6 +154,10 @@ the consent screen's audience is Internal (a Google Workspace project): Audience
 external** (In production), then connect again. If the organisation does not allow it, create the
 project under "No organization".
 
+"Error 400: redirect_uri_mismatch" means the OAuth client is a **Web application**; the app
+answers Google on a free local port, which only **Desktop app** clients accept. Create a Desktop
+app client and paste its ID and secret.
+
 Shorts upload as Public. Google's `videos.insert` reference (updated 2026-10-15) states that videos
 uploaded from unverified API projects are not restricted to private viewing; the 2020 rule that
 locked them until an audit no longer applies. The default quota allows about six uploads a day per

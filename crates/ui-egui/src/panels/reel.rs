@@ -2300,7 +2300,7 @@ fn accounts_settings(app: &mut FilmcraftApp, ui: &mut egui::Ui, channel: Option<
             link(app, ui, "clients", "Open Clients", "https://console.cloud.google.com/auth/clients");
             step(ui, 6, "Paste both below, press Save, then Connect YouTube to this workspace and allow access with the channel's account (pick the brand channel if asked).");
             ui.label(
-                RichText::new("\"Access blocked … can only be used within its organization\" (Error 403: org_internal): the consent screen's audience is Internal. In Audience, press Make external (In production), then connect again.")
+                RichText::new("\"Access blocked … can only be used within its organization\" (Error 403: org_internal): the consent screen's audience is Internal. In Audience, press Make external (In production), then connect again. \"Error 400: redirect_uri_mismatch\": the client is a Web application; create a Desktop app client and paste its ID and secret.")
                     .small()
                     .color(t.text_dim),
             );
