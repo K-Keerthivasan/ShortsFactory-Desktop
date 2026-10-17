@@ -36,8 +36,8 @@ Supabase; temporary cloud video in Backblaze B2.
 |---|---|
 | Use clips and full movies from the workspace folders | Done — the panel lists the workspace's media |
 | Refresh the folder to discover new files | Built — Create ▸ Scan workspace folders; bounded scan under workspace assets, skips unreadable videos and symbolic links |
-| Browse and search clips | Built — Create ▸ Search clips; first 40 matching library rows |
-| Preview source videos | Done — FilmCraft's Source monitor |
+| Browse and search clips | Built — Create ▸ Workspace clips; list/grid views, first 60 matching clips |
+| Preview source videos | Done — a separate footage preview with scrubbing; Play with audio opens the native player. Preview does not import into the project |
 | Brand assets (logos, graphics) | Done — the channel logo is placed by every template |
 | Duration and resolution | Done |
 | Drag-and-drop import | Done — FilmCraft imports by drag and drop and File ▸ Import |
@@ -48,7 +48,10 @@ MediaDock is replaced by yt-dlp driven directly by the app (Create ▸ Download 
 
 | Feature | Status |
 |---|---|
-| Up to ten links per batch, copied into the workspace's clips folder | Built — not yet run against real links on this PC |
+| Up to ten links per batch, saved into the workspace's clips folder | Built — tested with yt-dlp and a locally served video; site-specific extraction depends on yt-dlp and the source site |
+| Persistent download shelf | Create ▸ Workspace clips lists completed downloads across projects and app restarts. Default location: library storage/channels/<workspace>/assets/clips. Custom folders are registered in place |
+| Find and use downloaded footage | Downloads shows the folder and provides Show in Create, Preview and Open folder. New Reel imports only the selected clip |
+| Recover older downloads | Create ▸ Refresh scans workspace assets, the custom download folder and the open project's legacy Downloads folder; files are kept in place |
 | Options: quality (best / 1080p / 720p / 480p), custom `-f` format, section start–end, rate limit, browser cookies | Built |
 | Best video + audio merged to MP4 with FFmpeg (`FFMPEG_PATH` or the earlier app's bundled copy); single-file MP4 without it | Built |
 | Readability and duration checks (FilmCraft's own demuxers), progress, errors, retry, replace link | Built |
@@ -77,10 +80,15 @@ MediaDock is replaced by yt-dlp driven directly by the app (Create ▸ Download 
 
 | Feature | Status |
 |---|---|
-| Quote card, full bleed, headline hero, numbered point and the rest | Done — all 21 |
+| Quote card, full bleed, headline hero, numbered point and the rest | All 21 now use full-frame footage with compact text overlays; no reserved empty header/footer. Logo only deliberately has no headline |
 | Workspace names, handles, colours | Done |
 | Template selection and visual adjustments | Built — Design has all 21 layouts with slot diagrams; every layer is editable. Original recipe variation/tuning controls are not yet ported. |
 | Edit workspace branding | Built — Settings edits handle, website, contact, font, colours, headline size, verified mark and default template; saves without replacing other settings |
+
+Saved projects retain their editable layers. Select a template again in Design ▸ Layout to apply
+its updated layout to an existing Reel. Footage fills 9:16 using cover/crop; use the clip's Motion
+controls to reposition its subject. Headline and supporting text remain inside the Instagram
+preview guide area. An empty supporting line adds no reserved space.
 
 ## 7. Rendering and exporting
 
@@ -107,6 +115,36 @@ MediaDock is replaced by yt-dlp driven directly by the app (Create ▸ Download 
 | Post immediately; queued / success / failure; link; attempts and errors | Done |
 | Duplicate guard and reconciliation | Done — atomic claim; unknown outcomes need reconciliation |
 | Test the account connection | Planned |
+
+## 9b. Post the same Reels to YouTube Shorts
+
+Built. A workspace can publish to its YouTube channel too: tick the YouTube account next to
+Instagram in Export ▸ Publish ▸ Local publishing, then Publish now or Schedule. The Short gets the
+Reel's headline as its title (up to 100 characters) and the Instagram caption and hashtags as its
+description, with `#Shorts` added; hashtags also become the video's tags. Uploads are resumable
+and retried like Instagram ones. Cloud publishing (Supabase) is Instagram only.
+
+Connecting a channel (one time), in Plugin Settings ▸ Accounts & keys ▸ YouTube, where the app
+shows the same steps with buttons that open each page:
+
+1. [Google Cloud console](https://console.cloud.google.com/projectcreate): create a project with
+   the Google account that owns the channel.
+2. Enable the [YouTube Data API v3](https://console.cloud.google.com/apis/library/youtube.googleapis.com).
+3. [Consent screen](https://console.cloud.google.com/auth/overview): app name, your email,
+   audience External, your account under Test users.
+4. Audience ▸ **Publish app** (In production): in Testing, Google ends the sign-in after 7 days.
+   Your own sign-in then shows "Google hasn't verified this app": Advanced ▸ Continue.
+5. [Clients](https://console.cloud.google.com/auth/clients) ▸ Create client ▸ **Desktop app**;
+   copy the Client ID and Client secret.
+6. Paste them into **Google client ID / secret** (saved as `YOUTUBE_CLIENT_ID` and
+   `YOUTUBE_CLIENT_SECRET` in the library's `.env`), Save, then **Connect YouTube to this
+   workspace** and allow access in the browser. The refresh token is kept in
+   `secrets/youtube-<workspace>.json`; the workspace's YouTube account appears below.
+
+Google keeps videos uploaded through a new, unaudited API project **Private** until the project
+passes YouTube's [API audit](https://support.google.com/youtube/contact/yt_api_form); apply once.
+The default quota allows about six uploads a day per project. Vertical videos up to 3 minutes
+are Shorts; Publish warns when a Reel is longer.
 
 ## 10. Schedule through Supabase
 

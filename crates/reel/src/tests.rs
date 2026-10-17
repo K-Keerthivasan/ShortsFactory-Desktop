@@ -1,6 +1,23 @@
 use super::*;
 
 #[test]
+fn original_quote_card_reserves_a_header_above_cropped_footage() {
+    let card = Card {
+        title: "ALTERED ALMA'S DEMO JUST GOT A BIG UPDATE".into(),
+        caption: "Combat, movement and accessibility got another pass.".into(),
+        ..Default::default()
+    };
+    let p = plan("quoteCard", &Brand::default(), &card, 12.0).unwrap();
+    assert_eq!(p.fit, Fit::Cover);
+    assert!(p.slot.y >= 650.0, "the card header must remain separate from the footage");
+    assert_eq!(p.slot.x, 0.0);
+    assert_eq!(p.slot.w, 1080.0);
+    assert_eq!(p.slot.y + p.slot.h, 1920.0);
+    assert!(p.controls.iter().any(|c| c.id == "title"));
+    assert!(p.controls.iter().any(|c| c.id == "caption"));
+}
+
+#[test]
 fn headline_styles_limits_and_logo_lockups_work_across_the_catalog() {
     use filmcraft_project::ParamValue;
     let brand = Brand { logo_path: Some("own-logo.png".into()), social_handle: "mychannel".into(), ..Brand::default() };

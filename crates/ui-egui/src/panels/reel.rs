@@ -290,6 +290,7 @@ struct PendingExport {
 #[derive(Default)]
 struct Runtime {
     gap_prompt: Option<gaps::Prompt>,
+    clip_preview: Option<(std::path::PathBuf, String, f64)>,
     last_updates: Option<f64>,
     publication_updates: Vec<filmcraft_studio::notifications::Notification>,
     updates_open: bool,
@@ -552,7 +553,13 @@ pub fn poll(app: &mut FilmcraftApp, now: f64) {
                     q.error = Some(e);
                 }
             }
-            Done::Notice((text, ok)) => notify(&mut r, text, ok),
+            Done::Notice((text, ok)) => {
+                notify(&mut r, text, ok);
+                // A notice can follow a change to the workspace's accounts (a YouTube connection).
+                if let Some(c) = r.loaded_channel {
+                    load_channel(&mut r, c);
+                }
+            }
             Done::Token(id, result, tell) => {
                 if tell {
                     match &result {
@@ -599,7 +606,22 @@ pub fn poll(app: &mut FilmcraftApp, now: f64) {
                 r.cloud_error.clear();
             }
             Done::CloudAccounts(Err(e)) | Done::CloudPosts(Err(e)) => r.cloud_error = e,
-            Done::Message(m) if m == "__imports_done" => r.imports_running = false,
+            Done::Message(m) if m == "__imports_done" => {
+                r.imports_running = false;
+                if let Some(ch) = r.loaded_channel {
+                    load_channel(&mut r, ch);
+                }
+                let failed = r.imports.lock().unwrap_or_else(PoisonError::into_inner).iter().any(|j| j.error.is_some());
+                notify(
+                    &mut r,
+                    if failed {
+                        "Some downloads need attention. Saved clips are available in Create."
+                    } else {
+                        "Downloads finished. Find saved clips in Create → Workspace clips."
+                    },
+                    !failed,
+                );
+            }
             Done::Message(m) => {
                 if m.starts_with("Cloud") {
                     r.last_updates = None;
@@ -961,31 +983,41 @@ fn start_reel(app: &mut FilmcraftApp, ctx: &Ctx, name: &str, path: Option<std::p
     }
 }
 
-/// Opens a workspace clip in the Source monitor (imported once, then reused).
-fn preview_clip(app: &mut FilmcraftApp, r: &mut Runtime, m: &MediaRow) {
-    let existing = app.session.project.items.values().find_map(|item| match &item.as_media()?.media {
-        filmcraft_project::MediaRef::File { path } if std::path::Path::new(path) == m.path => Some(item.id.0),
-        _ => None,
+/// Preview uses an isolated media session and does not import into the edited project.
+fn preview_clip(_app: &mut FilmcraftApp, r: &mut Runtime, m: &MediaRow) {
+    r.clip_preview = Some((m.path.clone(), m.label.clone(), 0.0));
+}
+
+fn clip_preview_window(app: &mut FilmcraftApp, ctx: &egui::Context) {
+    let Some((path, title, mut seconds)) = rt().clip_preview.clone() else { return };
+    let mut open = true;
+    egui::Window::new("Footage preview").id(egui::Id::new("create-preview")).open(&mut open).default_width(640.0).show(ctx, |ui| {
+        ui.strong(title.clone());
+        ui.label("Preview only · added to the project when you choose New Reel");
+        let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 320.0), egui::Sense::hover());
+        let duration = delivery::preview_in(app, ui, rect, Some(&path), seconds, false, &mut rt()).unwrap_or(0.0);
+        let scrub = ui.add(egui::Slider::new(&mut seconds, 0.0..=duration.max(0.01)).suffix(" s"));
+        app.auto.add_response("reel.clipPreview.scrub", &scrub, "Preview footage time");
+        ui.horizontal(|ui| {
+            let play = ui.button("Play with audio");
+            app.auto.add_response("reel.clipPreview.play", &play, "Play footage in the system player");
+            if play.clicked()
+                && let Err(e) = super::menu_dialogs::open_path(app, ctx, &path.to_string_lossy(), false)
+            {
+                app.ui.status = e;
+            }
+            let close = ui.button("Close preview");
+            app.auto.add_response("reel.clipPreview.close", &close, "Close footage preview");
+            if close.clicked() {
+                rt().clip_preview = None;
+            }
+        });
+        ui.add(egui::Label::new(path.to_string_lossy()).wrap());
     });
-    let result = (|| -> Result<(), String> {
-        let item = match existing {
-            Some(id) => id,
-            None => app
-                .session
-                .execute("file.import", json!({"paths": [m.path.to_string_lossy()]}))
-                .map_err(|e| e.to_string())?
-                .get("items")
-                .and_then(|v| v.as_array())
-                .and_then(|a| a.first())
-                .and_then(|v| v.as_u64())
-                .ok_or("The source was not imported")?,
-        };
-        app.session.execute("source.open", json!({"item": item})).map_err(|e| e.to_string())?;
-        app.show_panel(crate::PanelKind::Source);
-        Ok(())
-    })();
-    if let Err(e) = result {
-        log(r, format!("Could not preview the clip: {e}"));
+    if !open {
+        rt().clip_preview = None;
+    } else if let Some(p) = rt().clip_preview.as_mut() {
+        p.2 = seconds;
     }
 }
 
@@ -1102,7 +1134,7 @@ pub fn show_create(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
             let name = app.session.project.item(item).map(|i| i.name.clone()).unwrap_or_else(|| "clip".into());
             start_reel(app, &ctx, &name, None, Some(item.0));
         }
-        section(ui, "Project footage", true, |ui| {
+        section(ui, "Footage already in this project", false, |ui| {
             let mut items: Vec<(u64, String, f64)> = app
                 .session
                 .project
@@ -1136,22 +1168,31 @@ pub fn show_create(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         });
         let mut r = rt();
         section(ui, "Workspace clips", true, |ui| {
-            let b =
-                ui.add_enabled(ctx.channel.is_some() && !r.tasks.iter().any(|(label, _)| label == "Scan media"), egui::Button::new("Refresh workspace folder"));
-            app.auto.add_response("reel.media.scan", &b, "Refresh workspace folder");
-            if b.clicked()
-                && let Some(ch) = ctx.channel
-            {
-                let st = ctx.s.clone();
-                spawn(&mut r, "Scan media", move || {
-                    Done::Message(match st.scan_media(ch) {
-                        Ok((added, unreadable)) => format!("Scan finished: {added} new videos; {unreadable} unreadable files skipped"),
-                        Err(e) => format!("Scan failed: {e}"),
-                    })
-                });
-            }
+            ui.label(RichText::new("Downloads stay here between projects.").small().color(t.text_dim))
+                .on_hover_text("Preview freely. New Reel adds only the selected clip to your project.");
             ui.horizontal_wrapped(|ui| {
-                let open = ui.add_enabled(ctx.channel.is_some(), egui::Button::new("📂 Open workspace folder"));
+                let b = ui.add_enabled(ctx.channel.is_some() && !r.tasks.iter().any(|(label, _)| label == "Scan media"), egui::Button::new("Refresh"));
+                app.auto.add_response("reel.media.scan", &b, "Refresh workspace folder");
+                if b.clicked()
+                    && let Some(ch) = ctx.channel
+                {
+                    let st = ctx.s.clone();
+                    let legacy = filmcraft_studio::project_folder_path(app.session.path.as_deref(), "Downloads");
+                    spawn(&mut r, "Scan media", move || {
+                        let result = (|| -> filmcraft_studio::Result<(usize, usize)> {
+                            let (mut added, unreadable) = st.scan_media(ch)?;
+                            for folder in [st.app_settings().download_dir, legacy].into_iter().flatten() {
+                                added += st.scan_download_folder(ch, &folder)?;
+                            }
+                            Ok((added, unreadable))
+                        })();
+                        Done::Message(match result {
+                            Ok((added, unreadable)) => format!("Scan finished: {added} new videos; {unreadable} unreadable files skipped"),
+                            Err(e) => format!("Scan failed: {e}"),
+                        })
+                    });
+                }
+                let open = ui.add_enabled(ctx.channel.is_some(), egui::Button::new("Folder"));
                 app.auto.add_response("reel.media.openFolder", &open, "Open workspace folder");
                 if open.clicked()
                     && let Some(ch) = ctx.channel
@@ -1222,7 +1263,11 @@ pub fn show_create(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                                 if d.changed() {
                                     toggled.push(m.id);
                                 }
-                                let name = if done.contains(&m.id) { RichText::new(format!("✓ {}", m.label)).small().color(t.text_dim) } else { RichText::new(&m.label).small() };
+                                let name = if done.contains(&m.id) {
+                                    RichText::new(format!("✓ {}", m.label)).small().color(t.text_dim)
+                                } else {
+                                    RichText::new(&m.label).small()
+                                };
                                 ui.add(egui::Label::new(name).truncate());
                             });
                             ui.horizontal(|ui| {
@@ -1269,7 +1314,7 @@ pub fn show_create(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                         _ => String::new(),
                     };
                     let preview = ui.small_button("Preview").on_hover_text(format!(
-                        "Preview in the Source monitor · {} · {}",
+                        "Preview without adding to the project · {} · {}",
                         m.duration.map(|d| format!("{d:.1}s")).unwrap_or_default(),
                         dims
                     ));
@@ -1305,7 +1350,11 @@ pub fn show_create(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                     if d.changed() {
                         toggled.push(m.id);
                     }
-                    let name = if done.contains(&m.id) { RichText::new(format!("✓ {}", m.label)).small().color(t.text_dim) } else { RichText::new(&m.label).small() };
+                    let name = if done.contains(&m.id) {
+                        RichText::new(format!("✓ {}", m.label)).small().color(t.text_dim)
+                    } else {
+                        RichText::new(&m.label).small()
+                    };
                     ui.add(egui::Label::new(name).truncate());
                 });
             }
@@ -1413,14 +1462,10 @@ pub fn show_downloads(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         let t = app.tokens;
         workspace_line(app, ui, &ctx);
         let settings = ctx.s.app_settings();
-        // A chosen folder, else the project's own Downloads folder (a saved project), else the
-        // workspace's clips folder.
-        let project = filmcraft_studio::project_folder_path(app.session.path.as_deref(), "Downloads");
-        let folder = settings.download_dir.clone().or(project).map(|d| d.display().to_string()).unwrap_or_else(|| {
-            "the workspace's clips folder: save the project to keep downloads in its own folder".into()
-        });
-        ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new(format!("Saved to: {folder}")).small().color(t.text_dim));
+        let folder = settings.download_dir.clone().or_else(|| ctx.channel.and_then(|ch| ctx.s.workspace_folder(ch).ok()).map(|d| d.join("assets/clips")));
+        let folder_label = folder.as_ref().map(|d| d.display().to_string()).unwrap_or_else(|| "Choose a workspace".into());
+        ui.label(RichText::new("Saved in Create → Workspace clips · choose a clip to start editing").small());
+        ui.horizontal(|ui| {
             let b = ui.small_button("Change…");
             app.auto.add_response("reel.downloads.folder", &b, "Change download folder");
             if b.clicked() {
@@ -1438,13 +1483,18 @@ pub fn show_downloads(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                     }
                 });
             }
-            if settings.download_dir.is_some() && ui.small_button("Use the project's folder").clicked() {
-                let mut a = settings.clone();
-                a.download_dir = None;
-                if let Err(e) = ctx.s.save_app_settings(&a) {
-                    app.ui.status = e.to_string();
+            if settings.download_dir.is_some() {
+                let reset = ui.small_button("Reset folder").on_hover_text("Use this workspace's clips folder");
+                app.auto.add_response("reel.downloads.resetFolder", &reset, "Use workspace clips folder");
+                if reset.clicked() {
+                    let mut a = settings.clone();
+                    a.download_dir = None;
+                    if let Err(e) = ctx.s.save_app_settings(&a) {
+                        app.ui.status = e.to_string();
+                    }
                 }
             }
+            ui.add(egui::Label::new(RichText::new(&folder_label).small().color(t.text_dim)).truncate()).on_hover_text(&folder_label);
         });
         imports(app, ui, ctx.channel, &ctx.s);
     });
@@ -1866,6 +1916,7 @@ pub fn overlays(app: &mut FilmcraftApp, ctx: &egui::Context) {
     let now = ctx.input(|i| i.time);
     publication_updates_popup(app, ctx);
     gaps::overlay(app, ctx);
+    clip_preview_window(app, ctx);
     // The start-up check, once per run.
     {
         let mut r = rt();
@@ -2186,9 +2237,72 @@ fn accounts_settings(app: &mut FilmcraftApp, ui: &mut egui::Ui, channel: Option<
             .small()
             .color(t.text_dim),
     );
+    // YouTube Shorts: the same Reels, published to the workspace's channel too.
+    section(ui, "YouTube", true, |ui| {
+        ui.label(
+            RichText::new("Posts the same Reel to the workspace's YouTube channel as a Short: the headline is the title, the Instagram caption and hashtags the description (with #Shorts).")
+                .small()
+                .color(t.text_dim),
+        );
+        let guide = egui::CollapsingHeader::new("How to get the Google client ID and secret (one time)").default_open(true).show(ui, |ui| {
+            let step = |ui: &mut egui::Ui, n: u8, text: &str| {
+                ui.label(RichText::new(format!("{n}. {text}")).small());
+            };
+            let link = |app: &mut FilmcraftApp, ui: &mut egui::Ui, id: &str, label: &str, url: &str| {
+                let b = ui.small_button(label);
+                app.auto.add_response(&format!("reel.youtube.guide.{id}"), &b, label);
+                if b.clicked() {
+                    crate::links::open(app, ui.ctx(), url);
+                }
+            };
+            step(ui, 1, "Open Google Cloud and create a project (any name, e.g. Shorts Factory), signed in with the Google account that owns the YouTube channel.");
+            link(app, ui, "console", "Open Google Cloud console", "https://console.cloud.google.com/projectcreate");
+            step(ui, 2, "Enable the YouTube Data API v3 for that project.");
+            link(app, ui, "api", "Open YouTube Data API v3", "https://console.cloud.google.com/apis/library/youtube.googleapis.com");
+            step(ui, 3, "Set up the consent screen (Google Auth Platform > Branding / Audience): app name, your email, audience External. Add your own Google account under Test users.");
+            step(ui, 4, "Under Audience, press Publish app (In production). In Testing, Google ends the sign-in every 7 days. Your own sign-in will show \"Google hasn't verified this app\": choose Advanced > Continue.");
+            link(app, ui, "consent", "Open the consent screen", "https://console.cloud.google.com/auth/overview");
+            step(ui, 5, "Clients > Create client > Application type: Desktop app > Create. Copy the Client ID and Client secret.");
+            link(app, ui, "clients", "Open Clients", "https://console.cloud.google.com/auth/clients");
+            step(ui, 6, "Paste both below, press Save, then Connect YouTube to this workspace and allow access with the channel's account (pick the brand channel if asked).");
+            ui.label(
+                RichText::new("Google keeps videos uploaded by a new, unaudited project Private until the project passes YouTube's API audit. Apply once with the form below; until then the Shorts upload as Private.")
+                    .small()
+                    .color(t.danger),
+            );
+            link(app, ui, "audit", "Open the YouTube API audit form", "https://support.google.com/youtube/contact/yt_api_form");
+            ui.label(RichText::new("Google's default quota allows about six uploads a day per project.").small().color(t.text_dim));
+        });
+        app.auto.add_response("reel.youtube.guide", &guide.header_response, "How to get the Google client");
+        env_fields(app, ui, &[("YOUTUBE_CLIENT_ID", "Google client ID", false), ("YOUTUBE_CLIENT_SECRET", "Google client secret", true)]);
+        let connecting = rt().tasks.iter().any(|(l, _)| l == "Connect YouTube");
+        let b = ui.add_enabled(channel.is_some() && !connecting, egui::Button::new(if connecting { "Waiting for Google…" } else { "Connect YouTube to this workspace" }));
+        app.auto.add_response("reel.youtube.connect", &b, "Connect YouTube");
+        if connecting {
+            ui.label(RichText::new("Finish signing in in your browser; this waits up to five minutes.").small().color(t.text_dim));
+        }
+        if b.clicked()
+            && let Some(ch) = channel
+        {
+            match filmcraft_studio::youtube_connect::start(s, ch) {
+                Ok(pending) => {
+                    let url = pending.url.clone();
+                    crate::links::open(app, ui.ctx(), &url);
+                    let st = s.clone();
+                    spawn(&mut rt(), "Connect YouTube", move || {
+                        Done::Notice(match filmcraft_studio::youtube_connect::finish(&st, pending) {
+                            Ok(name) => (format!("YouTube connected: {name}. Tick it in Publish to post Shorts too."), true),
+                            Err(e) => (format!("YouTube was not connected: {e}"), false),
+                        })
+                    });
+                }
+                Err(e) => app.ui.status = e.to_string(),
+            }
+        }
+    });
     let accounts = rt().accounts.clone();
     if accounts.is_empty() {
-        ui.label("No accounts for this workspace yet. Connect them with the earlier app's Accounts page; adding new ones here is planned.");
+        ui.label("No accounts for this workspace yet. Connect YouTube above; Instagram accounts come from the earlier app's Accounts page.");
     }
     for a in accounts {
         ui.group(|ui| {
@@ -2391,6 +2505,9 @@ fn templates(app: &mut FilmcraftApp, ui: &mut egui::Ui, info: Option<&ReelInfo>)
     if info.is_none() {
         ui.label(RichText::new("Start a Reel first (a workspace clip above, or Reel ▸ New Reel).").small().color(t.text_dim));
     }
+    if let Some(selected) = info.and_then(|i| TEMPLATES.iter().find(|tpl| tpl.id == i.template)) {
+        ui.label(RichText::new(format!("{} · {}", selected.name, selected.note)).small().color(t.text_dim));
+    }
     for family in ["Card", "Design"] {
         ui.label(RichText::new(if family == "Card" { "Card layouts" } else { "Designs" }).small().color(t.text_dim));
         let columns = ((ui.available_width() / 110.0) as usize).clamp(1, 6);
@@ -2404,16 +2521,35 @@ fn templates(app: &mut FilmcraftApp, ui: &mut egui::Ui, info: Option<&ReelInfo>)
                     let b = ui
                         .vertical(|ui| {
                             ui.set_width(104.0);
-                            let (rect, _) = ui.allocate_exact_size(vec2(92.0, 110.0), egui::Sense::hover());
-                            let frame = egui::Rect::from_center_size(rect.center(), vec2(56.25, 100.0));
+                            let (rect, _) = ui.allocate_exact_size(vec2(92.0, 142.0), egui::Sense::hover());
+                            let scale = 132.0 / 1920.0;
+                            let frame = egui::Rect::from_center_size(rect.center(), vec2(1080.0 * scale, 132.0));
                             ui.painter().rect_filled(frame, 3.0, egui::Color32::from_rgb(16, 19, 26));
                             if let Some(plan) = &preview {
                                 let slot = egui::Rect::from_min_size(
-                                    frame.min + vec2(plan.slot.x as f32, plan.slot.y as f32) * (100.0 / 1920.0),
-                                    vec2(plan.slot.w as f32, plan.slot.h as f32) * (100.0 / 1920.0),
+                                    frame.min + vec2(plan.slot.x as f32, plan.slot.y as f32) * scale,
+                                    vec2(plan.slot.w as f32, plan.slot.h as f32) * scale,
                                 );
                                 ui.painter().rect_filled(slot, 2.0, egui::Color32::from_rgb(49, 91, 113));
                                 ui.painter().text(slot.center(), egui::Align2::CENTER_CENTER, "VIDEO", egui::FontId::proportional(8.0), egui::Color32::WHITE);
+                                for control in &plan.controls {
+                                    let Some(layer) = plan.over.iter().find(|l| l.layer.as_ref().is_some_and(|l| l.uid == control.layer)) else { continue };
+                                    let Some(filmcraft_project::ParamValue::Vec2(p)) = layer.params.get("position").map(|p| &p.value) else { continue };
+                                    let (label, size) = match control.id.as_str() {
+                                        "title" => ("HEADLINE", 6.0),
+                                        "caption" | "point1" => ("Supporting text", 4.5),
+                                        "handle" | "channel" => ("Brand", 4.0),
+                                        _ => continue,
+                                    };
+                                    let at = frame.min + vec2(p.x as f32, p.y as f32) * scale;
+                                    let painter = ui.painter().with_clip_rect(frame);
+                                    painter.rect_filled(
+                                        egui::Rect::from_min_size(at - vec2(1.0, 1.0), vec2(58.0, size + 3.0)),
+                                        1.0,
+                                        egui::Color32::from_black_alpha(200),
+                                    );
+                                    painter.text(at, egui::Align2::LEFT_TOP, label, egui::FontId::proportional(size), egui::Color32::WHITE);
+                                }
                             }
                             ui.add_enabled(info.is_some(), egui::Button::new(RichText::new(tpl.name).small()).selected(on))
                         })
@@ -2938,7 +3074,6 @@ fn library_actions(app: &mut FilmcraftApp, ui: &mut egui::Ui, post: &LibraryPost
 
 fn imports(app: &mut FilmcraftApp, ui: &mut egui::Ui, channel: Option<i64>, s: &Studio) {
     let t = app.tokens;
-    ui.label(RichText::new("Up to ten links, one per line. Download to this workspace, then preview before creating a Reel.").small().color(t.text_dim));
     match filmcraft_studio::ytdlp::binary(s) {
         Some(p) => {
             ui.label(
@@ -2984,7 +3119,8 @@ fn imports(app: &mut FilmcraftApp, ui: &mut egui::Ui, channel: Option<i64>, s: &
             }
         }
     }
-    let links_input = ui.add(egui::TextEdit::multiline(&mut app.ui.reel.links).desired_rows(3).hint_text("https://…").desired_width(f32::INFINITY));
+    let links_input = ui
+        .add(egui::TextEdit::multiline(&mut app.ui.reel.links).desired_rows(2).hint_text("Video links · one per line (up to 10)").desired_width(f32::INFINITY));
     app.auto.add_response("reel.downloads.links", &links_input, "Video links");
     let draft = ui.checkbox(&mut app.ui.reel.draft_downloads, "Write a card with AI after downloading");
     app.auto.add_response("reel.downloads.draft", &draft, "Draft a card after download");
@@ -3079,7 +3215,7 @@ fn imports(app: &mut FilmcraftApp, ui: &mut egui::Ui, channel: Option<i64>, s: &
                     notes: notes.clone(),
                     options: options.clone(),
                     no_draft: !app.ui.reel.draft_downloads,
-                    save_to: filmcraft_studio::project_folder(app.session.path.as_deref(), "Downloads").ok(),
+                    save_to: None,
                     stage: "Waiting".into(),
                     ..Default::default()
                 })
@@ -3100,17 +3236,26 @@ fn imports(app: &mut FilmcraftApp, ui: &mut egui::Ui, channel: Option<i64>, s: &
             if let Some(e) = &job.error {
                 ui.label(RichText::new(e).small().color(egui::Color32::from_rgb(0xff, 0x6b, 0x6b)));
             }
-            ui.horizontal(|ui| {
+            if let Some(file) = &job.file { ui.add(egui::Label::new(RichText::new(format!("Saved: {}", file.display())).small()).wrap()); }
+            ui.horizontal_wrapped(|ui| {
                 if let Some(file) = &job.file {
                     let preview = ui.small_button("Preview");
                     app.auto.add_response(&format!("reel.downloads.preview.{i}"), &preview, "Preview download");
                     if preview.clicked() {
-                        let result = app.session.execute("file.import", json!({"paths": [file.to_string_lossy()]})).and_then(|v| {
-                            let item = v.get("items").and_then(|v| v.as_array()).and_then(|v| v.first()).and_then(|v| v.as_u64()).ok_or_else(|| filmcraft_engine::EngineError::Other("Could not import preview".into()))?;
-                            app.session.execute("source.open", json!({"item": item}))
-                        });
-                        match result { Ok(_) => app.show_panel(crate::PanelKind::Source), Err(e) => app.ui.status = e.to_string() }
+                        rt().clip_preview = Some((file.clone(), job.title.clone(), 0.0));
                     }
+                    let show = ui.small_button("Show in Create");
+                    app.auto.add_response(&format!("reel.downloads.create.{i}"), &show, "Show download in Create");
+                    if show.clicked() && let Some(ch) = channel {
+                            match s.register_download(ch, file, &job.title, &job.url) {
+                                Ok(_) => { load_channel(&mut rt(), ch); app.ui.reel.media_filter.clear(); app.ui.reel.hide_done_clips = false; app.show_panel(crate::PanelKind::Create); },
+                                Err(e) => app.ui.status = e.to_string(),
+                            }
+                    }
+                    let folder = ui.small_button("Open folder");
+                    app.auto.add_response(&format!("reel.downloads.openFolder.{i}"), &folder, "Open downloaded file folder");
+                    if folder.clicked() && let Some(parent) = file.parent() && let Err(e) = super::menu_dialogs::open_path(app, ui.ctx(), &parent.to_string_lossy(), false) { app.ui.status = e; }
+
                 }
                 if job.error.is_some() && !running {
                     if ui.small_button("Retry").clicked()
@@ -3359,9 +3504,10 @@ mod tests {
     /// data is already loaded).
     fn schedule_frame(app: &mut FilmcraftApp, ctx: &egui::Context) {
         app.auto.begin_frame();
-        let mut output = ctx.run_ui(egui::RawInput { screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(1500.0, 2400.0))), ..Default::default() }, |ui| {
-            delivery::publish_page(app, ui, ui.available_rect_before_wrap());
-        });
+        let mut output =
+            ctx.run_ui(egui::RawInput { screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(1500.0, 2400.0))), ..Default::default() }, |ui| {
+                delivery::publish_page(app, ui, ui.available_rect_before_wrap());
+            });
         output.textures_delta.clear();
     }
 
@@ -3404,7 +3550,10 @@ mod tests {
         }
         let find = |app: &FilmcraftApp, id: &str| app.auto.find(id).cloned();
         assert!(find(&app, &format!("reel.schedule.day.{day}")).is_some(), "the month shows the day");
-        assert!(find(&app, "reel.schedule.cancel.p1").is_some() && find(&app, "reel.schedule.reschedule.p1").is_some(), "the day's post can be cancelled or rescheduled");
+        assert!(
+            find(&app, "reel.schedule.cancel.p1").is_some() && find(&app, "reel.schedule.reschedule.p1").is_some(),
+            "the day's post can be cancelled or rescheduled"
+        );
         assert_eq!(app.ui.reel.cloud_account.as_deref(), Some("acc1"), "the only account is chosen");
         assert_eq!(find(&app, "reel.schedule.submit").and_then(|e| e.enabled), Some(true), "tomorrow 18:00 can be scheduled");
         // A finished post can be cleared from the calendar (hidden here only); a scheduled one cannot.
@@ -3423,7 +3572,10 @@ mod tests {
         app.ui.reel.publish_tab = PublishTab::Now;
         schedule_frame(&mut app, &ctx);
         schedule_frame(&mut app, &ctx);
-        assert!(find(&app, "reel.publish.delivery.local").is_some() && find(&app, "reel.publish.renderNow").is_some(), "local publishing and Publish now are there");
+        assert!(
+            find(&app, "reel.publish.delivery.local").is_some() && find(&app, "reel.publish.renderNow").is_some(),
+            "local publishing and Publish now are there"
+        );
         app.ui.reel.publish_tab = PublishTab::Calendar;
         schedule_frame(&mut app, &ctx);
         schedule_frame(&mut app, &ctx);
@@ -3497,7 +3649,7 @@ mod tests {
         studio.connect().unwrap().execute_batch(
             "CREATE TABLE channels (id INTEGER, slug TEXT, name TEXT, enabled INTEGER);
              CREATE TABLE channel_settings (channel_id INTEGER, json TEXT);
-             CREATE TABLE media_assets (id INTEGER, label TEXT, asset_type TEXT, file_path TEXT, duration REAL, width INTEGER, height INTEGER, created_at TEXT, channel_id INTEGER, tags TEXT DEFAULT '[]');
+             CREATE TABLE media_assets (id INTEGER, label TEXT, asset_type TEXT, file_path TEXT, duration REAL, width INTEGER, height INTEGER, created_at TEXT, channel_id INTEGER, tags TEXT DEFAULT '[]', source TEXT);
              CREATE TABLE articles (id INTEGER, title TEXT, site_name TEXT, url TEXT, text TEXT, channel_id INTEGER);
              CREATE TABLE social_accounts (id INTEGER, platform TEXT, display_name TEXT, external_account_id TEXT, enabled INTEGER, status TEXT, credentials_reference TEXT, channel_id INTEGER);
              INSERT INTO channels VALUES (1, 'qa', 'QA settings workspace', 1);

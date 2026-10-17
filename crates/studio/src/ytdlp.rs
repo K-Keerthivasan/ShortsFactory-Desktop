@@ -66,8 +66,7 @@ pub struct Import {
     pub card: Option<Card>,
     pub post: Option<filmcraft_reel::PostLink>,
     pub error: Option<String>,
-    /// The open project's Downloads folder (see `project_folder`); a folder chosen in the
-    /// Downloads panel still wins, and with neither the workspace's clips folder is used.
+    /// Legacy serialized field. Downloads now belong to the workspace, independently of projects.
     #[serde(default)]
     pub save_to: Option<PathBuf>,
     /// Stop after the download (the AI workflow writes a card per segment instead of one draft).
@@ -262,16 +261,12 @@ fn step(studio: &Studio, channel: i64, job: &mut Import, update: &dyn Fn(&Import
         }
         job.title = meta.get("title").and_then(Value::as_str).unwrap_or("Imported video").chars().take(200).collect();
         let (slug,): (String,) = studio.connect()?.query_row("SELECT slug FROM channels WHERE id = ?1", [channel], |r| Ok((r.get(0)?,)))?;
-        // A folder chosen in the Downloads panel, else the project's own, else the workspace's clips.
-        let dir = studio
-            .app_settings()
-            .download_dir
-            .or_else(|| job.save_to.clone())
-            .unwrap_or_else(|| studio.storage.join("channels").join(&slug).join("assets").join("clips"));
+        // Downloads belong to the workspace. A custom folder is indexed by reference too.
+        let dir = studio.app_settings().download_dir.unwrap_or_else(|| studio.storage.join("channels").join(&slug).join("assets").join("clips"));
         std::fs::create_dir_all(&dir)?;
         let stem = format!("import-{}", now_ms());
         // Partial files stay beside the result (same drive, so the finished file is moved, not copied).
-        let work = if job.save_to.is_some() { dir.join(".downloading") } else { studio.root.join("Editor").join("downloads") };
+        let work = dir.join(".downloading");
         std::fs::create_dir_all(&work)?;
         let template = work.join(format!("{stem}.%(ext)s"));
         let merge = ffmpeg(studio);
@@ -335,7 +330,7 @@ fn step(studio: &Studio, channel: i64, job: &mut Import, update: &dyn Fn(&Import
             .find(|p| p.file_stem().and_then(|s| s.to_str()) == Some(stem.as_str()) && p.extension().and_then(|e| e.to_str()) != Some("part"))
             .ok_or_else(|| StudioError::Other("yt-dlp finished but left no video".into()))?;
         set(job, "Checking the video");
-        let (duration, w, h) = match crate::probe(&downloaded) {
+        let (duration, _, _) = match crate::probe(&downloaded) {
             Ok(x) => x,
             Err(e) => {
                 let _ = std::fs::remove_file(&downloaded);
@@ -360,20 +355,14 @@ fn step(studio: &Studio, channel: i64, job: &mut Import, update: &dyn Fn(&Import
             std::fs::copy(&downloaded, &file)?;
             let _ = std::fs::remove_file(&downloaded);
         }
-        // Files inside the library's storage join the workspace's media; a folder elsewhere keeps
-        // them out of the library, ready to open as a Reel from the Downloads panel.
-        if let Ok(rel) = studio.relative_storage(&file) {
-            let c = studio.connect()?;
-            let now = crate::now_iso();
-            c.execute(
-                "INSERT INTO media_assets (created_at, updated_at, channel_id, file_path, asset_type, label, tags, duration, width, height, source, source_url, license_notes)
-                 VALUES (?1, ?1, ?2, ?3, 'VIDEO', ?4, '[]', ?5, ?6, ?7, 'yt-dlp', ?8, 'Imported by workspace owner')",
-                rusqlite::params![now, channel, rel, job.title, duration, w, h, job.url],
-            )?;
-            job.asset_id = Some(c.last_insert_rowid());
-        }
+        // Register both workspace and custom destinations in Create without importing a project item.
         job.file = Some(file);
         job.duration = Some(duration);
+    }
+    if job.asset_id.is_none()
+        && let Some(file) = &job.file
+    {
+        job.asset_id = Some(studio.register_download(channel, file, &job.title, &job.url)?);
     }
     if job.no_draft {
         set(job, "Downloaded");

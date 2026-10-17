@@ -414,10 +414,50 @@ impl Studio {
     }
 
     /// The channel's media library (and shared media), newest first; only files that exist.
+    pub fn register_download(&self, channel: i64, file: &Path, title: &str, url: &str) -> Result<i64> {
+        let file = file.canonicalize()?;
+        let storage = self.storage.canonicalize().unwrap_or_else(|_| self.storage.clone());
+        let stored = file.strip_prefix(storage).map(|p| p.to_string_lossy().replace('\\', "/")).unwrap_or_else(|_| file.to_string_lossy().into_owned());
+        let c = self.connect()?;
+        self.channel(&c, channel)?;
+        if let Some(id) = c.query_row("SELECT id FROM media_assets WHERE channel_id=?1 AND file_path=?2", params![channel, stored], |r| r.get(0)).optional()? {
+            return Ok(id);
+        }
+        let (duration, width, height) = crate::probe(&file)?;
+        c.execute("INSERT INTO media_assets (created_at, updated_at, channel_id, file_path, asset_type, label, tags, duration, width, height, source, source_url, license_notes) VALUES (?1,?1,?2,?3,'VIDEO',?4,'[]',?5,?6,?7,'yt-dlp',?8,'Imported by workspace owner')", params![now_iso(), channel, stored, title, duration, width, height, url])?;
+        Ok(c.last_insert_rowid())
+    }
+
+    /// Recover earlier downloads from an explicitly selected or project Downloads folder.
+    /// Keep files where they are and never add them to the editing project.
+    pub fn scan_download_folder(&self, channel: i64, folder: &Path) -> Result<usize> {
+        if !folder.is_dir() {
+            return Ok(0);
+        }
+        let before = self.media(channel)?.len();
+        for entry in std::fs::read_dir(folder)?.take(500) {
+            let entry = entry?;
+            if !entry.file_type()?.is_file() {
+                continue;
+            }
+            let path = entry.path();
+            let ext = path.extension().and_then(|s| s.to_str()).unwrap_or_default().to_ascii_lowercase();
+            if !matches!(ext.as_str(), "mp4" | "mov" | "mkv" | "webm") {
+                continue;
+            }
+            let title = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+            // A broken/unfinished download must not prevent recovering other clips.
+            if crate::probe(&path).is_ok() {
+                self.register_download(channel, &path, &title, "")?;
+            }
+        }
+        Ok(self.media(channel)?.len().saturating_sub(before))
+    }
+
     pub fn media(&self, channel: i64) -> Result<Vec<MediaRow>> {
         let c = self.connect()?;
         let mut q = c.prepare(
-            "SELECT id, COALESCE(label, ''), asset_type, file_path, duration, width, height, created_at FROM media_assets
+            "SELECT id, COALESCE(label, ''), asset_type, file_path, duration, width, height, created_at, COALESCE(source, '') FROM media_assets
              WHERE (channel_id = ?1 OR channel_id IS NULL) AND NOT EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(tags) THEN tags ELSE '[]' END) WHERE value = 'shorts-hidden-from-create') ORDER BY id DESC",
         )?;
         let rows = q.query_map([channel], |r| {
@@ -430,12 +470,18 @@ impl Studio {
                 r.get(5)?,
                 r.get(6)?,
                 r.get::<_, String>(7)?,
+                r.get::<_, String>(8)?,
             ))
         })?;
         let mut out = Vec::new();
         for row in rows {
-            let (id, label, kind, path, duration, width, height, created_at) = row?;
-            let Ok(file) = self.resolve_storage(&path) else { continue };
+            let (id, label, kind, path, duration, width, height, created_at, source) = row?;
+            let file = if source == "yt-dlp" && Path::new(&path).is_absolute() {
+                PathBuf::from(path)
+            } else {
+                let Ok(file) = self.resolve_storage(&path) else { continue };
+                file
+            };
             if !file.is_file() {
                 continue;
             }

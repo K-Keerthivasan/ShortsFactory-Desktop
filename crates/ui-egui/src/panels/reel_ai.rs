@@ -132,8 +132,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         {
             let wants = app.ui.reel.ai.wants.clone();
             let options = app.ui.reel.download.clone();
-            let save_to = filmcraft_studio::project_folder(app.session.path.as_deref(), "Downloads").ok();
-            find(&ctx.s, ch, links, wants, options, save_to, &runs);
+            find(&ctx.s, ch, links, wants, options, None, &runs);
             app.ui.reel.ai.links.clear();
         }
 
@@ -185,7 +184,15 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
 }
 
 /// Downloads each link and asks the AI for its parts, on a worker.
-fn find(s: &Studio, channel: i64, links: Vec<String>, wants: Wants, options: filmcraft_studio::ytdlp::Options, save_to: Option<std::path::PathBuf>, runs: &Runs) {
+fn find(
+    s: &Studio,
+    channel: i64,
+    links: Vec<String>,
+    wants: Wants,
+    options: filmcraft_studio::ytdlp::Options,
+    save_to: Option<std::path::PathBuf>,
+    runs: &Runs,
+) {
     let ids: Vec<u64> = {
         let mut l = lock(runs);
         links

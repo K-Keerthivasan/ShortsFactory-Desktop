@@ -42,6 +42,86 @@ fn spec(id: &'static str, label: &'static str, params: &'static str, journal: bo
 /// Adds the `studio.*` commands to the engine. Call once at start-up, before any command runs.
 pub fn register() {
     filmcraft_engine::host::register([
+        spec("studio.archivePost", "Archive Superseded Library Post", r#"{"channel":n,"story":n} keeps files/history; rejects active jobs"#, true, |_, p| {
+            Ok(json!({"previousStatus":studio()?.archive_post(int(p,"channel")?,int(p,"story")?).map_err(err)?}))
+        }),
+        spec(
+            "studio.workflowWorkerFailure",
+            "Record Native Workflow Worker Failure",
+            r#"{"channel":n,"asset":n} runtime panic guard; holds an interrupted item for reconciliation"#,
+            true,
+            |_, p| {
+                let s = studio()?;
+                s.connect().map_err(err)?.execute("UPDATE editorial_workflow SET state='render_failed',error='native worker failed unexpectedly; reconcile before retrying' WHERE channel=?1 AND asset=?2 AND state='rendering'",rusqlite::params![int(p,"channel")?,int(p,"asset")?]).map_err(|e|bad(e.to_string()))?;
+                crate::workflow::status(&s, int(p, "channel")?, int(p, "asset")?).map_err(err)
+            },
+        ),
+        spec(
+            "studio.workflowRevise",
+            "Revise Reviewed Undelivered Edit",
+            "strict Editorial object; preserves prior completed render, rejects delivered/uncertain items",
+            true,
+            |_, p| {
+                let plan = serde_json::from_value(p.clone()).map_err(|e| bad(format!("invalid editorial: {e}")))?;
+                crate::workflow::revise(&studio()?, plan).map_err(err)
+            },
+        ),
+        spec(
+            "studio.workflowSuggest",
+            "Draft with Local Provider",
+            "Editorial evidence object; returns constrained copy for review, never persists or publishes",
+            false,
+            |_, p| {
+                let input = serde_json::from_value(p.clone()).map_err(|e| bad(format!("invalid evidence: {e}")))?;
+                crate::workflow::suggest(&studio()?, input).map_err(err)
+            },
+        ),
+        spec("studio.workflowInventory", "Workflow Inventory", r#"{"channel":n} reconciles cloud before returning candidates"#, false, |_, p| {
+            crate::workflow::inventory(&studio()?, int(p, "channel")?).map_err(err)
+        }),
+        spec(
+            "studio.workflowPlan",
+            "Save Reviewed Editorial Plan",
+            "strict Editorial object; source_in_ticks/source_out_ticks are integer ticks at 254016000000/s",
+            true,
+            |_, p| {
+                let plan = serde_json::from_value(p.clone()).map_err(|e| bad(format!("invalid editorial: {e}")))?;
+                crate::workflow::save(&studio()?, plan).map_err(err)
+            },
+        ),
+        spec(
+            "studio.workflowEvidence",
+            "Correct Source Evidence",
+            r#"{"channel":n,"asset":n,"evidence_url":str,"evidence_note":str}; audits reference changes, preserves rendered text/trim/delivery"#,
+            true,
+            |_, p| {
+                crate::workflow::evidence(&studio()?, int(p, "channel")?, int(p, "asset")?, text(p, "evidence_url")?, text(p, "evidence_note")?).map_err(err)
+            },
+        ),
+        spec(
+            "studio.workflowVerify",
+            "Verify Encoded Workflow Media",
+            r#"{"channel":n,"asset":n} native decode of first/last frames and audio; records dimensions/duration/size"#,
+            false,
+            |_, p| crate::workflow::verify(&studio()?, int(p, "channel")?, int(p, "asset")?).map_err(err),
+        ),
+        spec("studio.workflowStatus", "Workflow Status", r#"{"channel":n,"asset":n}"#, false, |_, p| {
+            crate::workflow::status(&studio()?, int(p, "channel")?, int(p, "asset")?).map_err(err)
+        }),
+        spec(
+            "studio.workflowRender",
+            "Render Workflow Item",
+            r#"{"channel":n,"asset":n} native render, blocks; use a dedicated headless session"#,
+            true,
+            |s, p| crate::workflow::render(&studio()?, int(p, "channel")?, int(p, "asset")?, s).map_err(err),
+        ),
+        spec(
+            "studio.workflowSchedule",
+            "Schedule Workflow Item",
+            r#"{"channel":n,"asset":n,"account":str,"at":UTC ISO Z} verifies remote storage and job"#,
+            true,
+            |_, p| crate::workflow::schedule(&studio()?, int(p, "channel")?, int(p, "asset")?, text(p, "account")?, text(p, "at")?).map_err(err),
+        ),
         spec("studio.workspaces", "Workspaces", "{}", false, |_, _| to_value(studio()?.channels().map_err(err)?)),
         spec("studio.downloaderCheck", "Check Downloader", "{}", false, |_, _| {
             let s = studio()?;
@@ -91,8 +171,7 @@ pub fn register() {
             "Download a Video",
             r#"{"channel":n,"url":str,"notes":str?,"noDraft":bool? (skip the one-card draft; for studio.plan),"options":{"quality":"best|1080|720|480","format":str?,"cookiesFrom":str?,"rateLimit":str?,"sectionStart":str?,"sectionEnd":str?}?} (blocks until done: download, checks, library, AI draft)"#,
             true,
-            |session, p| {
-                let s_path = session.path.clone();
+            |_, p| {
                 let s = studio()?;
                 let options = p.get("options").cloned().map(serde_json::from_value).transpose().map_err(|e| bad(format!("options: {e}")))?.unwrap_or_default();
                 let job = crate::ytdlp::Import {
@@ -100,7 +179,7 @@ pub fn register() {
                     notes: p.get("notes").and_then(Value::as_str).unwrap_or("").to_string(),
                     options,
                     no_draft: p.get("noDraft").and_then(Value::as_bool).unwrap_or(false),
-                    save_to: crate::project_folder(s_path.as_deref(), "Downloads").ok(),
+                    save_to: None,
                     ..Default::default()
                 };
                 let done = crate::ytdlp::run(&s, int(p, "channel")?, job, &|_| {});

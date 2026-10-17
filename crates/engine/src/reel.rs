@@ -53,7 +53,7 @@ pub fn commands() -> Vec<CommandSpec> {
             "reel.new",
             "New Reel…",
             M,
-            r#"{"name":str?,"format":"reel"|"post"?,"template":str?,"brand":Brand?,"channelId":n?,"card":Card?,"item":itemId? (project footage to build around),"paths":[str]? (a file; reused when already in the project),"sourceIn":f64?,"sourceOut":f64? (seconds of the footage to use),"seconds":f64? (length without footage)}"#,
+            r#"{"name":str?,"format":"reel"|"post"?,"template":str?,"brand":Brand?,"channelId":n?,"card":Card?,"item":itemId? (project footage to build around),"paths":[str]? (a file; reused when already in the project),"sourceIn":f64?,"sourceOut":f64? (seconds),"sourceInTicks":i64?,"sourceOutTicks":i64? (exact ticks override seconds),"seconds":f64? (length without footage)}"#,
             always,
             new_reel,
         ),
@@ -61,7 +61,7 @@ pub fn commands() -> Vec<CommandSpec> {
             "reel.apply",
             "Apply Reel Template",
             M,
-            r#"{"template":str,"brand":Brand?,"card":Card?,"clip":clipId? (the main footage; default: the Reel's main clip, else the selected or lowest video clip at the playhead),"item":itemId? (place this media as the footage),"sourceIn":f64?,"sourceOut":f64? (seconds of the item to use),"seconds":f64?}"#,
+            r#"{"template":str,"brand":Brand?,"card":Card?,"clip":clipId? (the main footage; default: the Reel's main clip, else the selected or lowest video clip at the playhead),"item":itemId? (place this media as the footage),"sourceIn":f64?,"sourceOut":f64? (seconds),"sourceInTicks":i64?,"sourceOutTicks":i64? (exact ticks override seconds),"seconds":f64?}"#,
             has_seq,
             apply,
         ),
@@ -151,7 +151,7 @@ fn new_reel(s: &mut Session, p: &Value) -> Result<Value> {
         if let Some(i) = item {
             args["item"] = json!(i);
         }
-        for k in ["channelId", "sourceIn", "sourceOut"] {
+        for k in ["channelId", "sourceIn", "sourceOut", "sourceInTicks", "sourceOutTicks"] {
             if let Some(v) = p.get(k) {
                 args[k] = v.clone();
             }
@@ -271,8 +271,21 @@ fn apply(s: &mut Session, p: &Value) -> Result<Value> {
                 .ok_or(EngineError::NoSequence)?;
             let (_, has_audio) = s.project.source_streams(item);
             // A part of the source (`sourceIn` / `sourceOut`, seconds): one segment of a long video.
-            let from = f64_p(p, "sourceIn").map(|v| Tick::from_seconds_f64(v.max(0.0))).unwrap_or(Tick::ZERO).min(dur);
-            let to = f64_p(p, "sourceOut").map(|v| Tick::from_seconds_f64(v.max(0.0))).unwrap_or(dur).min(dur);
+            let exact = |key: &str| -> Result<Option<Tick>> {
+                p.get(key)
+                    .map(|v| v.as_i64().filter(|n| *n >= 0).map(Tick).ok_or_else(|| EngineError::Other(format!("{key} must be nonnegative integer ticks"))))
+                    .transpose()
+            };
+            let exact_from = exact("sourceInTicks")?;
+            let exact_to = exact("sourceOutTicks")?;
+            if exact_from.is_some_and(|t| t >= dur) || exact_to.is_some_and(|t| t > dur) {
+                return Err(EngineError::Other("exact source ticks exceed media duration".into()));
+            }
+            let from = exact_from.unwrap_or_else(|| f64_p(p, "sourceIn").map(|v| Tick::from_seconds_f64(v.max(0.0))).unwrap_or(Tick::ZERO)).min(dur);
+            let to = exact_to.unwrap_or_else(|| f64_p(p, "sourceOut").map(|v| Tick::from_seconds_f64(v.max(0.0))).unwrap_or(dur)).min(dur);
+            if p.get("sourceOutTicks").is_some() && to <= from {
+                return Err(EngineError::Other("sourceOutTicks must follow sourceInTicks".into()));
+            }
             let len = if to > from { to - from } else { dur - from };
             let clips = crate::commands::place_item(
                 s,

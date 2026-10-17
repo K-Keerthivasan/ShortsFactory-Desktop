@@ -12,3 +12,6 @@ __pycache__/
 /data/
 /storage/
 /secrets/
+
+# Working projects (renders, downloads, automation runs) stay on disk, not in git.
+projects/

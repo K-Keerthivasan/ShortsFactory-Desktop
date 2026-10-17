@@ -208,16 +208,7 @@ fn framed(c: &Ctx<'_>) -> ReelPlan {
     let t = b.text(Z::Over, "Title", c.title(), 64.0, ty, 820.0, size, Style { weight: "ExtraBold", align: 1, ..Style::regular() });
     b.control("title", "Headline", t, "text");
     if !caption.is_empty() {
-        let cap = b.text(
-            Z::Over,
-            "Caption",
-            caption,
-            64.0,
-            ty + title_h + 16.0,
-            820.0,
-            28.0,
-            Style { align: 1, opacity: 72.0, ..Style::mono() },
-        );
+        let cap = b.text(Z::Over, "Caption", caption, 64.0, ty + title_h + 16.0, 820.0, 28.0, Style { align: 1, opacity: 72.0, ..Style::mono() });
         b.control("caption", "Caption", cap, "text");
     }
     b.finish()

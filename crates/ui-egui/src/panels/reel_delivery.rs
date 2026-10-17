@@ -195,7 +195,8 @@ pub(super) fn library_grid(app: &mut FilmcraftApp, ui: &mut egui::Ui, posts: &[L
             let title = ui.painter().layout(post.title.clone(), egui::FontId::proportional(12.0), t.text, tile);
             let title_rect = Rect::from_min_size(pos2(rect.min.x, picture.max.y + 4.0), vec2(tile, 16.0));
             ui.painter().with_clip_rect(title_rect).galley(title_rect.min, title, t.text);
-            let status = if post.published.iter().any(|(_, s, _)| s.eq_ignore_ascii_case("published")) { "published".to_string() } else { post.status.to_lowercase() };
+            let status =
+                if post.published.iter().any(|(_, s, _)| s.eq_ignore_ascii_case("published")) { "published".to_string() } else { post.status.to_lowercase() };
             ui.painter().text(pos2(rect.min.x, picture.max.y + 22.0), Align2::LEFT_TOP, status, egui::FontId::proportional(11.0), t.text_dim);
             let response = response.on_hover_text(&post.title);
             app.auto.add_response(&format!("reel.library.tile.{}", post.story_id), &response, &post.title);
@@ -344,6 +345,16 @@ pub(super) fn publish_page(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect
         }
         if rt().accounts.is_empty() {
             ui.label("Connect an account in Plugin Settings → Accounts & keys.");
+        }
+        // YouTube treats vertical videos up to three minutes as Shorts.
+        let youtube = !app.ui.reel.use_cloud && rt().accounts.iter().any(|a| a.platform == "YOUTUBE" && app.ui.reel.accounts.contains(&a.id));
+        let seconds = app.session.active_sequence().map_or(0.0, |q| q.duration().seconds());
+        if youtube && seconds > 180.0 {
+            ui.label(
+                RichText::new(format!("This Reel is {seconds:.0} s: YouTube posts it as a normal video, not a Short (Shorts are up to 3 minutes)."))
+                    .small()
+                    .color(app.tokens.danger),
+            );
         }
         section(ui, "Post caption", true, |ui| {
             ui.label(&info.card.instagram_caption);

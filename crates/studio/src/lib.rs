@@ -21,7 +21,9 @@ mod instagram_cloud;
 pub mod meta_token;
 pub mod notifications;
 pub mod settings;
+pub mod workflow;
 pub mod youtube;
+pub mod youtube_connect;
 pub mod ytdlp;
 
 use std::collections::HashMap;
@@ -204,7 +206,17 @@ fn run_job(studio: &Studio, job: i64, channel: i64, render: i64, account: i64) -
                     .and_then(serde_json::Value::as_array)
                     .map(|a| a.iter().filter_map(|t| t.as_str()).map(|t| t.trim_start_matches('#').to_string()).filter(|t| !t.is_empty()).collect())
                     .unwrap_or_default();
-                youtube::publish(studio, job, channel, &secret, &file, &title, &caption, &tags)
+                // The same words as the Instagram post; YouTube refuses < and > in titles and
+                // descriptions, and #Shorts marks the vertical video as a Short.
+                let clean = |s: &str| s.replace(['<', '>'], "");
+                let title = clean(&title);
+                let mut description = clean(&caption);
+                if !description.to_lowercase().contains("#shorts") {
+                    description = format!("{}
+
+#Shorts", description.trim_end());
+                }
+                youtube::publish(studio, job, channel, &secret, &file, &title, &description, &tags)
             }
             other => Err(instagram::PublishError::Retry(format!("{other} publishing is not supported"))),
         }

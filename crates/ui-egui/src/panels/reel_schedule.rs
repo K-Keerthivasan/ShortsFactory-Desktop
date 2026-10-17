@@ -38,7 +38,9 @@ fn load_cloud(s: &Studio, force: bool) {
     r.cloud_loaded = true;
     let (a, b) = (s.clone(), s.clone());
     spawn(&mut r, "Cloud accounts", move || {
-        Done::CloudAccounts(filmcraft_studio::cloud::call(&a, "accounts", json!({})).map(|v| v.as_array().cloned().unwrap_or_default()).map_err(|e| e.to_string()))
+        Done::CloudAccounts(
+            filmcraft_studio::cloud::call(&a, "accounts", json!({})).map(|v| v.as_array().cloned().unwrap_or_default()).map_err(|e| e.to_string()),
+        )
     });
     spawn(&mut r, "Cloud schedules", move || {
         Done::CloudPosts(
@@ -89,7 +91,9 @@ pub(super) fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, ctx: &Ctx) {
     ui.label(RichText::new("Instagram account").strong());
     if accounts.is_empty() {
         let loading = rt().tasks.iter().any(|(label, _)| label == "Cloud accounts");
-        ui.label(RichText::new(if loading { "Loading cloud accounts…" } else { "No cloud accounts. Connect one in the cloud dashboard." }).small().color(t.text_dim));
+        ui.label(
+            RichText::new(if loading { "Loading cloud accounts…" } else { "No cloud accounts. Connect one in the cloud dashboard." }).small().color(t.text_dim),
+        );
     }
     if app.ui.reel.cloud_account.is_none() {
         app.ui.reel.cloud_account = accounts.first().and_then(|a| a.get("id").and_then(|v| v.as_str())).map(str::to_string);
@@ -102,11 +106,11 @@ pub(super) fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, ctx: &Ctx) {
         ui.horizontal_wrapped(|ui| {
             let b = ui.radio_value(&mut app.ui.reel.cloud_account, Some(id.clone()), format!("@{name}"));
             app.auto.add_response(&format!("reel.schedule.account.{id}"), &b, &name);
-            ui.label(
-                RichText::new(format!("token valid {}", filmcraft_studio::cloud::expiry_text(expires)))
-                    .small()
-                    .color(if level >= 3 { t.danger } else { t.text_dim }),
-            );
+            ui.label(RichText::new(format!("token valid {}", filmcraft_studio::cloud::expiry_text(expires))).small().color(if level >= 3 {
+                t.danger
+            } else {
+                t.text_dim
+            }));
         });
     }
     ui.separator();
@@ -177,7 +181,13 @@ pub(super) fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, ctx: &Ctx) {
                 ui.set_min_height(50.0);
                 ui.vertical(|ui| {
                     let label = RichText::new(day.day().to_string()).small();
-                    ui.label(if day == today { label.strong().color(t.accent) } else if day < today { label.color(t.text_dim) } else { label });
+                    ui.label(if day == today {
+                        label.strong().color(t.accent)
+                    } else if day < today {
+                        label.color(t.text_dim)
+                    } else {
+                        label
+                    });
                     let status = |p: &&serde_json::Value| p.get("status").and_then(|v| v.as_str()).unwrap_or_default().to_string();
                     // The worst state shows: failed, then scheduled, then published.
                     let worst = items.iter().map(status).max_by_key(|s| match s.as_str() {
@@ -278,7 +288,12 @@ pub(super) fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, ctx: &Ctx) {
                     if b.clicked()
                         && let Some(to) = move_to
                     {
-                        post_action(&ctx.s, "Reschedule", "reschedulePost", json!({"id": id, "scheduledFor": to, "timezone": filmcraft_studio::cloud::local_timezone()}));
+                        post_action(
+                            &ctx.s,
+                            "Reschedule",
+                            "reschedulePost",
+                            json!({"id": id, "scheduledFor": to, "timezone": filmcraft_studio::cloud::local_timezone()}),
+                        );
                     }
                     let c = ui.small_button("Cancel");
                     app.auto.add_response(&format!("reel.schedule.cancel.{id}"), &c, "Cancel post");
@@ -328,7 +343,10 @@ pub(super) fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, ctx: &Ctx) {
         ui.label(RichText::new(info.card.hashtags.join(" ")).small());
     });
     let account = app.ui.reel.cloud_account.clone();
-    let expires = account.as_deref().and_then(|id| accounts.iter().find(|a| a.get("id").and_then(|v| v.as_str()) == Some(id))).and_then(|a| a.get("token_expires_at").and_then(|v| v.as_str()));
+    let expires = account
+        .as_deref()
+        .and_then(|id| accounts.iter().find(|a| a.get("id").and_then(|v| v.as_str()) == Some(id)))
+        .and_then(|a| a.get("token_expires_at").and_then(|v| v.as_str()));
     let at_ms = at.as_deref().and_then(filmcraft_studio::clock_ms);
     let problem = if at.is_none() {
         Some("Type the time as HH:MM".to_string())

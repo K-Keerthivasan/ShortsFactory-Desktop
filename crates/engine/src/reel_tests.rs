@@ -336,3 +336,19 @@ fn clearing_the_supporting_line_removes_it_from_the_picture() {
         assert_eq!(crate::reel::current(&s).unwrap().card.caption, "", "{template}");
     }
 }
+
+#[test]
+fn exact_tick_source_ranges_are_preserved_and_hostile_ticks_fail() {
+    let (mut s, r) = reel("quoteCard");
+    let main = s.active_sequence().unwrap().find_item(ClipId(r["mainClip"].as_u64().unwrap())).unwrap().1.item;
+    let start = 254_016_000_000_i64;
+    let end = start * 3;
+    s.execute("reel.new", json!({"item":main.0,"sourceInTicks":start,"sourceOutTicks":end})).unwrap();
+    let info = crate::reel::current(&s).unwrap();
+    let q = s.active_sequence().unwrap();
+    let (_, clip) = q.find_item(ClipId(info.main_clip.unwrap())).unwrap();
+    assert_eq!(clip.source_in.0, start);
+    assert_eq!(clip.duration.0, end - start);
+    assert!(s.execute("reel.new", json!({"item":main.0,"sourceInTicks":-1,"sourceOutTicks":end})).is_err());
+    assert!(s.execute("reel.new", json!({"item":main.0,"sourceInTicks":1.5,"sourceOutTicks":end})).is_err());
+}

@@ -14,6 +14,14 @@ use serde_json::{Value, json};
 
 use crate::{AutomationError, BridgeClient, png_rgba};
 
+static WORKFLOW_RENDERING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+struct WorkflowRenderPermit;
+impl Drop for WorkflowRenderPermit {
+    fn drop(&mut self) {
+        WORKFLOW_RENDERING.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
 pub enum Backend {
     Headless(Arc<Mutex<Session>>),
     Bridge(Arc<BridgeClient>),
@@ -36,6 +44,43 @@ fn join_error(e: tokio::task::JoinError) -> AutomationError {
 pub struct FilmcraftMcp {
     backend: Arc<Backend>,
     tool_router: ToolRouter<Self>,
+}
+
+#[derive(Debug, serde::Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowItem {
+    pub channel: i64,
+    pub asset: i64,
+}
+#[derive(Debug, serde::Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowChannel {
+    pub channel: i64,
+}
+#[derive(Debug, serde::Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowPlan {
+    pub channel: i64,
+    pub asset: i64,
+    pub source_in_ticks: i64,
+    pub source_out_ticks: i64,
+    pub title: String,
+    pub hook: String,
+    pub caption: String,
+    pub attribution: String,
+    pub template: String,
+    pub evidence_url: String,
+    pub evidence_note: String,
+    pub footage_note: String,
+    pub trim_reason: String,
+}
+#[derive(Debug, serde::Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowSchedule {
+    pub channel: i64,
+    pub asset: i64,
+    pub account: String,
+    pub at: String,
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
@@ -326,6 +371,89 @@ impl FilmcraftMcp {
             )
         });
         wrap(r)
+    }
+
+    #[tool(
+        title = "Workflow Inventory",
+        description = "Reconcile local and cloud history, inspect actual source paths, brand and account mapping.",
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = true)
+    )]
+    async fn workflow_inventory(&self, Parameters(p): Parameters<WorkflowChannel>) -> Result<CallToolResult, McpError> {
+        let value = serde_json::to_value(p).map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+        wrap(self.run("studio.workflowInventory", value).await)
+    }
+
+    #[tool(
+        title = "Suggest Editorial Copy",
+        description = "Draft constrained copy using a configured local OpenAI-compatible model; returns a proposal requiring editorial review.",
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = false, open_world_hint = false)
+    )]
+    async fn workflow_suggest(&self, Parameters(p): Parameters<WorkflowPlan>) -> Result<CallToolResult, McpError> {
+        let value = serde_json::to_value(p).map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+        wrap(self.run("studio.workflowSuggest", value).await)
+    }
+
+    #[tool(
+        title = "Workflow Plan",
+        description = "Persist a reviewed evidence-backed editorial plan. Exact trim units: 254016000000 ticks per second. No guessed identities.",
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = true)
+    )]
+    async fn workflow_plan(&self, Parameters(p): Parameters<WorkflowPlan>) -> Result<CallToolResult, McpError> {
+        let value = serde_json::to_value(p).map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+        wrap(self.run("studio.workflowPlan", value).await)
+    }
+
+    #[tool(
+        title = "Workflow Status",
+        description = "Inspect resumable workflow state and last error.",
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = true)
+    )]
+    async fn workflow_status(&self, Parameters(p): Parameters<WorkflowItem>) -> Result<CallToolResult, McpError> {
+        let value = serde_json::to_value(p).map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+        wrap(self.run("studio.workflowStatus", value).await)
+    }
+
+    #[tool(
+        title = "Workflow Render",
+        description = "Start a native render in a separate headless session. Returns immediately; poll workflow_status until rendered or failed. Keep the MCP host running.",
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = true)
+    )]
+    async fn workflow_render(&self, Parameters(p): Parameters<WorkflowItem>) -> Result<CallToolResult, McpError> {
+        let current = match self.run("studio.workflowStatus", json!({"channel":p.channel,"asset":p.asset})).await {
+            Ok(v) => v,
+            Err(e) => return wrap(Err(e)),
+        };
+        if current["state"] != "planned" {
+            return wrap(Ok(current));
+        }
+        if WORKFLOW_RENDERING.compare_exchange(false, true, std::sync::atomic::Ordering::AcqRel, std::sync::atomic::Ordering::Acquire).is_err() {
+            return wrap(Err(AutomationError::Other("one workflow render is already running; poll workflow_status before starting another".into())));
+        }
+        drop(tokio::task::spawn_blocking(move || {
+            let _permit = WorkflowRenderPermit;
+            let mut session = Session::default();
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                session.execute("studio.workflowRender", json!({"channel":p.channel,"asset":p.asset}))
+            }));
+            if result.is_err() {
+                let failure = session.execute("studio.workflowWorkerFailure", json!({"channel":p.channel,"asset":p.asset}));
+                if let Err(error) = failure {
+                    use std::io::Write;
+                    let _ = writeln!(std::io::stderr(), "workflow failure record could not be saved: {error}");
+                }
+            }
+        }));
+        wrap(Ok(json!({"job":format!("workflow:{}:{}",p.channel,p.asset),"state":"queued","poll":"workflow_status"})))
+    }
+
+    #[tool(
+        title = "Workflow Schedule",
+        description = "Upload and schedule a rendered item, reusing persisted idempotency key and verifying remote storage. at is future UTC ISO Z.",
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = true)
+    )]
+    async fn workflow_schedule(&self, Parameters(p): Parameters<WorkflowSchedule>) -> Result<CallToolResult, McpError> {
+        let value = serde_json::to_value(p).map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+        wrap(self.run("studio.workflowSchedule", value).await)
     }
 
     #[tool(

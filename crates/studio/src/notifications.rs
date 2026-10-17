@@ -232,7 +232,13 @@ mod tests {
     #[test]
     fn cleared_updates_do_not_come_back() {
         let root = std::env::temp_dir().join(format!("filmcraft-notification-clear-{}-{}", std::process::id(), crate::clock::now_ms()));
-        let studio = Studio { database: root.join("unused.db"), storage: root.join("storage"), secrets: root.join("secrets"), env: Default::default(), root: root.clone() };
+        let studio = Studio {
+            database: root.join("unused.db"),
+            storage: root.join("storage"),
+            secrets: root.join("secrets"),
+            env: Default::default(),
+            root: root.clone(),
+        };
         let mut state = State::default();
         observe(&mut state, row("local:1", "PUBLISHED"));
         observe(&mut state, row("local:2", "PUBLISHED"));

@@ -240,6 +240,8 @@ pub const EDITABLE_ENV: &[&str] = &[
     "FFMPEG_PATH",
     "META_GRAPH_VERSION",
     "META_APP_ID",
+    "YOUTUBE_CLIENT_ID",
+    "YOUTUBE_CLIENT_SECRET",
     "META_APP_SECRET",
 ];
 

@@ -20,6 +20,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 log = { workspace = true }
+sha2 = "0.10"
 # The shared studio database is SQLite; the bundled build needs no system library.
 rusqlite = { version = "0.32", features = ["bundled"] }
 # The local IANA time zone the cloud schedules in.

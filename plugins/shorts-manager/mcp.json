@@ -1,0 +1,1 @@
+{"$schema":"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json","mcpServers":{"shorts-manager":{"type":"stdio","command":"${PLUGIN_ROOT}/../../target/release/shorts-manager-engine.exe","args":["mcp"],"cwd":"${PLUGIN_ROOT}/../.."}}}

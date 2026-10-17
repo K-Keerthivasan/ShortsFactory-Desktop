@@ -70,6 +70,32 @@ fn fixture(name: &str) -> Studio {
     Studio::open(&root).unwrap()
 }
 
+#[test]
+fn downloaded_files_outside_storage_persist_in_create_without_copying() {
+    let s = fixture("download-shelf");
+    let folder = s.root.join("Custom downloads");
+    std::fs::create_dir_all(&folder).unwrap();
+    let file = folder.join("sample.mp4");
+    let mut editor = filmcraft_engine::Session::default();
+    editor.execute("reel.new", json!({"seconds":0.1,"template":"logoOnly"})).unwrap();
+    editor.execute("export.quick", json!({"path":file,"wait":true,"width":64,"height":64})).unwrap();
+    let before = editor.project.clone();
+    let id = s.register_download(1, &file, "My downloaded footage", "https://example.test/clip").unwrap();
+    assert_eq!(id, s.register_download(1, &file, "My downloaded footage", "").unwrap());
+    let reopened = Studio::open(&s.root).unwrap();
+    let rows = reopened.media(1).unwrap();
+    let row = rows.iter().find(|r| r.id == id).unwrap();
+    assert_eq!(row.path, file.canonicalize().unwrap());
+    assert_eq!(row.label, "My downloaded footage");
+    assert!(std::sync::Arc::ptr_eq(&before, &editor.project));
+    assert_eq!(reopened.scan_download_folder(1, &folder).unwrap(), 0);
+    reopened.remove_clip(1, id).unwrap();
+    assert!(file.is_file());
+    assert!(!reopened.media(1).unwrap().iter().any(|r| r.id == id));
+    reopened.restore_clips(1).unwrap();
+    assert!(reopened.media(1).unwrap().iter().any(|r| r.id == id));
+}
+
 fn reel() -> ReelInfo {
     ReelInfo {
         template: "jkr-clean-v2".into(),
@@ -471,4 +497,22 @@ fn project_files_live_beside_the_project() {
     let e = crate::project_folder(None, "Renders").unwrap_err().to_string();
     assert!(e.contains("Save the project first"), "{e}");
     let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn connecting_youtube_adds_one_account_and_turns_youtube_on() {
+    let s = fixture("youtube");
+    let secret = json!({"clientId": "id", "clientSecret": "secret", "refreshToken": "never-logged", "privacyStatus": "public"});
+    let id = crate::youtube_connect::save(&s, 1, "UC123", "JKR Shorts", secret.clone()).unwrap();
+    let again = crate::youtube_connect::save(&s, 1, "UC123", "JKR Shorts renamed", secret).unwrap();
+    assert_eq!(id, again, "reconnecting updates the same account");
+    let accounts = s.accounts(1).unwrap();
+    let yt: Vec<_> = accounts.iter().filter(|a| a.platform == "YOUTUBE").collect();
+    assert_eq!(yt.len(), 1);
+    assert_eq!(yt[0].display_name, "JKR Shorts renamed");
+    assert_eq!(yt[0].status, "CONNECTED");
+    assert!(s.root.join("secrets").join(&yt[0].credentials_reference).is_file());
+    let platforms = s.enabled_platforms(1).unwrap();
+    assert!(platforms.contains(&"YOUTUBE".to_string()) && platforms.contains(&"INSTAGRAM".to_string()));
+    assert_eq!(s.settings_json(1).unwrap()["primaryColor"], "#22c55e", "other settings are kept");
 }
