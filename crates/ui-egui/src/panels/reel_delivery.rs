@@ -296,6 +296,23 @@ pub(super) fn publish_page(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect
         };
         has_reel = true;
         ui.heading("Publish Reel");
+        let accounts = rt().accounts.clone();
+        let instagram: Vec<_> = accounts.iter().filter(|a| a.platform != "YOUTUBE").cloned().collect();
+        let youtube: Vec<_> = accounts.iter().filter(|a| a.platform == "YOUTUBE").cloned().collect();
+        let tick = |app: &mut FilmcraftApp, ui: &mut egui::Ui, account: &filmcraft_studio::Account, label: String| {
+            let mut selected = app.ui.reel.accounts.contains(&account.id);
+            let check = ui.add_enabled(account.enabled, egui::Checkbox::new(&mut selected, label));
+            app.auto.add_response(&format!("reel.publish.account.{}", account.id), &check, &account.display_name);
+            if check.changed() {
+                app.ui.reel.accounts.retain(|id| *id != account.id);
+                if selected {
+                    app.ui.reel.accounts.push(account.id);
+                }
+            }
+        };
+
+        // Instagram: from this PC, or through the cloud.
+        ui.label(RichText::new("Instagram").strong());
         ui.horizontal(|ui| {
             let local = ui.selectable_value(&mut app.ui.reel.use_cloud, false, "Local publishing");
             app.auto.add_response("reel.publish.delivery.local", &local, "Local publishing");
@@ -305,8 +322,6 @@ pub(super) fn publish_page(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect
                 app.ui.reel.use_cloud = true;
             }
         });
-        ui.label("Accounts");
-        let accounts = rt().accounts.clone();
         if app.ui.reel.use_cloud {
             let mut runtime = rt();
             if !runtime.cloud_loaded {
@@ -328,34 +343,89 @@ pub(super) fn publish_page(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect
                 let b = ui.radio_value(&mut app.ui.reel.cloud_account, Some(id.to_string()), name);
                 app.auto.add_response(&format!("reel.publish.cloudAccount.{id}"), &b, name);
             }
-            ui.label("Cloud publishing continues when the app is closed. Tokens are managed in Plugin Settings → Cloud. The Schedule tab shows cloud posts on a calendar.");
+            ui.label(RichText::new("Cloud publishing continues when the app is closed; the Schedule tab shows it on a calendar.").small().color(app.tokens.text_dim));
         } else {
-            for account in accounts {
-                let mut selected = app.ui.reel.accounts.contains(&account.id);
-                let check = ui.add_enabled(account.enabled, egui::Checkbox::new(&mut selected, format!("{} · {}", account.display_name, account.platform)));
-                app.auto.add_response(&format!("reel.publish.account.{}", account.id), &check, &account.display_name);
-                if check.changed() {
-                    app.ui.reel.accounts.retain(|id| *id != account.id);
-                    if selected {
-                        app.ui.reel.accounts.push(account.id);
-                    }
-                }
-                ui.label(RichText::new(account.status.to_lowercase()).small().color(app.tokens.text_dim));
+            if instagram.is_empty() {
+                ui.label(RichText::new("No Instagram account in this workspace.").small().color(app.tokens.text_dim));
+            }
+            for account in &instagram {
+                tick(app, ui, account, format!("{} · {}", account.display_name, account.status.to_lowercase()));
             }
         }
-        if rt().accounts.is_empty() {
-            ui.label("Connect an account in Plugin Settings → Accounts & keys.");
+        ui.separator();
+
+        // YouTube Shorts: the same Reel, posted (or scheduled by YouTube) on the workspace's channel.
+        ui.label(RichText::new("YouTube Shorts").strong());
+        if youtube.is_empty() {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new("No YouTube channel connected to this workspace.").small().color(app.tokens.text_dim));
+                let connect = ui.small_button("Connect YouTube…");
+                app.auto.add_response("reel.publish.connectYoutube", &connect, "Connect YouTube");
+                if connect.clicked() {
+                    app.ui.reel.plugin_open = true;
+                    app.ui.reel.plugin_tab = PluginTab::Accounts;
+                }
+            });
         }
-        // YouTube treats vertical videos up to three minutes as Shorts.
-        let youtube = !app.ui.reel.use_cloud && rt().accounts.iter().any(|a| a.platform == "YOUTUBE" && app.ui.reel.accounts.contains(&a.id));
-        let seconds = app.session.active_sequence().map_or(0.0, |q| q.duration().seconds());
-        if youtube && seconds > 180.0 {
+        for account in &youtube {
+            ui.horizontal_wrapped(|ui| {
+                tick(app, ui, account, format!("{} · {}", account.display_name, account.status.to_lowercase()));
+                // Visibility, kept with the channel's key.
+                let current = ctx.s.youtube_privacy(account.id).unwrap_or_else(|_| "public".into());
+                let mut chosen = current.clone();
+                egui::ComboBox::from_id_salt(("yt-privacy", account.id)).selected_text(match chosen.as_str() {
+                    "unlisted" => "Unlisted",
+                    "private" => "Private",
+                    _ => "Public",
+                })
+                .show_ui(ui, |ui| {
+                    for (v, l) in [("public", "Public"), ("unlisted", "Unlisted"), ("private", "Private")] {
+                        ui.selectable_value(&mut chosen, v.to_string(), l);
+                    }
+                });
+                if chosen != current
+                    && let Err(e) = ctx.s.set_youtube_privacy(account.id, &chosen)
+                {
+                    app.ui.status = e.to_string();
+                }
+            });
+        }
+        let youtube_ticked: Vec<i64> = youtube.iter().filter(|a| app.ui.reel.accounts.contains(&a.id)).map(|a| a.id).collect();
+        if !youtube_ticked.is_empty() {
+            ui.label(RichText::new("Title").small().color(app.tokens.text_dim));
+            let mut title = app.ui.reel.card.youtube_title.clone();
+            let field = ui.add(egui::TextEdit::singleline(&mut title).hint_text(info.card.title.chars().take(100).collect::<String>()).char_limit(100).desired_width(f32::INFINITY));
+            app.auto.add_response("reel.publish.youtubeTitle", &field, "YouTube title");
+            if field.changed() {
+                app.ui.reel.card.youtube_title = title;
+            }
+            if field.lost_focus()
+                && app.ui.reel.card.youtube_title != info.card.youtube_title
+                && let Err(e) = app.session.execute("reel.setCard", serde_json::json!({"youtubeTitle": app.ui.reel.card.youtube_title}))
+            {
+                app.ui.status = e.to_string();
+            }
+            let shown = if app.ui.reel.card.youtube_title.trim().is_empty() { info.card.title.as_str() } else { app.ui.reel.card.youtube_title.as_str() };
+            ui.label(RichText::new(format!("{} / 100 · empty uses the headline", shown.chars().count().min(100))).small().color(app.tokens.text_dim));
+            section(ui, "Description (the Instagram caption)", false, |ui| {
+                let caption = if info.card.instagram_caption.trim().is_empty() { info.card.title.clone() } else { info.card.instagram_caption.clone() };
+                ui.label(RichText::new(format!("{caption}\n\n{}\n\n#Shorts", info.card.hashtags.join(" "))).small());
+            });
             ui.label(
-                RichText::new(format!("This Reel is {seconds:.0} s: YouTube posts it as a normal video, not a Short (Shorts are up to 3 minutes)."))
+                RichText::new("Schedule uploads it now and YouTube publishes it at the time (this PC can be off then); Publish now posts it at once.")
                     .small()
-                    .color(app.tokens.danger),
+                    .color(app.tokens.text_dim),
             );
+            let seconds = app.session.active_sequence().map_or(0.0, |q| q.duration().seconds());
+            if seconds > 180.0 {
+                ui.label(
+                    RichText::new(format!("This Reel is {seconds:.0} s: YouTube posts it as a normal video, not a Short (Shorts are up to 3 minutes)."))
+                        .small()
+                        .color(app.tokens.danger),
+                );
+            }
         }
+        ui.separator();
         section(ui, "Post caption", true, |ui| {
             ui.label(&info.card.instagram_caption);
             ui.label(info.card.hashtags.join(" "));
@@ -373,10 +443,10 @@ pub(super) fn publish_page(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect
                 || runtime.tasks.iter().any(|(label, _)| label == "Publishing")
                 || runtime.queue.iter().any(|item| matches!(item.status.as_str(), "Waiting to render" | "Rendering" | "Publishing" | "Cloud processing"))
         };
-        let ready = !busy
-            && (if app.ui.reel.use_cloud { app.ui.reel.cloud_account.is_some() } else { !app.ui.reel.accounts.is_empty() })
-            && info.channel_id == ctx.channel
-            && ctx.channel.is_some();
+        // In cloud mode only YouTube accounts go alongside the cloud post (Instagram ticks are local ones).
+        let local_accounts: Vec<i64> = if app.ui.reel.use_cloud { youtube_ticked.clone() } else { app.ui.reel.accounts.clone() };
+        let cloud = app.ui.reel.use_cloud.then(|| app.ui.reel.cloud_account.clone()).flatten();
+        let ready = !busy && (cloud.is_some() || !local_accounts.is_empty()) && info.channel_id == ctx.channel && ctx.channel.is_some();
         ui.horizontal_wrapped(|ui| {
             let queue = ui.add_enabled(ready, egui::Button::new("Schedule"));
             app.auto.add_response("reel.publish.scheduleReel", &queue, "Render and schedule Reel");
@@ -385,10 +455,9 @@ pub(super) fn publish_page(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect
                     Some(at) => enqueue(
                         app,
                         &info,
-                        if app.ui.reel.use_cloud {
-                            QueueAction::Cloud(app.ui.reel.cloud_account.clone().unwrap_or_default(), at, false)
-                        } else {
-                            QueueAction::Schedule(app.ui.reel.accounts.clone(), at)
+                        match &cloud {
+                            Some(account) => QueueAction::Cloud(account.clone(), at, false, youtube_ticked.clone()),
+                            None => QueueAction::Schedule(local_accounts.clone(), at),
                         },
                     ),
                     None => app.ui.status = "Use YYYY-MM-DD HH:MM for the schedule time".into(),
@@ -400,15 +469,14 @@ pub(super) fn publish_page(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect
                 enqueue(
                     app,
                     &info,
-                    if app.ui.reel.use_cloud {
-                        QueueAction::Cloud(app.ui.reel.cloud_account.clone().unwrap_or_default(), filmcraft_studio::now_iso(), true)
-                    } else {
-                        QueueAction::PublishNow(app.ui.reel.accounts.clone())
+                    match &cloud {
+                        Some(account) => QueueAction::Cloud(account.clone(), filmcraft_studio::now_iso(), true, youtube_ticked.clone()),
+                        None => QueueAction::PublishNow(local_accounts.clone()),
                     },
                 );
             }
         });
-        ui.label(RichText::new("Renders the current Reel, approves it, then publishes to the selected accounts.").small().color(app.tokens.text_dim));
+        ui.label(RichText::new("Renders the current Reel, approves it, then publishes to Instagram and YouTube as chosen above.").small().color(app.tokens.text_dim));
         let library = ui.button("Render to library only");
         app.auto.add_response("reel.publish.libraryOnly", &library, "Render to library without publishing");
         if library.clicked() {

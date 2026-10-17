@@ -1015,6 +1015,7 @@ pub fn script_json(reel: &ReelInfo, clip: Option<Value>, duration: f64) -> Value
         "badge": if badge.is_empty() { Value::Null } else { Value::from(cap(badge, 24)) },
         "tuning": {"topHeight": null, "bottomHeight": null, "titleSize": null, "captionSize": null, "clipFit": null, "bandStyle": null, "bandColor": null, "markPosition": null, "align": null, "showHandle": null, "clipRadius": null},
         "shortHeadline": short,
+        "youtubeTitle": if card.youtube_title.trim().is_empty() { Value::Null } else { Value::from(cap(card.youtube_title.trim(), 100)) },
         "durationTargetSeconds": if duration.is_finite() { duration.clamp(1.0, 180.0) } else { 30.0 },
         "sourceLabel": if card.attribution.trim().is_empty() { "Original video".to_string() } else { cap(&card.attribution, 160) },
         "instagramCaption": cap(if card.instagram_caption.trim().is_empty() { &title } else { &card.instagram_caption }, 2200),

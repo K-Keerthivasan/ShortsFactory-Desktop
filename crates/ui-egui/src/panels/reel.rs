@@ -190,8 +190,9 @@ enum QueueAction {
     PublishNow(Vec<i64>),
     /// Accounts, UTC ISO time.
     Schedule(Vec<i64>, String),
-    /// Book it in the cloud: the cloud account, UTC ISO time, publish at once.
-    Cloud(String, String, bool),
+    /// Book it in the cloud: the cloud account, UTC ISO time, publish at once, and YouTube
+    /// accounts that take the same time through YouTube's own scheduling.
+    Cloud(String, String, bool, Vec<i64>),
 }
 
 struct QueueItem {
@@ -759,7 +760,7 @@ pub fn poll(app: &mut FilmcraftApp, now: f64) {
 }
 
 fn card_params(c: &Card) -> serde_json::Value {
-    json!({"reflow":true,"fonts": c.fonts, "textStyles":c.text_styles, "textTiming":c.text_timing, "title": c.title, "caption": c.caption, "attribution": c.attribution, "badge": c.badge, "bullets": c.bullets, "cta": c.cta, "instagramCaption": c.instagram_caption, "hashtags": c.hashtags})
+    json!({"reflow":true,"fonts": c.fonts, "textStyles":c.text_styles, "textTiming":c.text_timing, "title": c.title, "caption": c.caption, "attribution": c.attribution, "badge": c.badge, "bullets": c.bullets, "cta": c.cta, "instagramCaption": c.instagram_caption, "hashtags": c.hashtags, "youtubeTitle": c.youtube_title})
 }
 
 fn section(ui: &mut egui::Ui, title: &str, open: bool, body: impl FnOnce(&mut egui::Ui)) {
@@ -1731,7 +1732,23 @@ fn queue_sent(r: &mut Runtime, id: u64, render: i64) {
                 spawn(r, "Publishing", move || Done::Published(name, filmcraft_studio::publish_now(&st, ch, render, a).map_err(|e| e.to_string()), Some(id)));
             }
         }
-        QueueAction::Cloud(account, at, now) => {
+        QueueAction::Cloud(account, at, now, youtube) => {
+            // YouTube alongside the cloud post: at once, or uploaded now with YouTube's publish time.
+            if !youtube.is_empty() {
+                let (st, name) = (s.clone(), q.name.clone());
+                if now {
+                    for a in youtube {
+                        let (st, name) = (st.clone(), name.clone());
+                        spawn(r, "Publishing", move || Done::Published(name, filmcraft_studio::publish_now(&st, ch, render, a).map_err(|e| e.to_string()), None));
+                    }
+                } else {
+                    let when = at.clone();
+                    spawn(r, "Scheduling", move || {
+                        Done::Scheduled(name, filmcraft_studio::schedule_everywhere(&st, ch, render, &youtube, &when).map_err(|e| e.to_string()), when, 0)
+                    });
+                }
+            }
+            let Some(q) = r.queue.iter_mut().find(|q| q.id == id) else { return };
             q.status = "Publishing".into();
             spawn(r, "Cloud scheduling", move || {
                 Done::CloudQueued(

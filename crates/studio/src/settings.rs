@@ -115,6 +115,34 @@ impl Studio {
         Ok(())
     }
 
+    /// A YouTube account's visibility for new uploads: "public", "unlisted" or "private".
+    pub fn youtube_privacy(&self, account: i64) -> Result<String> {
+        let (_, a) = self.account(account)?;
+        let secret = self.secret(&a.credentials_reference)?;
+        Ok(secret.get("privacyStatus").and_then(Value::as_str).filter(|p| ["public", "unlisted", "private"].contains(p)).unwrap_or("public").to_string())
+    }
+
+    /// Sets a YouTube account's visibility for new uploads (its other key fields are kept).
+    pub fn set_youtube_privacy(&self, account: i64, privacy: &str) -> Result<()> {
+        if !["public", "unlisted", "private"].contains(&privacy) {
+            return err("visibility is public, unlisted or private");
+        }
+        let (_, a) = self.account(account)?;
+        if a.platform != "YOUTUBE" {
+            return err("only YouTube accounts have a visibility");
+        }
+        let file = self.credential_path(&a.credentials_reference)?;
+        let mut secret = self.secret(&a.credentials_reference)?;
+        if !secret.is_object() {
+            return err("the account's key file is unreadable; reconnect YouTube");
+        }
+        secret["privacyStatus"] = json!(privacy);
+        let tmp = file.with_extension("json.tmp");
+        std::fs::write(&tmp, secret.to_string())?;
+        std::fs::rename(tmp, file)?;
+        Ok(())
+    }
+
     /// Checks an account's key against its platform. With `record`, the result is written on the
     /// account (the earlier app reads that status); the automatic start-up check never records.
     pub fn test_account(&self, account: i64, record: bool) -> Result<String> {

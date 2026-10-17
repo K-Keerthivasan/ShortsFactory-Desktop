@@ -557,3 +557,26 @@ fn a_client_id_in_the_secret_field_is_caught_before_google() {
     s.env.insert("YOUTUBE_CLIENT_SECRET".into(), "GOCSPX-real".into());
     assert!(crate::youtube_connect::start(&s, 1).is_ok());
 }
+
+#[test]
+fn the_youtube_title_and_visibility_are_kept() {
+    let s = fixture("yt-title");
+    let video = s.root.join("export.mp4");
+    std::fs::write(&video, b"video").unwrap();
+    let mut r = reel();
+    r.card.youtube_title = "A short title for YouTube".into();
+    let (_, render) = s.send_to_library(&r, &video, None, None, 8.0, true).unwrap();
+    let script: String = s
+        .connect()
+        .unwrap()
+        .query_row("SELECT s.json FROM renders r JOIN scripts s ON s.id = r.script_id WHERE r.id = ?1", [render], |row| row.get(0))
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_str(&script).unwrap();
+    assert_eq!(v["youtubeTitle"], "A short title for YouTube");
+    let yt = crate::youtube_connect::save(&s, 1, "UC9", "JKR", json!({"refreshToken": "never-logged", "privacyStatus": "public"})).unwrap();
+    assert_eq!(s.youtube_privacy(yt).unwrap(), "public");
+    s.set_youtube_privacy(yt, "unlisted").unwrap();
+    assert_eq!(s.youtube_privacy(yt).unwrap(), "unlisted");
+    assert!(s.set_youtube_privacy(yt, "everyone").is_err());
+    assert!(s.set_youtube_privacy(1, "private").is_err(), "an Instagram account has no visibility");
+}

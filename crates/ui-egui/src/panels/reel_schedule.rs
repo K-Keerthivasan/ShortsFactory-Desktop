@@ -395,7 +395,7 @@ pub(super) fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, ctx: &Ctx) {
         if b.clicked()
             && let (Some(at), Some(account)) = (at.clone(), account.clone())
         {
-            enqueue(app, &info, QueueAction::Cloud(account, at, false));
+            enqueue(app, &info, QueueAction::Cloud(account, at, false, Vec::new()));
             rt().cloud_loaded = false;
         }
         let lib = ui.button("Render to library only");

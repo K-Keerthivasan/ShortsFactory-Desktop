@@ -119,6 +119,8 @@ pub struct Card {
     /// What the post says on Instagram (not drawn on the video).
     pub instagram_caption: String,
     pub hashtags: Vec<String>,
+    /// The Short's title on YouTube (up to 100 characters); empty uses the headline.
+    pub youtube_title: String,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

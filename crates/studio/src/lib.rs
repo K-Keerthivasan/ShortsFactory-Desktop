@@ -200,7 +200,14 @@ fn run_job(studio: &Studio, job: i64, channel: i64, render: i64, account: i64) -
                     .query_row("SELECT s.json FROM renders r JOIN scripts s ON s.id = r.script_id WHERE r.id = ?1", [render], |r| r.get::<_, String>(0))
                     .map_err(StudioError::from)?;
                 let v: serde_json::Value = serde_json::from_str(&script).unwrap_or_default();
-                let title = v.get("shortHeadline").and_then(serde_json::Value::as_str).unwrap_or("Reel").to_string();
+                // The Short's own title if one was written, else the headline.
+                let title = v
+                    .get("youtubeTitle")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|t| !t.trim().is_empty())
+                    .or_else(|| v.get("shortHeadline").and_then(serde_json::Value::as_str))
+                    .unwrap_or("Reel")
+                    .to_string();
                 let tags: Vec<String> = v
                     .get("hashtags")
                     .and_then(serde_json::Value::as_array)

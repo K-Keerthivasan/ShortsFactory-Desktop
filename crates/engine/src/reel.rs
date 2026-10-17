@@ -524,6 +524,9 @@ fn set_card(s: &mut Session, p: &Value) -> Result<Value> {
     if let Some(v) = text("instagramCaption") {
         card.instagram_caption = v;
     }
+    if let Some(v) = text("youtubeTitle") {
+        card.youtube_title = v.chars().take(100).collect();
+    }
     let list = |k: &str| p.get(k).and_then(Value::as_array).map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect::<Vec<_>>());
     if let Some(v) = list("bullets") {
         card.bullets = v.into_iter().take(4).collect();
