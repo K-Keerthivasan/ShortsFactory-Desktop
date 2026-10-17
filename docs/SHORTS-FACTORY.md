@@ -158,6 +158,10 @@ project under "No organization".
 answers Google on a free local port, which only **Desktop app** clients accept. Create a Desktop
 app client and paste its ID and secret.
 
+"… has not completed the Google verification process" (Error 403: `access_denied`) means the app
+is still in Testing and the account is not a test user: Audience ▸ **Publish app** (a Brand
+Account channel has no email to add as a test user). No verification submission is needed.
+
 Shorts upload as Public. Google's `videos.insert` reference (updated 2026-10-15) states that videos
 uploaded from unverified API projects are not restricted to private viewing; the 2020 rule that
 locked them until an audit no longer applies. The default quota allows about six uploads a day per
