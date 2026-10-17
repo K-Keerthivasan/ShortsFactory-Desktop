@@ -516,3 +516,32 @@ fn connecting_youtube_adds_one_account_and_turns_youtube_on() {
     assert!(platforms.contains(&"YOUTUBE".to_string()) && platforms.contains(&"INSTAGRAM".to_string()));
     assert_eq!(s.settings_json(1).unwrap()["primaryColor"], "#22c55e", "other settings are kept");
 }
+
+#[test]
+fn youtube_schedules_upload_now_and_instagram_waits() {
+    let s = fixture("yt-schedule");
+    let video = s.root.join("export.mp4");
+    std::fs::write(&video, b"video").unwrap();
+    let (_, render) = s.send_to_library(&reel(), &video, None, None, 8.0, true).unwrap();
+    // A YouTube account whose key has no Google client: its upload fails before any network call.
+    let yt = crate::youtube_connect::save(&s, 1, "UC1", "JKR Shorts", json!({"refreshToken": ""})).unwrap();
+    let soon = crate::clock::iso(crate::clock::now_ms() + 60_000);
+    assert!(crate::schedule_everywhere(&s, 1, render, &[1, yt], &soon).is_err(), "YouTube needs five minutes' notice");
+    let later = crate::clock::iso(crate::clock::now_ms() + 3 * 3_600_000);
+    let done = crate::schedule_everywhere(&s, 1, render, &[1, yt], &later).unwrap();
+    assert_eq!(done.waiting, 1, "Instagram waits for its time");
+    assert_eq!(done.youtube.len(), 1);
+    let (account, result) = &done.youtube[0];
+    assert_eq!(*account, yt);
+    assert!(result.as_ref().is_err_and(|e| e.contains("OAuth")), "{result:?}");
+    // The YouTube job keeps the chosen time; only Instagram is due for a worker at that time.
+    let at: String = s
+        .connect()
+        .unwrap()
+        .query_row("SELECT scheduled_at FROM publishing_jobs WHERE social_account_id = ?1", [yt], |r| r.get(0))
+        .unwrap();
+    assert_eq!(crate::clock::parse_iso(&at), crate::clock::parse_iso(&later));
+    // Instagram-only schedules work as before.
+    let (_, other) = s.send_to_library(&reel(), &video, None, None, 8.0, true).unwrap();
+    assert_eq!(crate::schedule_everywhere(&s, 1, other, &[1], &soon).unwrap().waiting, 1);
+}

@@ -241,8 +241,17 @@ pub fn register() {
                 let at = text(p, "at")?;
                 let at =
                     if at.ends_with('Z') || at.contains('+') { at.to_string() } else { crate::local_to_utc_iso(at).ok_or_else(|| bad("unreadable `at`"))? };
-                let n = s.schedule(int(p, "channel")?, int(p, "render")?, &ints(p, "accounts"), &at).map_err(err)?;
-                Ok(json!({"scheduled": n, "at": at}))
+                // YouTube accounts are uploaded now and published by YouTube at `at`; others wait for it.
+            let done = crate::schedule_everywhere(&s, int(p, "channel")?, int(p, "render")?, &ints(p, "accounts"), &at).map_err(err)?;
+            let youtube: Vec<Value> = done
+                .youtube
+                .iter()
+                .map(|(a, r)| match r {
+                    Ok(link) => json!({"account": a, "ok": true, "link": link}),
+                    Err(e) => json!({"account": a, "ok": false, "error": e}),
+                })
+                .collect();
+            Ok(json!({"scheduled": done.waiting, "youtube": youtube, "at": at}))
             },
         ),
         spec(

@@ -19,7 +19,7 @@ filmcraft-cli exec studio.workspaces
 | `reel.new`, `reel.apply`, `reel.setCard`, `reel.duplicate`, `reel.usesOf` | Build and edit Reels and Posts on the timeline |
 | `studio.sendToLibrary` | Renders the active Reel and adds it to its workspace's library |
 | `studio.approve` | Approves a render; nothing unapproved is ever published |
-| `studio.publishNow`, `studio.schedule` | Direct Instagram / YouTube, or the local queue |
+| `studio.publishNow`, `studio.schedule` | Direct Instagram / YouTube; `schedule` queues Instagram locally and uploads YouTube now with YouTube's own publish time |
 | `studio.cloudSchedule`, `studio.cloud`, `studio.calendar` | Supabase + B2 scheduling and the calendar |
 
 ## Two ways to connect

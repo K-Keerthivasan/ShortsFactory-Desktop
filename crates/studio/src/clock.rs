@@ -81,6 +81,12 @@ pub fn local_to_utc_iso(s: &str) -> Option<String> {
     Some(iso(local.timestamp_millis()))
 }
 
+/// A UTC ISO time as local `YYYY-MM-DD HH:MM` (the input itself if unreadable).
+pub fn local_time(iso: &str) -> String {
+    use chrono::TimeZone;
+    parse_iso(iso).and_then(|ms| chrono::Local.timestamp_millis_opt(ms).single()).map(|d| d.format("%Y-%m-%d %H:%M").to_string()).unwrap_or_else(|| iso.to_string())
+}
+
 /// Now plus `minutes`, as local `YYYY-MM-DD HH:MM` (the schedule field's default).
 pub fn local_in(minutes: i64) -> String {
     (chrono::Local::now() + chrono::Duration::minutes(minutes)).format("%Y-%m-%d %H:%M").to_string()

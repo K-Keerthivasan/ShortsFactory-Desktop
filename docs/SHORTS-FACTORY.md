@@ -124,6 +124,14 @@ Reel's headline as its title (up to 100 characters) and the Instagram caption an
 description, with `#Shorts` added; hashtags also become the video's tags. Uploads are resumable
 and retried like Instagram ones. Cloud publishing (Supabase) is Instagram only.
 
+**Scheduling.** Schedule with a YouTube account ticked uploads the Short to YouTube straight away
+as Private with YouTube's own publish time (`publishAt`); YouTube makes it Public at that time,
+whether or not this PC is on, and YouTube Studio lists it as Scheduled (change or cancel it
+there). Instagram accounts in the same schedule wait in the library as before (this app or the
+earlier app's worker posts them, or use cloud scheduling). The upload needs the app open only
+while it runs; the time must be at least five minutes ahead. The Schedule calendar shows the
+YouTube ones with a link to YouTube Studio. Over MCP, `studio.schedule` does the same.
+
 Connecting a channel (one time), in Plugin Settings ▸ Accounts & keys ▸ YouTube, where the app
 shows the same steps with buttons that open each page:
 

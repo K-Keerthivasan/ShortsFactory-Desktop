@@ -35,6 +35,8 @@ struct Observation {
     media: Option<String>,
     link: Option<String>,
     cloud: bool,
+    /// A YouTube upload waiting for its publish time (UTC ISO).
+    youtube_at: Option<String>,
 }
 fn guard() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -89,13 +91,14 @@ fn observe(state: &mut State, row: Observation) {
         id,
         title: row.title.chars().take(200).collect(),
         message: if uploaded {
-            "Uploaded to cloud and scheduled"
+            "Uploaded to cloud and scheduled".to_string()
+        } else if ok && let Some(at) = &row.youtube_at {
+            format!("Uploaded to YouTube; YouTube publishes it at {}", crate::clock::local_time(at))
         } else if ok {
-            if row.cloud { "Published by the cloud worker" } else { "Published successfully" }
+            if row.cloud { "Published by the cloud worker" } else { "Published successfully" }.to_string()
         } else {
-            "Publishing failed or needs attention. Check the Calendar for details."
-        }
-        .into(),
+            "Publishing failed or needs attention. Check the Calendar for details.".to_string()
+        },
         link: row.link.filter(|s| {
             s.starts_with("https://www.instagram.com/")
                 || s.starts_with("https://instagram.com/")
@@ -113,7 +116,7 @@ fn observe(state: &mut State, row: Observation) {
 
 pub fn refresh(studio: &Studio) -> Result<Updates> {
     let c = studio.connect()?;
-    let mut statement=c.prepare("SELECT p.id,p.status,s.canonical_story_title,p.updated_at,p.remote_id,p.remote_url FROM publishing_jobs p JOIN renders r ON r.id=p.render_id JOIN story_clusters s ON s.id=r.story_id ORDER BY p.id DESC LIMIT 500")?;
+    let mut statement=c.prepare("SELECT p.id,p.status,s.canonical_story_title,p.updated_at,p.remote_id,p.remote_url,p.platform,p.scheduled_at FROM publishing_jobs p JOIN renders r ON r.id=p.render_id JOIN story_clusters s ON s.id=r.story_id ORDER BY p.id DESC LIMIT 500")?;
     let mut observations: Vec<Observation> = statement
         .query_map([], |r| {
             Ok(Observation {
@@ -124,6 +127,12 @@ pub fn refresh(studio: &Studio) -> Result<Updates> {
                 media: r.get(4)?,
                 link: r.get(5)?,
                 cloud: false,
+                // Uploaded to YouTube with a later publish time: YouTube publishes it then.
+                youtube_at: {
+                    let platform: String = r.get(6)?;
+                    let at: Option<String> = r.get(7)?;
+                    at.filter(|a| platform == "YOUTUBE" && crate::clock::parse_iso(a).is_some_and(|t| t > crate::clock::now_ms()))
+                },
             })
         })?
         .collect::<std::result::Result<_, _>>()?;
@@ -164,6 +173,7 @@ pub fn refresh(studio: &Studio) -> Result<Updates> {
             media: post.get("instagram_media_id").and_then(Value::as_str).map(str::to_string),
             link: post.get("instagram_permalink").and_then(Value::as_str).map(str::to_string),
             cloud: true,
+            youtube_at: None,
         });
     }
     let _lock = guard();
@@ -265,6 +275,7 @@ mod tests {
             media: Some("123".into()),
             link: None,
             cloud: key.starts_with("cloud"),
+            youtube_at: None,
         }
     }
     #[test]
@@ -280,6 +291,14 @@ mod tests {
         observe(&mut reopened, row("cloud:1", "published"));
         assert_eq!(reopened.events.len(), 1);
         assert!(reopened.events[0].read);
+    }
+    #[test]
+    fn a_youtube_upload_waiting_for_its_time_says_so() {
+        let mut state = State::default();
+        let mut r = row("local:9", "PUBLISHED");
+        r.youtube_at = Some(crate::clock::iso(crate::clock::now_ms() + 3_600_000));
+        observe(&mut state, r);
+        assert!(state.events[0].message.starts_with("Uploaded to YouTube; YouTube publishes it at"), "{}", state.events[0].message);
     }
     #[test]
     fn processing_is_not_reported_as_success_and_failure_is_visible() {

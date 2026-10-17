@@ -71,10 +71,29 @@ pub(super) fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, ctx: &Ctx) {
         return;
     }
     load_cloud(&ctx.s, false);
-    let (accounts, posts, error) = {
+    let (accounts, mut posts, error) = {
         let r = rt();
         (r.cloud_accounts.clone(), r.cloud_posts.clone(), r.cloud_error.clone())
     };
+    // YouTube Shorts scheduled from this PC: uploaded already, published by YouTube at their time.
+    let now = filmcraft_studio::clock_ms(&filmcraft_studio::now_iso()).unwrap_or(0);
+    let window = |days: i64| filmcraft_studio::iso_ms(now + days * 86_400_000);
+    for e in ctx.s.calendar(ctx.channel, &window(-120), &window(400)).unwrap_or_default().into_iter().filter(|e| e.platform == "YOUTUBE") {
+        let due = filmcraft_studio::clock_ms(&e.at).is_some_and(|t| t > now);
+        let status = match e.status.as_str() {
+            "PUBLISHED" if due => "on YouTube",
+            "PUBLISHED" => "published",
+            "PUBLISH_FAILED" | "FAILED" => "failed",
+            "NEEDS_RECONCILIATION" => "needs_reconciliation",
+            _ => "uploading",
+        };
+        let video = e.link.as_deref().and_then(|l| l.rsplit('/').next()).unwrap_or_default().to_string();
+        posts.push(json!({
+            "id": format!("youtube-{}", e.render), "title": e.title, "status": status, "scheduled_for": e.at, "youtube": true,
+            "studio": if video.is_empty() { serde_json::Value::Null } else { json!(format!("https://studio.youtube.com/video/{video}/edit")) },
+            "link": e.link,
+        }));
+    }
     if !error.is_empty() {
         ui.label(RichText::new(format!("Cloud: {error}")).small().color(t.danger));
     }
@@ -247,7 +266,8 @@ pub(super) fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, ctx: &Ctx) {
         let at = p.get("scheduled_for").and_then(|v| v.as_str()).unwrap_or_default();
         let status = p.get("status").and_then(|v| v.as_str()).unwrap_or_default().to_string();
         let title = p.get("title").and_then(|v| v.as_str()).unwrap_or("Reel");
-        let account = name_of(p.get("instagram_account_id").and_then(|v| v.as_str()).unwrap_or_default());
+        let youtube = p.get("youtube").and_then(|v| v.as_bool()).unwrap_or(false);
+        let account = if youtube { "YouTube".to_string() } else { name_of(p.get("instagram_account_id").and_then(|v| v.as_str()).unwrap_or_default()) };
         ui.group(|ui| {
             ui.set_width(ui.available_width());
             ui.horizontal_wrapped(|ui| {
@@ -277,6 +297,11 @@ pub(super) fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, ctx: &Ctx) {
                 if let Some(link) = p.get("instagram_permalink").and_then(|v| v.as_str()) {
                     let r = ui.hyperlink_to("Open on Instagram", link);
                     app.auto.add_response(&format!("reel.schedule.open.{id}"), &r, "Open on Instagram");
+                }
+                // Changing or cancelling a YouTube schedule happens in YouTube Studio.
+                if let Some(link) = p.get("studio").and_then(|v| v.as_str()) {
+                    let r = ui.hyperlink_to(if status == "on YouTube" { "Change in YouTube Studio" } else { "Open in YouTube Studio" }, link);
+                    app.auto.add_response(&format!("reel.schedule.studio.{id}"), &r, "Open in YouTube Studio");
                 }
                 if status == "scheduled" {
                     let key = format!("reschedule:{id}");

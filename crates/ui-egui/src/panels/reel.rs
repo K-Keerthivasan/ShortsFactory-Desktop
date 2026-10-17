@@ -240,6 +240,8 @@ enum Done {
     /// A publication finished: the Reel's name, the link or the error, the queue item.
     Published(String, Result<Option<String>, String>, Option<u64>),
     Notice((String, bool)),
+    /// A queued Reel's schedule: its name, what was scheduled where, the time (UTC ISO), the queue item.
+    Scheduled(String, Result<filmcraft_studio::Scheduled, String>, String, u64),
     /// A local account's token expiry (text) or why it could not be read; whether to pop it up.
     Token(i64, Result<String, String>, bool),
 }
@@ -532,6 +534,38 @@ pub fn poll(app: &mut FilmcraftApp, now: f64) {
                 }
                 r.health_popup = r.health_popup.map(|_| now);
                 r.health = Some(h);
+            }
+            Done::Scheduled(name, result, at, queue) => {
+                let when = local_time(&at);
+                let (status, error) = match result {
+                    Ok(done) => {
+                        let ok = done.youtube.iter().filter(|(_, r)| r.is_ok()).count();
+                        let failed: Vec<String> = done.youtube.iter().filter_map(|(_, r)| r.as_ref().err().cloned()).collect();
+                        let mut parts = Vec::new();
+                        if done.waiting > 0 {
+                            parts.push(format!("{} account(s) at {when}", done.waiting));
+                        }
+                        if ok > 0 {
+                            parts.push(format!("uploaded to YouTube, published by YouTube at {when}"));
+                        }
+                        notify(&mut r, format!("Scheduled “{name}”: {}", parts.join("; ")), failed.is_empty());
+                        for e in &failed {
+                            notify(&mut r, format!("YouTube upload of “{name}” failed: {e}"), false);
+                        }
+                        (if failed.is_empty() { "Scheduled".to_string() } else { "Scheduled (YouTube failed)".to_string() }, failed.first().cloned())
+                    }
+                    Err(e) => {
+                        notify(&mut r, format!("Scheduling “{name}” failed: {e}"), false);
+                        ("Failed".to_string(), Some(e))
+                    }
+                };
+                if let Some(q) = r.queue.iter_mut().find(|q| q.id == queue) {
+                    q.status = status;
+                    q.error = error;
+                }
+                if let Some(c) = r.loaded_channel {
+                    load_channel(&mut r, c);
+                }
             }
             Done::Published(name, Ok(link), queue) => {
                 notify(&mut r, format!("Posted “{name}”{}", link.map(|l| format!(": {l}")).unwrap_or_default()), true);
@@ -1678,16 +1712,14 @@ fn queue_sent(r: &mut Runtime, id: u64, render: i64) {
     let Some(ch) = q.info.channel_id else { return };
     match q.action.clone() {
         QueueAction::LibraryOnly => q.status = "In the library".into(),
-        QueueAction::Schedule(accounts, at) => match s.schedule(ch, render, &accounts, &at) {
-            Ok(n) => {
-                q.status = format!("Scheduled on {n} account(s)");
-                notify(r, format!("Scheduled: {}", r.queue.iter().find(|q| q.id == id).map(|q| q.name.clone()).unwrap_or_default()), true);
-            }
-            Err(e) => {
-                q.status = "Failed".into();
-                q.error = Some(e.to_string());
-            }
-        },
+        QueueAction::Schedule(accounts, at) => {
+            // Instagram waits for its time; YouTube is uploaded now with that publish time.
+            q.status = "Scheduling".into();
+            let name = q.name.clone();
+            spawn(r, "Scheduling", move || {
+                Done::Scheduled(name, filmcraft_studio::schedule_everywhere(&s, ch, render, &accounts, &at).map_err(|e| e.to_string()), at, id)
+            });
+        }
         QueueAction::PublishNow(accounts) => {
             q.status = "Publishing".into();
             let name = q.name.clone();
@@ -2894,13 +2926,15 @@ fn render_actions(app: &mut FilmcraftApp, ui: &mut egui::Ui, p: &LibraryPost, ch
             {
                 let mut rr = rt();
                 match filmcraft_studio::local_to_utc_iso(&app.ui.reel.schedule_at) {
-                    Some(at) => match s.schedule(ch, r.id, &app.ui.reel.accounts, &at) {
-                        Ok(n) => log(&mut rr, format!("Scheduled on {n} account(s) for {}", app.ui.reel.schedule_at)),
-                        Err(e) => log(&mut rr, format!("Scheduling failed: {e}")),
-                    },
+                    // Instagram waits for its time; YouTube is uploaded now with that publish time.
+                    Some(at) => {
+                        let (st, accounts, name, render) = (s.clone(), app.ui.reel.accounts.clone(), p.title.clone(), r.id);
+                        spawn(&mut rr, "Scheduling", move || {
+                            Done::Scheduled(name, filmcraft_studio::schedule_everywhere(&st, ch, render, &accounts, &at).map_err(|e| e.to_string()), at, 0)
+                        });
+                    }
                     None => log(&mut rr, "Type the time as YYYY-MM-DD HH:MM"),
                 }
-                load_channel(&mut rr, ch);
             }
         }
         if let Some(path) = r.path.clone()

@@ -216,7 +216,16 @@ fn run_job(studio: &Studio, job: i64, channel: i64, render: i64, account: i64) -
 
 #Shorts", description.trim_end());
                 }
-                youtube::publish(studio, job, channel, &secret, &file, &title, &description, &tags)
+                // A job scheduled for later is uploaded now and published by YouTube at its time.
+                let publish_at = studio
+                    .connect()?
+                    .query_row("SELECT scheduled_at FROM publishing_jobs WHERE id = ?1", [job], |r| r.get::<_, String>(0))
+                    .ok()
+                    .and_then(|s| clock::parse_iso(&s))
+                    .filter(|t| *t > clock::now_ms() + 60_000)
+                    .and_then(chrono::DateTime::from_timestamp_millis)
+                    .map(|d| d.to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
+                youtube::publish(studio, job, channel, &secret, &file, &title, &description, &tags, publish_at.as_deref())
             }
             other => Err(instagram::PublishError::Retry(format!("{other} publishing is not supported"))),
         }
@@ -239,6 +248,44 @@ fn run_job(studio: &Studio, job: i64, channel: i64, render: i64, account: i64) -
 
 /// Runs scheduled publications that are due, unless the earlier app's worker is online (it owns
 /// them then). Returns what happened to each, for the activity log.
+/// What [`schedule_everywhere`] did: Instagram (and other) jobs left for their time, and each
+/// YouTube account's upload (the video link, or why it failed).
+#[derive(Debug, Default)]
+pub struct Scheduled {
+    pub waiting: usize,
+    pub youtube: Vec<(i64, std::result::Result<Option<String>, String>)>,
+}
+
+/// Schedules an approved render on `accounts` at `at_iso`. Instagram jobs wait in the library
+/// for their time (this app or the earlier one posts them); YouTube does its own scheduling, so
+/// those are uploaded now as Private with that publish time, and YouTube publishes them even if
+/// this PC is off. Blocking: the YouTube uploads happen here.
+pub fn schedule_everywhere(studio: &Studio, channel: i64, render: i64, accounts: &[i64], at_iso: &str) -> Result<Scheduled> {
+    let at = clock::parse_iso(at_iso).ok_or_else(|| StudioError::Other("unreadable schedule time".into()))?;
+    let mut youtube = Vec::new();
+    let mut other = Vec::new();
+    for a in accounts {
+        let (_, account) = studio.account(*a)?;
+        if account.platform == "YOUTUBE" { youtube.push(*a) } else { other.push(*a) }
+    }
+    if !youtube.is_empty() && at < clock::now_ms() + 5 * 60_000 {
+        return err("YouTube schedules must be at least five minutes ahead; use Publish now for sooner");
+    }
+    let waiting = if other.is_empty() { 0 } else { studio.schedule(channel, render, &other, at_iso)? };
+    let when = clock::iso(at);
+    let mut out = Scheduled { waiting, youtube: Vec::new() };
+    for a in youtube {
+        let result = (|| -> Result<Option<String>> {
+            let job = studio.claim(channel, render, a)?;
+            // The job keeps the chosen time: the calendar shows it, and no worker posts it again.
+            studio.connect()?.execute("UPDATE publishing_jobs SET scheduled_at = ?1 WHERE id = ?2", rusqlite::params![when, job])?;
+            run_job(studio, job, channel, render, a)
+        })();
+        out.youtube.push((a, result.map_err(|e| e.to_string())));
+    }
+    Ok(out)
+}
+
 pub fn run_due(studio: &Studio) -> Result<Vec<String>> {
     if studio.pipeline_online()? {
         return Ok(Vec::new());

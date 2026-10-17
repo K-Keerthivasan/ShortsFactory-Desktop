@@ -44,7 +44,20 @@ fn range_end(r: &ureq::Response) -> u64 {
     r.header("range").and_then(|h| h.rsplit('-').next()).and_then(|n| n.trim().parse::<u64>().ok()).map_or(0, |n| n + 1)
 }
 
-pub fn publish(studio: &Studio, job: i64, channel: i64, secret: &Value, file: &Path, title: &str, description: &str, tags: &[String]) -> Published {
+/// Uploads the Short. With `publish_at` (UTC, RFC 3339) it is uploaded Private and YouTube itself
+/// makes it Public at that time (YouTube Studio shows it as Scheduled).
+#[allow(clippy::too_many_arguments)]
+pub fn publish(
+    studio: &Studio,
+    job: i64,
+    channel: i64,
+    secret: &Value,
+    file: &Path,
+    title: &str,
+    description: &str,
+    tags: &[String],
+    publish_at: Option<&str>,
+) -> Published {
     let agent = ureq::AgentBuilder::new().timeout_connect(Duration::from_secs(30)).timeout(Duration::from_secs(1800)).build();
     let mut state = studio.remote_state(job)?;
     if let Some(id) = state.get("publishedId").and_then(Value::as_str) {
@@ -65,9 +78,13 @@ pub fn publish(studio: &Studio, job: i64, channel: i64, secret: &Value, file: &P
         None => {
             studio.checkpoint(job, channel, &json!({"phase": "INITIALIZING"}))?;
             let privacy = secret.get("privacyStatus").and_then(Value::as_str).filter(|p| ["public", "unlisted", "private"].contains(p)).unwrap_or("public");
+            let status = match publish_at {
+                Some(at) => json!({"privacyStatus": "private", "publishAt": at, "selfDeclaredMadeForKids": false}),
+                None => json!({"privacyStatus": privacy, "selfDeclaredMadeForKids": false}),
+            };
             let body = json!({
                 "snippet": {"title": title.chars().take(100).collect::<String>(), "description": description.chars().take(5000).collect::<String>(), "tags": tags.iter().take(30).collect::<Vec<_>>(), "categoryId": "22"},
-                "status": {"privacyStatus": privacy, "selfDeclaredMadeForKids": false}
+                "status": status
             });
             let r = agent
                 .post(UPLOAD)
