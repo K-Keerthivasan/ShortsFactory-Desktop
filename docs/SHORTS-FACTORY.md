@@ -141,9 +141,11 @@ shows the same steps with buttons that open each page:
    workspace** and allow access in the browser. The refresh token is kept in
    `secrets/youtube-<workspace>.json`; the workspace's YouTube account appears below.
 
-Google keeps videos uploaded through a new, unaudited API project **Private** until the project
-passes YouTube's [API audit](https://support.google.com/youtube/contact/yt_api_form); apply once.
-The default quota allows about six uploads a day per project. Vertical videos up to 3 minutes
+Shorts upload as Public. Google's `videos.insert` reference (updated 2026-10-15) states that videos
+uploaded from unverified API projects are not restricted to private viewing; the 2020 rule that
+locked them until an audit no longer applies. The default quota allows about six uploads a day per
+project; the [YouTube API audit form](https://support.google.com/youtube/contact/yt_api_form) asks
+Google for more. Vertical videos up to 3 minutes
 are Shorts; Publish warns when a Reel is longer.
 
 ## 10. Schedule through Supabase

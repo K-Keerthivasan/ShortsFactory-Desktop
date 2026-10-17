@@ -2266,12 +2266,11 @@ fn accounts_settings(app: &mut FilmcraftApp, ui: &mut egui::Ui, channel: Option<
             link(app, ui, "clients", "Open Clients", "https://console.cloud.google.com/auth/clients");
             step(ui, 6, "Paste both below, press Save, then Connect YouTube to this workspace and allow access with the channel's account (pick the brand channel if asked).");
             ui.label(
-                RichText::new("Google keeps videos uploaded by a new, unaudited project Private until the project passes YouTube's API audit. Apply once with the form below; until then the Shorts upload as Private.")
+                RichText::new("Shorts upload as Public (Google no longer keeps uploads from unaudited projects private). Google's default quota allows about six uploads a day per project; the YouTube API audit form asks for more.")
                     .small()
-                    .color(t.danger),
+                    .color(t.text_dim),
             );
-            link(app, ui, "audit", "Open the YouTube API audit form", "https://support.google.com/youtube/contact/yt_api_form");
-            ui.label(RichText::new("Google's default quota allows about six uploads a day per project.").small().color(t.text_dim));
+            link(app, ui, "audit", "Open the YouTube API audit / quota form", "https://support.google.com/youtube/contact/yt_api_form");
         });
         app.auto.add_response("reel.youtube.guide", &guide.header_response, "How to get the Google client");
         env_fields(app, ui, &[("YOUTUBE_CLIENT_ID", "Google client ID", false), ("YOUTUBE_CLIENT_SECRET", "Google client secret", true)]);
