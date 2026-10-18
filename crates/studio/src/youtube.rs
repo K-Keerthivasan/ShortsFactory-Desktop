@@ -39,6 +39,20 @@ fn valid(url: &str) -> std::result::Result<&str, PublishError> {
     if host.ends_with("googleapis.com") { Ok(url) } else { Err(PublishError::Retry("unexpected YouTube upload host".into())) }
 }
 
+/// A YouTube API failure with Google's reason (`quotaExceeded`, `uploadLimitExceeded`, …), which
+/// the upload queue reads to wait instead of failing the post.
+fn api_error(what: &str, e: ureq::Error) -> PublishError {
+    match e {
+        ureq::Error::Status(code, r) => {
+            let v: Value = r.into_json().unwrap_or(Value::Null);
+            let reason = v.pointer("/error/errors/0/reason").and_then(Value::as_str).unwrap_or("");
+            let message = v.pointer("/error/message").and_then(Value::as_str).unwrap_or("no message");
+            PublishError::Retry(format!("{what} failed (HTTP {code} {reason}): {}", message.chars().take(200).collect::<String>()))
+        }
+        ureq::Error::Transport(t) => PublishError::Retry(format!("{what} failed: YouTube is not reachable ({:?})", t.kind())),
+    }
+}
+
 /// The offset after `bytes=0-N`, from a 308 response's Range header.
 fn range_end(r: &ureq::Response) -> u64 {
     r.header("range").and_then(|h| h.rsplit('-').next()).and_then(|n| n.trim().parse::<u64>().ok()).map_or(0, |n| n + 1)
@@ -92,7 +106,7 @@ pub fn publish(
                 .set("X-Upload-Content-Length", &size.to_string())
                 .set("X-Upload-Content-Type", "video/mp4")
                 .send_json(body)
-                .map_err(|e| PublishError::Retry(format!("YouTube upload session creation failed: {e}")))?;
+                .map_err(|e| api_error("YouTube upload session creation", e))?;
             let location = r.header("location").ok_or_else(|| PublishError::Retry("YouTube returned no upload session".into()))?.to_string();
             state = json!({"phase": "CREATED", "uploadUrl": location, "offset": 0});
             studio.checkpoint(job, channel, &state)?;
@@ -129,6 +143,6 @@ pub fn publish(
             studio.checkpoint(job, channel, &state)?;
             Err(PublishError::Retry("YouTube upload incomplete; the next retry resumes it".into()))
         }
-        Err(e) => Err(PublishError::Retry(format!("YouTube video upload failed: {e}"))),
+        Err(e) => Err(api_error("YouTube video upload", e)),
     }
 }

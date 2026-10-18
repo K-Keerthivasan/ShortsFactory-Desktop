@@ -24,6 +24,7 @@ pub mod settings;
 pub mod workflow;
 pub mod youtube;
 pub mod youtube_connect;
+pub mod youtube_queue;
 pub mod ytdlp;
 
 use std::collections::HashMap;
@@ -164,7 +165,7 @@ pub fn publish_now(studio: &Studio, channel: i64, render: i64, account: i64) -> 
     run_job(studio, job, channel, render, account)
 }
 
-fn run_job(studio: &Studio, job: i64, channel: i64, render: i64, account: i64) -> Result<Option<String>> {
+pub(crate) fn run_job(studio: &Studio, job: i64, channel: i64, render: i64, account: i64) -> Result<Option<String>> {
     let outcome = (|| -> instagram::Published {
         let (_, a) = studio.account(account)?;
         let secret = studio.secret(&a.credentials_reference)?;

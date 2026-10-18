@@ -314,6 +314,35 @@ pub fn register() {
             true,
             |_, p| Ok(crate::meta_token::summary(&studio()?.extend_account_token(int(p, "account")?).map_err(err)?)),
         ),
+        spec(
+            "studio.youtubeQueue",
+            "YouTube Upload Queue",
+            r#"{"action":"status"|"run"|"add","channel":n?,"account":n?,"items":[{"render":n,"at":"ISO UTC"}]?} — books Shorts at times, then uploads them ahead within Google's daily quota"#,
+            true,
+            |_, p| {
+                let s = studio()?;
+                match text(p, "action")? {
+                    "status" => {}
+                    "run" => {
+                        let log = crate::youtube_queue::run(&s).map_err(err)?;
+                        let st = crate::youtube_queue::status(&s).map_err(err)?;
+                        return Ok(json!({"log": log, "waiting": st.waiting, "uploadedToday": st.uploaded_today, "next": st.next, "pausedUntil": st.paused_until}));
+                    }
+                    "add" => {
+                        let items: Vec<(i64, String)> = p
+                            .get("items")
+                            .and_then(Value::as_array)
+                            .map(|a| a.iter().filter_map(|i| Some((i.get("render")?.as_i64()?, i.get("at")?.as_str()?.to_string()))).collect())
+                            .unwrap_or_default();
+                        let n = crate::youtube_queue::add(&s, int(p, "channel")?, int(p, "account")?, &items).map_err(err)?;
+                        return Ok(json!({"added": n}));
+                    }
+                    other => return Err(bad(format!("unknown action `{other}`"))),
+                }
+                let st = crate::youtube_queue::status(&s).map_err(err)?;
+                Ok(json!({"waiting": st.waiting, "uploadedToday": st.uploaded_today, "next": st.next, "pausedUntil": st.paused_until}))
+            },
+        ),
         spec("studio.calendar", "Publishing Calendar", r#"{"channel":n?,"from":"ISO","to":"ISO"}"#, false, |_, p| {
             let channel = p.get("channel").and_then(Value::as_i64);
             to_value(studio()?.calendar(channel, text(p, "from")?, text(p, "to")?).map_err(err)?)

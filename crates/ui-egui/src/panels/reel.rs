@@ -332,6 +332,8 @@ struct Runtime {
     ai_runs: ai::Runs,
     /// Stops a YouTube sign-in that is waiting for the browser.
     youtube_cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// When the YouTube queue last ran (seconds of app time).
+    last_youtube_queue: Option<f64>,
     /// When a card field was last typed in (applied half a second later).
     card_typed_at: Option<f64>,
     /// Local accounts' token expiry, as last read from Meta.
@@ -746,6 +748,17 @@ pub fn poll(app: &mut FilmcraftApp, now: f64) {
                 Ok(lines) if lines.is_empty() => Done::Message(String::new()),
                 Ok(lines) => Done::Message(lines.join("\n")),
                 Err(e) => Done::Message(format!("Scheduled publications: {e}")),
+            });
+        }
+    }
+    // The YouTube queue: Shorts uploaded ahead of their time, within Google's daily quota.
+    if background() && r.last_youtube_queue.is_none_or(|last| now - last >= 600.0) && !r.tasks.iter().any(|(label, _)| label == "YouTube queue") {
+        r.last_youtube_queue = Some(now);
+        if let Some(s) = studio(&mut r) {
+            spawn(&mut r, "YouTube queue", move || match filmcraft_studio::youtube_queue::run(&s) {
+                Ok(lines) => Done::Message(lines.join("
+")),
+                Err(e) => Done::Message(format!("YouTube queue: {e}")),
             });
         }
     }
@@ -1815,6 +1828,26 @@ fn queue_view(app: &mut FilmcraftApp, ui: &mut egui::Ui, ctx: &Ctx) {
         });
     }
     ui.separator();
+    if let Ok(q) = filmcraft_studio::youtube_queue::status(&ctx.s)
+        && (q.waiting > 0 || q.uploaded_today > 0)
+    {
+        ui.label(RichText::new("YouTube queue").strong());
+        let mut line = format!(
+            "{} waiting · {} of {} uploads used in the last 24 hours",
+            q.waiting,
+            q.uploaded_today,
+            filmcraft_studio::youtube_queue::DAILY_UPLOADS
+        );
+        if let Some(next) = &q.next {
+            line.push_str(&format!(" · next {}", local_time(next)));
+        }
+        if let Some(until) = &q.paused_until {
+            line.push_str(&format!(" · quota used up, continues after {}", local_time(until)));
+        }
+        ui.label(RichText::new(line).small());
+        ui.label(RichText::new("Shorts upload up to a day and a half ahead, while the app is open; YouTube publishes each at its time.").small().color(t.text_dim));
+        ui.separator();
+    }
     ui.label(RichText::new("Upcoming in the cloud").strong());
     let mut upcoming: Vec<serde_json::Value> = rt()
         .cloud_posts

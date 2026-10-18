@@ -580,3 +580,27 @@ fn the_youtube_title_and_visibility_are_kept() {
     assert!(s.set_youtube_privacy(yt, "everyone").is_err());
     assert!(s.set_youtube_privacy(1, "private").is_err(), "an Instagram account has no visibility");
 }
+
+#[test]
+fn the_youtube_queue_books_without_touching_posts_and_keeps_to_the_quota() {
+    let s = fixture("yt-queue");
+    let video = s.root.join("export.mp4");
+    std::fs::write(&video, b"video").unwrap();
+    let (post, render) = s.send_to_library(&reel(), &video, None, None, 8.0, true).unwrap();
+    let status_of = |story: i64| -> String { s.connect().unwrap().query_row("SELECT status FROM story_clusters WHERE id = ?1", [story], |r| r.get(0)).unwrap() };
+    let before = status_of(post.story_id);
+    // A key without a Google client: the upload fails before any network call.
+    let yt = crate::youtube_connect::save(&s, 1, "UCq", "JKR", json!({"refreshToken": ""})).unwrap();
+    let soon = crate::clock::iso(crate::clock::now_ms() + 3_600_000);
+    assert_eq!(crate::youtube_queue::add(&s, 1, yt, &[(render, soon.clone())]).unwrap(), 1);
+    assert_eq!(crate::youtube_queue::add(&s, 1, yt, &[(render, soon.clone())]).unwrap(), 0, "booked once");
+    assert!(crate::youtube_queue::add(&s, 1, 1, &[(render, soon.clone())]).is_err(), "only YouTube accounts");
+    assert_eq!(status_of(post.story_id), before, "the post's library status is untouched");
+    assert!(s.due_publications().unwrap().is_empty(), "the general runner leaves YouTube to the queue");
+    let st = crate::youtube_queue::status(&s).unwrap();
+    assert_eq!((st.waiting, st.uploaded_today), (1, 0));
+    let log = crate::youtube_queue::run(&s).unwrap();
+    assert!(log[0].contains("failed"), "{log:?}");
+    let st = crate::youtube_queue::status(&s).unwrap();
+    assert_eq!((st.waiting, st.uploaded_today), (0, 1), "the attempt counts against the day");
+}

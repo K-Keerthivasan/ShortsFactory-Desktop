@@ -928,9 +928,11 @@ impl Studio {
     }
 
     /// Scheduled publications that are due: (job, channel, render, account).
+    /// Scheduled publications whose time has come. YouTube ones are the YouTube queue's
+    /// (`youtube_queue`), which keeps to Google's daily upload quota.
     pub fn due_publications(&self) -> Result<Vec<(i64, i64, i64, i64)>> {
         let c = self.connect()?;
-        let mut q = c.prepare("SELECT id, channel_id, render_id, social_account_id, scheduled_at FROM publishing_jobs WHERE status = 'SCHEDULED'")?;
+        let mut q = c.prepare("SELECT id, channel_id, render_id, social_account_id, scheduled_at FROM publishing_jobs WHERE status = 'SCHEDULED' AND platform != 'YOUTUBE'")?;
         let now = now_ms();
         let rows: Vec<(i64, i64, i64, i64, String)> =
             q.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?.collect::<std::result::Result<_, _>>()?;

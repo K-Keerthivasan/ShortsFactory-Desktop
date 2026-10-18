@@ -26,6 +26,8 @@ pub struct AppSettings {
     pub ai_provider: Option<String>,
     /// Workspace clips marked done in Create (media asset ids; this app's own marks).
     pub done_clips: Vec<i64>,
+    /// The YouTube queue rests until then after Google reported the daily quota used up.
+    pub youtube_paused_until: Option<String>,
 }
 
 impl Studio {
@@ -39,6 +41,7 @@ impl Studio {
             startup_check: true,
             ai_provider: None,
             done_clips: Vec::new(),
+            youtube_paused_until: None,
         })
     }
     pub fn save_app_settings(&self, s: &AppSettings) -> Result<()> {
