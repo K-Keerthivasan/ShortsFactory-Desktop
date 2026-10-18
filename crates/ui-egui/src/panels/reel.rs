@@ -110,6 +110,12 @@ pub struct ReelDraft {
     pub env_drafts: std::collections::BTreeMap<String, String>,
     #[serde(skip)]
     pub token_drafts: std::collections::BTreeMap<i64, String>,
+    /// The Writing settings being edited (workspace, draft).
+    #[serde(skip)]
+    pub writing_edit: Option<(i64, filmcraft_studio::writing::Writing)>,
+    /// A reply pasted from Claude or ChatGPT, to use as the card.
+    #[serde(skip)]
+    pub ai_reply: String,
 }
 
 /// What to make.
@@ -164,6 +170,7 @@ pub enum PluginTab {
     Brands,
     Accounts,
     Ai,
+    Writing,
     Cloud,
     Downloads,
 }
@@ -2193,6 +2200,7 @@ fn plugin_settings(app: &mut FilmcraftApp, ctx: &egui::Context) {
                     (PluginTab::Brands, "brands", "Workspaces & brands"),
                     (PluginTab::Accounts, "accounts", "Accounts & keys"),
                     (PluginTab::Ai, "ai", "AI"),
+                    (PluginTab::Writing, "writing", "Writing"),
                     (PluginTab::Cloud, "cloud", "Cloud"),
                     (PluginTab::Downloads, "downloads", "Downloads & tools"),
                 ],
@@ -2241,15 +2249,19 @@ fn plugin_settings(app: &mut FilmcraftApp, ctx: &egui::Context) {
                     settings(app, ui, channel, &s, &brand);
                 }
                 PluginTab::Accounts => accounts_settings(app, ui, channel, &s),
+                PluginTab::Writing => writing_settings(app, ui, channel, &s),
                 PluginTab::Ai => env_fields(
                     app,
                     ui,
                     &[
-                        ("AI_PROVIDER", "Provider (hermes or ollama)", false),
+                        ("AI_PROVIDER", "Provider (hermes, ollama or codex)", false),
                         ("OLLAMA_HOST", "Ollama address", false),
                         ("OLLAMA_MODEL", "Ollama model", false),
                         ("HERMES_BIN", "Hermes program", false),
-                        ("HERMES_MODEL_POST", "Hermes model", false),
+                        ("HERMES_MODEL_POST", "Hermes model (empty: Hermes's own default)", false),
+                        ("HERMES_PROVIDER", "Hermes provider (empty: Hermes's own, e.g. Codex; ollama: local)", false),
+                        ("HERMES_TIMEOUT_MS", "Hermes time limit (ms, default 240000)", false),
+                        ("AI_FALLBACK", "Fall back to Ollama when Hermes fails (off to disable)", false),
                     ],
                 ),
                 PluginTab::Cloud => {
@@ -2989,6 +3001,125 @@ fn write_card(app: &mut FilmcraftApp, ui: &mut egui::Ui, channel: Option<i64>, s
             )
         });
     }
+    // The same card from Claude or ChatGPT: copy a prompt with this workspace's voice and style
+    // guide, paste the model's reply back.
+    egui::CollapsingHeader::new("Write with Claude or ChatGPT").id_salt("reel-external-ai").show(ui, |ui| {
+        ui.label(
+            RichText::new("Copy the prompt (this workspace's voice, style guide and your notes), paste it into Claude or ChatGPT, then paste the reply here.")
+                .small()
+                .color(app.tokens.text_dim),
+        );
+        let copy = ui.add_enabled(channel.is_some(), egui::Button::new("Copy prompt"));
+        app.auto.add_response("reel.write.copyPrompt", &copy, "Copy prompt for Claude or ChatGPT");
+        if copy.clicked()
+            && let Some(ch) = channel
+        {
+            let notes = match app.ui.reel.article.and_then(|id| s.article(ch, id).ok()) {
+                Some(a) => format!("{}\n\n{}\n\nSource: {}", a.title, a.text.chars().take(20_000).collect::<String>(), if a.site.is_empty() { a.url } else { a.site }),
+                None => app.ui.reel.notes.clone(),
+            };
+            match filmcraft_studio::writing::prompt(s, ch, &notes) {
+                Ok(p) => {
+                    ui.ctx().copy_text(p);
+                    app.ui.status = "Prompt copied: paste it into Claude or ChatGPT".into();
+                }
+                Err(e) => app.ui.status = e.to_string(),
+            }
+        }
+        ui.add(egui::TextEdit::multiline(&mut app.ui.reel.ai_reply).hint_text("Paste the reply (JSON) here").desired_rows(3).desired_width(f32::INFINITY));
+        let use_it = ui.add_enabled(!app.ui.reel.ai_reply.trim().is_empty(), egui::Button::new("Use the reply"));
+        app.auto.add_response("reel.write.useReply", &use_it, "Use the reply");
+        if use_it.clicked() {
+            match filmcraft_studio::writing::card_from_reply(&app.ui.reel.ai_reply) {
+                Ok(card) => {
+                    let target = CardTarget::capture(app);
+                    app.ui.reel.ai_reply.clear();
+                    spawn(&mut rt(), "Write card", move || Done::Card(Ok(Box::new(card)), Box::new(target)));
+                }
+                Err(e) => app.ui.status = format!("The reply could not be read: {e}"),
+            }
+        }
+    });
+}
+
+/// Plugin Settings ▸ Writing: the workspace's standard descriptions and on-video text style.
+fn writing_settings(app: &mut FilmcraftApp, ui: &mut egui::Ui, channel: Option<i64>, s: &Studio) {
+    use filmcraft_studio::writing::{Fields, PLACEHOLDERS, Writing, fill};
+    let t = app.tokens;
+    let Some(ch) = channel else {
+        ui.label(RichText::new("Choose a workspace first.").small().color(t.text_dim));
+        return;
+    };
+    let saved = s.writing(ch);
+    let mut w = match &app.ui.reel.writing_edit {
+        Some((c, w)) if *c == ch => w.clone(),
+        _ => saved.clone(),
+    };
+    ui.label(RichText::new("Standard descriptions").strong());
+    ui.label(
+        RichText::new("Every post's description is built from these; the text on the video is the same on both platforms.").small().color(t.text_dim),
+    );
+    ui.horizontal_wrapped(|ui| {
+        for (k, what) in PLACEHOLDERS {
+            ui.label(RichText::new(*k).small().monospace()).on_hover_text(*what);
+        }
+    });
+    ui.label(RichText::new("Instagram description").small());
+    let a = ui.add(egui::TextEdit::multiline(&mut w.instagram).desired_rows(4).desired_width(f32::INFINITY).id_salt("writing-instagram"));
+    app.auto.add_response("reel.settings.writing.instagram", &a, "Instagram description");
+    ui.label(RichText::new("YouTube description (#Shorts is added when missing)").small());
+    let b = ui.add(egui::TextEdit::multiline(&mut w.youtube).desired_rows(4).desired_width(f32::INFINITY).id_salt("writing-youtube"));
+    app.auto.add_response("reel.settings.writing.youtube", &b, "YouTube description");
+    // How the open Reel's post would read.
+    let c = &app.ui.reel.card;
+    if !c.title.trim().is_empty() {
+        let f = Fields {
+            caption: if c.instagram_caption.trim().is_empty() { c.title.clone() } else { c.instagram_caption.clone() },
+            title: c.title.clone(),
+            line: c.caption.clone(),
+            credit: c.attribution.clone(),
+            cta: c.cta.clone(),
+            hashtags: c.hashtags.clone(),
+            channel: app.ui.reel.workspace_name.clone(),
+        };
+        egui::CollapsingHeader::new("Preview with the open Reel").id_salt("writing-preview").show(ui, |ui| {
+            ui.label(RichText::new("Instagram").small().strong());
+            ui.label(RichText::new(fill(&w.instagram, &f)).small());
+            ui.label(RichText::new("YouTube").small().strong());
+            let mut yt = fill(&w.youtube, &f);
+            if !yt.to_lowercase().contains("#shorts") {
+                yt.push_str("\n\n#Shorts");
+            }
+            ui.label(RichText::new(yt).small());
+        });
+    }
+    ui.separator();
+    ui.label(RichText::new("On-video text style").strong());
+    ui.label(
+        RichText::new("The workspace's AI follows this for every headline, line and caption it writes, and it is in the prompt for Claude or ChatGPT, so every video reads the same way.")
+            .small()
+            .color(t.text_dim),
+    );
+    let st = ui.add(egui::TextEdit::multiline(&mut w.style).desired_rows(8).desired_width(f32::INFINITY).id_salt("writing-style"));
+    app.auto.add_response("reel.settings.writing.style", &st, "On-video text style");
+    ui.horizontal_wrapped(|ui| {
+        let save = ui.add_enabled(w != saved, egui::Button::new("Save"));
+        app.auto.add_response("reel.settings.writing.save", &save, "Save writing");
+        if save.clicked() {
+            app.ui.status = match s.save_writing(ch, &w) {
+                Ok(()) => "Writing saved for this workspace".into(),
+                Err(e) => e.to_string(),
+            };
+        }
+        if ui.add_enabled(w != saved, egui::Button::new("Revert")).clicked() {
+            w = saved.clone();
+        }
+        let reset = ui.add_enabled(w != Writing::default(), egui::Button::new("Use the standard ones"));
+        if reset.on_hover_text("The standard templates and style guide (Save to keep them)").clicked() {
+            w = Writing::default();
+        }
+    });
+    app.ui.reel.writing_edit = Some((ch, w));
 }
 
 fn render_actions(app: &mut FilmcraftApp, ui: &mut egui::Ui, p: &LibraryPost, channel: Option<i64>, s: &Studio) {

@@ -99,6 +99,8 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
             }
         });
         ui.add(egui::TextEdit::singleline(&mut w.notes).hint_text("Direction for the AI (optional): what to look for").desired_width(f32::INFINITY));
+        ui.checkbox(&mut w.hook, "Hook first, filler cut")
+            .on_hover_text("The AI opens each Reel with its strongest moment and cuts dead air, filler and repeats (needs the video's captions and FFmpeg)");
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new("As").small());
             for f in [Format::Reel, Format::Post] {
@@ -233,7 +235,25 @@ fn find(
             }
             set(&|x| x.stage = "The AI is choosing the parts".into());
             let meta = done.metadata.clone().unwrap_or_default();
-            let (segments, fallback) = filmcraft_studio::autopilot::plan(&st, channel, &meta, done.duration.unwrap_or(0.0), &wants);
+            let (mut segments, fallback) = filmcraft_studio::autopilot::plan(&st, channel, &meta, done.duration.unwrap_or(0.0), &wants);
+            // The hook edits, made into clips beside the download.
+            let mut failed = None;
+            if let Some(file) = done.file.clone() {
+                for (i, seg) in segments.iter_mut().enumerate() {
+                    if seg.pieces.len() < 2 {
+                        continue;
+                    }
+                    set(&|x| x.stage = format!("Editing part {} (hook first)", i + 1));
+                    match filmcraft_studio::autopilot::assemble(&st, &file, seg) {
+                        Ok(f) => seg.file = Some(f),
+                        Err(e) => {
+                            seg.pieces.clear();
+                            failed = Some(e.to_string());
+                        }
+                    }
+                }
+            }
+            let fallback = fallback.or(failed.map(|e| format!("the hook edit was skipped: {e}")));
             set(&|x| {
                 x.segments = segments.iter().cloned().map(|s| (s, true)).collect();
                 x.fallback = fallback.clone();
@@ -273,11 +293,37 @@ fn review(app: &mut FilmcraftApp, ui: &mut egui::Ui, ctx: &super::Ctx, runs: &Ru
         for (i, (seg, on)) in run.segments.iter_mut().enumerate() {
             ui.horizontal_wrapped(|ui| {
                 ui.checkbox(on, "");
-                ui.add(egui::DragValue::new(&mut seg.start).range(0.0..=duration).speed(0.5).custom_formatter(|v, _| clock(v)));
+                let a = ui.add(egui::DragValue::new(&mut seg.start).range(0.0..=duration).speed(0.5).custom_formatter(|v, _| clock(v)));
                 ui.label("–");
-                ui.add(egui::DragValue::new(&mut seg.end).range(0.0..=duration).speed(0.5).custom_formatter(|v, _| clock(v)));
-                ui.label(RichText::new(format!("{:.0} s", (seg.end - seg.start).max(0.0))).small().color(t.text_dim));
+                let b = ui.add(egui::DragValue::new(&mut seg.end).range(0.0..=duration).speed(0.5).custom_formatter(|v, _| clock(v)));
+                // New times: the plain range, without the AI's edit.
+                if (a.changed() || b.changed()) && !seg.pieces.is_empty() {
+                    seg.pieces.clear();
+                    seg.file = None;
+                }
+                ui.label(RichText::new(format!("{:.0} s", seg.seconds())).small().color(t.text_dim));
             });
+            if let (Some(hook), true) = (seg.pieces.first().copied(), seg.file.is_some()) {
+                let cut = (seg.end - seg.start - seg.seconds() + (hook.end - hook.start)).max(0.0);
+                let mut keep = seg.file.is_some();
+                ui.horizontal_wrapped(|ui| {
+                    if ui.checkbox(&mut keep, "").changed() && !keep {
+                        seg.pieces.clear();
+                        seg.file = None;
+                    }
+                    ui.label(
+                        RichText::new(format!(
+                            "Hook {}–{} first, then {} range(s); {:.0} s cut",
+                            clock(hook.start),
+                            clock(hook.end),
+                            seg.pieces.len() - 1,
+                            cut
+                        ))
+                        .small()
+                        .color(t.text_dim),
+                    );
+                });
+            }
             ui.add(egui::TextEdit::multiline(&mut seg.card.title).desired_rows(1).desired_width(f32::INFINITY).id_salt(("ai-title", run.id, i)));
             if !seg.why.is_empty() {
                 ui.label(RichText::new(&seg.why).small().italics().color(t.text_dim));
@@ -328,10 +374,17 @@ pub(super) fn make_reels(app: &mut FilmcraftApp, ctx: &super::Ctx, run: &Run) ->
     let many = parts.len() > 1;
     for (i, seg) in parts.into_iter().enumerate() {
         let name = if many { format!("{base} – part {}", i + 1) } else { base.clone() };
-        let params = json!({
-            "name": name, "template": template, "brand": ctx.brand, "channelId": run.channel, "card": seg.card, "format": format.id(),
-            "paths": [file.to_string_lossy()], "sourceIn": seg.start, "sourceOut": seg.end,
-        });
+        // The hook edit is its own clip; otherwise the range of the download.
+        let params = match seg.file.as_ref().filter(|f| f.is_file()) {
+            Some(edit) => json!({
+                "name": name, "template": template, "brand": ctx.brand, "channelId": run.channel, "card": seg.card, "format": format.id(),
+                "paths": [edit.to_string_lossy()],
+            }),
+            None => json!({
+                "name": name, "template": template, "brand": ctx.brand, "channelId": run.channel, "card": seg.card, "format": format.id(),
+                "paths": [file.to_string_lossy()], "sourceIn": seg.start, "sourceOut": seg.end,
+            }),
+        };
         match app.session.execute("reel.new", params) {
             Ok(_) => {
                 made += 1;

@@ -941,21 +941,9 @@ impl Studio {
 
     /// The caption a render publishes with.
     pub fn caption_for(&self, render: i64) -> Result<String> {
-        let c = self.connect()?;
-        let json: String = c.query_row("SELECT s.json FROM renders r JOIN scripts s ON s.id = r.script_id WHERE r.id = ?1", [render], |r| r.get(0))?;
-        let v: Value = serde_json::from_str(&json).unwrap_or(Value::Null);
-        let mut caption = v.get("instagramCaption").and_then(Value::as_str).unwrap_or_default().to_string();
-        if let Some(tags) = v.get("hashtags").and_then(Value::as_array) {
-            let tags: Vec<String> = tags
-                .iter()
-                .filter_map(Value::as_str)
-                .filter(|t| !caption.contains(*t))
-                .map(|t| if t.starts_with('#') { t.to_string() } else { format!("#{t}") })
-                .collect();
-            if !tags.is_empty() {
-                caption = format!("{caption}\n\n{}", tags.join(" "));
-            }
-        }
+        // The workspace's Instagram description template (Plugin Settings ▸ Writing).
+        let (channel, fields) = self.fields_for(render)?;
+        let caption = crate::writing::fill(&self.writing(channel).instagram, &fields);
         Ok(caption.chars().take(2200).collect())
     }
 }

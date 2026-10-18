@@ -23,6 +23,7 @@ pub mod notifications;
 pub mod settings;
 pub mod workflow;
 pub mod cloud_youtube;
+pub mod writing;
 pub mod youtube;
 pub mod youtube_connect;
 pub mod youtube_queue;
@@ -167,7 +168,7 @@ pub fn publish_now(studio: &Studio, channel: i64, render: i64, account: i64) -> 
 }
 
 /// A render's YouTube title, description and tags: the Short's own title if one was written, else
-/// the headline; the Instagram caption as the description. YouTube refuses < and > in titles and
+/// the headline; the workspace's YouTube description template around the post's caption. YouTube refuses < and > in titles and
 /// descriptions, and #Shorts marks the vertical video as a Short.
 pub(crate) fn short_text(studio: &Studio, render: i64) -> Result<(String, String, Vec<String>)> {
     let script = studio
@@ -188,10 +189,8 @@ pub(crate) fn short_text(studio: &Studio, render: i64) -> Result<(String, String
         .map(|a| a.iter().filter_map(|t| t.as_str()).map(|t| t.trim_start_matches('#').to_string()).filter(|t| !t.is_empty()).collect())
         .unwrap_or_default();
     let clean = |s: &str| s.replace(['<', '>'], "");
-    let mut description = clean(&studio.caption_for(render)?);
-    if !description.to_lowercase().contains("#shorts") {
-        description = format!("{}\n\n#Shorts", description.trim_end());
-    }
+    // The workspace's YouTube description template (Plugin Settings ▸ Writing).
+    let description = clean(&studio.youtube_description(render)?);
     Ok((clean(&title).chars().take(100).collect(), description, tags))
 }
 

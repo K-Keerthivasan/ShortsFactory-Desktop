@@ -399,7 +399,7 @@ fn timestamps_with_offsets_parse() {
 #[test]
 fn the_ai_workflow_keeps_parts_inside_the_video_in_order_and_apart() {
     use crate::autopilot::{Mode, Segment, Wants, clean};
-    let w = Wants { mode: Mode::Multiple, max_reels: 3, min_seconds: 10.0, max_seconds: 30.0, notes: String::new() };
+    let w = Wants { mode: Mode::Multiple, max_reels: 3, min_seconds: 10.0, max_seconds: 30.0, notes: String::new(), hook: false };
     let seg = |a: f64, b: f64| Segment { start: a, end: b, ..Default::default() };
     let out =
         clean(vec![seg(50.0, 70.0), seg(0.0, 100.0), seg(60.0, 80.0), seg(f64::NAN, 5.0), seg(90.0, 95.0), seg(110.0, 140.0), seg(130.0, 150.0)], 120.0, &w);
@@ -413,7 +413,7 @@ fn without_an_ai_the_workflow_falls_back_to_chapters_or_even_parts() {
     use crate::autopilot::{Mode, Wants, plan};
     let s = fixture("autopilot");
     s.connect().unwrap().execute("INSERT INTO application_settings (key, json) VALUES ('general', '{\"aiProvider\":\"mock\"}')", []).unwrap();
-    let w = Wants { mode: Mode::Multiple, max_reels: 5, min_seconds: 10.0, max_seconds: 30.0, notes: String::new() };
+    let w = Wants { mode: Mode::Multiple, max_reels: 5, min_seconds: 10.0, max_seconds: 30.0, notes: String::new(), hook: false };
     let meta = json!({"title": "Trailer", "uploader": "Studio", "chapters": [
         {"start_time": 0.0, "end_time": 20.0, "title": "Intro"}, {"start_time": 20.0, "end_time": 25.0, "title": "Logo"}, {"start_time": 25.0, "end_time": 50.0, "title": "Reveal"}]});
     let (parts, why) = plan(&s, 1, &meta, 50.0, &w);
@@ -603,4 +603,59 @@ fn the_youtube_queue_books_without_touching_posts_and_keeps_to_the_quota() {
     assert!(log[0].contains("failed"), "{log:?}");
     let st = crate::youtube_queue::status(&s).unwrap();
     assert_eq!((st.waiting, st.uploaded_today), (0, 1), "the attempt counts against the day");
+}
+
+#[test]
+fn description_templates_fill_and_tidy() {
+    use crate::writing::{Fields, INSTAGRAM_DEFAULT, YOUTUBE_DEFAULT, fill};
+    let f = Fields {
+        caption: "Big news today. #gaming".into(),
+        title: "A headline".into(),
+        credit: "Original: @maker".into(),
+        hashtags: vec!["gaming".into(), "#tech".into(), "tech".into()],
+        ..Default::default()
+    };
+    // The standard Instagram one is the earlier caption: the text, then tags it does not have yet.
+    assert_eq!(fill(INSTAGRAM_DEFAULT, &f), "Big news today. #gaming\n\n#tech");
+    assert_eq!(fill(YOUTUBE_DEFAULT, &f), "Big news today. #gaming\n\nOriginal: @maker\n\n#tech\n\n#Shorts");
+    // A missing field leaves no gap.
+    let none = Fields { caption: "Hi".into(), ..Default::default() };
+    assert_eq!(fill("{caption}\n\n{credit}\n\n\n{cta}\n{hashtags}", &none), "Hi");
+}
+
+#[test]
+fn writing_settings_shape_captions_and_youtube_descriptions() {
+    let s = fixture("writing");
+    let w = s.writing(1);
+    assert_eq!(w, crate::writing::Writing::default());
+    let custom = crate::writing::Writing { instagram: "{title}\n—\n{caption}\n{hashtags}".into(), youtube: "{caption} | {channel}".into(), style: "Short.".into() };
+    s.save_writing(1, &custom).unwrap();
+    assert_eq!(s.writing(1), custom);
+    assert!(crate::writing::prompt(&s, 1, "a cat plays piano").unwrap().contains("Short."));
+    let card = crate::writing::card_from_reply("Sure! {\"title\":\"T\",\"caption\":\"\",\"attribution\":\"Original: @a\",\"instagramCaption\":\"C\",\"hashtags\":[\"x\"],\"topic\":\"\"}").unwrap();
+    assert_eq!((card.title.as_str(), card.instagram_caption.as_str()), ("T", "C"));
+}
+
+#[test]
+fn the_hook_edit_leads_and_stays_inside_the_part() {
+    use crate::autopilot::{Piece, Segment, Wants, clean, join_filter};
+    let w = Wants { max_seconds: 30.0, min_seconds: 5.0, ..Default::default() };
+    let seg = |pieces: Vec<(f64, f64)>| Segment {
+        start: 10.0,
+        end: 40.0,
+        pieces: pieces.into_iter().map(|(start, end)| Piece { start, end }).collect(),
+        ..Default::default()
+    };
+    // hook trimmed to 5 s, the rest sorted, overlaps and out-of-range parts dropped, 30 s at most
+    let out = clean(vec![seg(vec![(32.0, 38.0), (25.0, 39.0), (5.0, 9.0), (12.0, 20.0), (15.0, 18.0)])], 120.0, &w);
+    let p: Vec<(f64, f64)> = out[0].pieces.iter().map(|p| (p.start, p.end)).collect();
+    assert_eq!(p, vec![(32.0, 37.0), (12.0, 20.0), (25.0, 39.0)]);
+    assert_eq!(out[0].seconds(), 27.0);
+    // nothing to rearrange: no edit
+    assert!(clean(vec![seg(vec![(12.0, 20.0)])], 120.0, &w)[0].pieces.is_empty());
+    let off = Wants { hook: false, ..w.clone() };
+    assert!(clean(vec![seg(vec![(30.0, 35.0), (12.0, 20.0)])], 120.0, &off)[0].pieces.is_empty());
+    let f = join_filter(&[Piece { start: 1.0, end: 2.0 }, Piece { start: 5.0, end: 6.5 }], true);
+    assert!(f.contains("[0:v]trim=start=1.000:end=2.000") && f.ends_with("concat=n=2:v=1:a=1[v][a]"), "{f}");
+    assert!(join_filter(&[Piece { start: 1.0, end: 2.0 }], false).ends_with("concat=n=1:v=1:a=0[v]"));
 }

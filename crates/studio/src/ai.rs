@@ -58,7 +58,8 @@ pub fn write_card(studio: &Studio, channel: i64, text: &str, source: &str) -> Re
     let business = settings.get("template").and_then(Value::as_str) == Some("K2Short");
     let voice = if business { K2 } else { JKR };
     let extra = settings.get("prompt").and_then(Value::as_str).unwrap_or_default();
-    let instruction = [voice, CARD_INSTRUCTION, extra].iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join(" ");
+    let style = crate::writing::style_rule(studio, channel);
+    let instruction = [voice, CARD_INSTRUCTION, extra, &style].iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join(" ");
     let name = studio.channels()?.into_iter().find(|c| c.id == channel).map(|c| c.name).unwrap_or_default();
     let title = text.lines().next().unwrap_or(&name).to_string();
     let input = json!({"channelName": name, "articleText": text, "title": title, "source": source, "business": business});
@@ -76,7 +77,8 @@ pub(crate) fn voice(studio: &Studio, channel: i64) -> Result<String> {
     let settings = studio.settings_json(channel)?;
     let voice = if settings.get("template").and_then(Value::as_str) == Some("K2Short") { K2 } else { JKR };
     let extra = settings.get("prompt").and_then(Value::as_str).unwrap_or_default();
-    Ok([voice, extra].iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join(" "))
+    let style = crate::writing::style_rule(studio, channel);
+    Ok([voice, extra, &style].iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join(" "))
 }
 
 /// One JSON answer matching `schema` from the chosen provider; `None` for the mock provider
@@ -86,7 +88,14 @@ pub(crate) fn ask(studio: &Studio, instruction: &str, input: &Value, schema: &Va
         "mock" => None,
         "ollama" => Some(ollama(studio, instruction, input, schema)?),
         "codex" => Some(codex(studio, instruction, input, schema)?),
-        _ => Some(hermes(studio, instruction, input, schema)?),
+        // Hermes (the user's own setup, e.g. Codex); when it fails, the local Ollama if it answers.
+        _ => Some(match hermes(studio, instruction, input, schema) {
+            Ok(v) => v,
+            Err(e) if studio.var("AI_FALLBACK").is_none_or(|v| v != "off") => {
+                ollama(studio, instruction, input, schema).map_err(|o| StudioError::Other(format!("{e} (and the local Ollama fallback failed: {o})")))?
+            }
+            Err(e) => return Err(e),
+        }),
     })
 }
 
@@ -182,7 +191,7 @@ pub fn ollama_host(raw: Option<&str>) -> String {
 
 fn ollama(studio: &Studio, instruction: &str, input: &Value, schema: &Value) -> Result<Value> {
     let host = ollama_host(studio.var("OLLAMA_HOST"));
-    let model = studio.var("OLLAMA_MODEL_POST").or_else(|| studio.var("OLLAMA_MODEL")).unwrap_or("gemma4:12b").to_string();
+    let model = ollama_model(studio);
     let timeout = studio.var("OLLAMA_TIMEOUT_MS").and_then(|v| v.parse::<u64>().ok()).unwrap_or(300_000);
     let system = [instruction, UNTRUSTED, "Reply with a single JSON object matching the requested schema. No prose, no markdown fences."].join("\n\n");
     let body = json!({
@@ -209,10 +218,16 @@ fn ollama(studio: &Studio, instruction: &str, input: &Value, schema: &Value) -> 
     serde_json::from_str(extract_json(content)?).map_err(|e| StudioError::Other(format!("Ollama's answer is not JSON: {e}")))
 }
 
+/// The Hermes agent CLI, with the user's own Hermes setup (its provider, model and sign-in, e.g.
+/// Codex) unless `HERMES_PROVIDER=ollama` sends it to local Ollama with a throwaway config.
+/// Tools off, repository rules ignored, an empty working folder, the prompt one argv entry
+/// (never a shell), and a time limit (`HERMES_TIMEOUT_MS`, default 4 minutes).
 fn hermes(studio: &Studio, instruction: &str, input: &Value, schema: &Value) -> Result<Value> {
     let bin = studio.var("HERMES_BIN").unwrap_or("hermes").to_string();
-    let model = studio.var("HERMES_MODEL_POST").unwrap_or("gemma4:12b").to_string();
+    let local = studio.var("HERMES_PROVIDER").is_some_and(|p| p.eq_ignore_ascii_case("ollama"));
+    let model = studio.var("HERMES_MODEL_POST").map(str::to_string).or_else(|| local.then(|| ollama_model(studio)));
     let reasoning = studio.var("HERMES_REASONING").unwrap_or("medium").to_string();
+    let timeout = studio.var("HERMES_TIMEOUT_MS").and_then(|v| v.parse::<u64>().ok()).unwrap_or(240_000);
     let prompt = [
         instruction,
         UNTRUSTED,
@@ -223,35 +238,79 @@ fn hermes(studio: &Studio, instruction: &str, input: &Value, schema: &Value) -> 
         &input.to_string(),
     ]
     .join("\n\n");
-    // An empty throwaway home: no project files, rules or the user's global provider reach it.
-    let home = std::env::temp_dir().join(format!("reel-studio-hermes-{}-{}", std::process::id(), crate::clock::now_ms()));
-    std::fs::create_dir_all(&home)?;
-    let config = json!({"model": {"default": model, "provider": "custom", "base_url": "http://127.0.0.1:11434/v1", "api_key": "ollama"}});
-    std::fs::write(home.join("config.yaml"), config.to_string())?;
-    // Tools off (`-t ''`), repository rules ignored, the prompt one argv entry, never a shell.
-    let out = Command::new(&bin)
-        .args(["-z", &prompt, "--ignore-rules", "-t", "", "--reasoning", &reasoning, "--usage-file"])
-        .arg(home.join("usage.json"))
-        .args(["-m", &model, "--provider", "ollama"])
-        .current_dir(&home)
-        .env("HERMES_HOME", &home)
-        .output();
-    let _ = std::fs::remove_dir_all(&home);
-    let out = out.map_err(|e| {
-        StudioError::Other(if e.kind() == std::io::ErrorKind::NotFound {
-            "Hermes CLI not found. Install it or set HERMES_BIN to the full path of hermes.exe.".into()
-        } else {
-            format!("Hermes failed to start: {e}")
-        })
-    })?;
-    let text = String::from_utf8_lossy(&out.stdout).into_owned();
-    if let Some(f) = failure(&format!("{text}\n{}", String::from_utf8_lossy(&out.stderr))) {
-        return err(f);
+    let work = std::env::temp_dir().join(format!("reel-studio-hermes-{}-{}", std::process::id(), crate::clock::now_ms()));
+    std::fs::create_dir_all(&work)?;
+    let mut c = Command::new(&bin);
+    c.args(["-z", &prompt, "--ignore-rules", "-t", "", "--reasoning", &reasoning, "--usage-file"]).arg(work.join("usage.json"));
+    if local {
+        // An empty throwaway home: no project files, rules or the user's global provider reach it.
+        let model = model.clone().unwrap_or_else(|| ollama_model(studio));
+        let base = format!("{}/v1", ollama_host(studio.var("OLLAMA_HOST")));
+        std::fs::write(work.join("config.yaml"), json!({"model": {"default": model, "provider": "custom", "base_url": base, "api_key": "ollama"}}).to_string())?;
+        c.args(["-m", &model, "--provider", "ollama"]).env("HERMES_HOME", &work);
+    } else {
+        if let Some(m) = &model {
+            c.args(["-m", m]);
+        }
+        if let Some(p) = studio.var("HERMES_PROVIDER") {
+            c.args(["--provider", p]);
+        }
     }
-    if !out.status.success() {
-        return err(format!("Hermes exited with {}: {}", out.status, text.chars().take(300).collect::<String>()));
+    c.current_dir(&work).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        c.creation_flags(0x0800_0000);
     }
-    serde_json::from_str(extract_json(&text)?).map_err(|e| StudioError::Other(format!("Hermes's answer is not JSON: {e}")))
+    let child = c.spawn();
+    let result = (|| {
+        let mut child = child.map_err(|e| {
+            StudioError::Other(if e.kind() == std::io::ErrorKind::NotFound {
+                "Hermes CLI not found. Install it or set HERMES_BIN to the full path of hermes.exe.".into()
+            } else {
+                format!("Hermes failed to start: {e}")
+            })
+        })?;
+        let read = |pipe: Option<Box<dyn std::io::Read + Send>>| {
+            std::thread::spawn(move || {
+                let mut s = String::new();
+                if let Some(mut p) = pipe {
+                    let _ = p.read_to_string(&mut s);
+                }
+                s
+            })
+        };
+        let out = read(child.stdout.take().map(|p| Box::new(p) as Box<dyn std::io::Read + Send>));
+        let errs = read(child.stderr.take().map(|p| Box::new(p) as Box<dyn std::io::Read + Send>));
+        let started = std::time::Instant::now();
+        let status = loop {
+            if let Some(s) = child.try_wait()? {
+                break s;
+            }
+            if started.elapsed() > Duration::from_millis(timeout) {
+                let _ = child.kill();
+                let _ = child.wait();
+                return err(format!("Hermes gave no answer within {} s (HERMES_TIMEOUT_MS)", timeout / 1000));
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        };
+        let text = out.join().unwrap_or_default();
+        let stderr = errs.join().unwrap_or_default();
+        if let Some(f) = failure(&format!("{text}\n{stderr}")) {
+            return err(f);
+        }
+        if !status.success() {
+            return err(format!("Hermes exited with {status}: {}", text.chars().chain(stderr.chars()).take(300).collect::<String>()));
+        }
+        serde_json::from_str(extract_json(&text)?).map_err(|e| StudioError::Other(format!("Hermes's answer is not JSON: {e}")))
+    })();
+    let _ = std::fs::remove_dir_all(&work);
+    result
+}
+
+/// The local Ollama model: `OLLAMA_MODEL_POST`, else `OLLAMA_MODEL`, else qwen2.5.
+fn ollama_model(studio: &Studio) -> String {
+    studio.var("OLLAMA_MODEL_POST").or_else(|| studio.var("OLLAMA_MODEL")).unwrap_or("qwen2.5:latest").to_string()
 }
 
 /// Upstream failures Hermes prints while still exiting 0.

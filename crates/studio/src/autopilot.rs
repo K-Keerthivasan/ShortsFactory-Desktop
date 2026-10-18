@@ -2,14 +2,20 @@
 //! the details yt-dlp already read), the parts of it that stand alone as Reels, and a card for
 //! each — chosen by the workspace's AI in the channel's voice. The editor then builds one Reel
 //! per segment from the same downloaded file, and nothing is published before it is approved.
+//!
+//! With [`Wants::hook`] the AI also edits each part: the ranges worth keeping, in playback order,
+//! led by a short hook (the part's strongest moment, shown first as a teaser), leaving out dead
+//! air, filler and repeated takes. [`assemble`] joins those ranges into one clip with FFmpeg, and
+//! the Reel is built from it.
 
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use filmcraft_reel::Card;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::{Result, Studio};
+use crate::{Result, Studio, StudioError};
 
 /// How many Reels to make from one video.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -32,11 +38,13 @@ pub struct Wants {
     pub max_seconds: f64,
     /// Extra direction for the AI ("focus on the gameplay reveal").
     pub notes: String,
+    /// Open each Reel with a hook and cut the filler out.
+    pub hook: bool,
 }
 
 impl Default for Wants {
     fn default() -> Self {
-        Wants { mode: Mode::Auto, max_reels: 3, min_seconds: 15.0, max_seconds: 60.0, notes: String::new() }
+        Wants { mode: Mode::Auto, max_reels: 3, min_seconds: 15.0, max_seconds: 60.0, notes: String::new(), hook: true }
     }
 }
 
@@ -49,7 +57,31 @@ pub struct Segment {
     pub card: Card,
     /// Why the AI chose it (shown for approval).
     pub why: String,
+    /// The ranges to play, in order, hook first; empty plays `start`..`end` as it is.
+    pub pieces: Vec<Piece>,
+    /// The clip [`assemble`] made from `pieces`.
+    pub file: Option<PathBuf>,
 }
+
+/// A range of the source, in seconds.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Piece {
+    pub start: f64,
+    pub end: f64,
+}
+
+impl Segment {
+    /// How long the Reel plays.
+    pub fn seconds(&self) -> f64 {
+        if self.pieces.is_empty() { (self.end - self.start).max(0.0) } else { self.pieces.iter().map(|p| (p.end - p.start).max(0.0)).sum() }
+    }
+}
+
+/// The longest hook.
+const HOOK_SECONDS: f64 = 5.0;
+
+const HOOK_INSTRUCTION: &str = "Also edit each part like a short-form editor. \"keep\" lists the ranges to play, in playback order. The FIRST range is the hook: the single most striking 1 to 5 seconds of the part (a reveal, a punchline, a surprising line or the peak of the action), usually taken from later in the part and shown first as a teaser so viewers stay; it may repeat later. After the hook, list the rest of the part in time order, leaving out dead air, filler words, false starts, repeated takes, greetings, intros, outros and calls to subscribe, and ending right after the payoff. Every range lies between the part's start and end, begins and ends on a sentence or shot, lasts at least one second, and the ranges after the hook do not overlap. Use the transcript times. If there is no transcript, or the part needs no edit, return an empty list.";
 
 /// Timestamped caption lines (seconds, text) of a video, from the captions yt-dlp lists in its
 /// details: the video's own subtitles first, else the automatic ones; English, else the video's
@@ -127,9 +159,18 @@ fn schema() -> Value {
                         "attribution": {"type": "string", "maxLength": 160},
                         "instagramCaption": {"type": "string", "maxLength": 2200},
                         "hashtags": {"type": "array", "items": {"type": "string"}},
-                        "why": {"type": "string", "maxLength": 300}
+                        "why": {"type": "string", "maxLength": 300},
+                        "keep": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {"start": {"type": "number"}, "end": {"type": "number"}},
+                                "required": ["start", "end"],
+                                "additionalProperties": false
+                            }
+                        }
                     },
-                    "required": ["start", "end", "title", "caption", "attribution", "instagramCaption", "hashtags", "why"],
+                    "required": ["start", "end", "title", "caption", "attribution", "instagramCaption", "hashtags", "why", "keep"],
                     "additionalProperties": false
                 }
             }
@@ -187,6 +228,7 @@ fn ask(studio: &Studio, channel: i64, meta: &Value, duration: f64, w: &Wants, li
         "For each part write its quote card as for a single post:",
         crate::ai::CARD_INSTRUCTION,
         "\"why\" says in one line why this part works on its own.",
+        if w.hook { HOOK_INSTRUCTION } else { "Leave \"keep\" empty." },
     ]
     .join(" ");
     let transcript: String = lines.iter().map(|(t, l)| format!("[{}] {l}\n", clock(*t))).collect::<String>().chars().take(40_000).collect();
@@ -223,6 +265,14 @@ fn ask(studio: &Studio, channel: i64, meta: &Value, duration: f64, w: &Wants, li
             end: s.get("end").and_then(Value::as_f64).unwrap_or(f64::NAN),
             card,
             why: s.get("why").and_then(Value::as_str).unwrap_or("").chars().take(300).collect(),
+            pieces: s
+                .get("keep")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|k| Some(Piece { start: k.get("start")?.as_f64()?, end: k.get("end")?.as_f64()? }))
+                .collect(),
+            file: None,
         });
     }
     Ok(out)
@@ -247,7 +297,102 @@ pub fn clean(mut segments: Vec<Segment>, duration: f64, w: &Wants) -> Vec<Segmen
         out.push(s);
     }
     out.truncate(w.max_reels);
+    for s in &mut out {
+        tidy_pieces(s, w);
+    }
     out
+}
+
+/// Keeps a usable edit: the hook (at most five seconds) then non-overlapping ranges in time
+/// order, all inside the part, no longer in all than the part may be plus the hook. Anything
+/// less than a hook and one more range is no edit.
+fn tidy_pieces(s: &mut Segment, w: &Wants) {
+    let (lo, hi) = (s.start, s.end);
+    let mut p: Vec<Piece> = if w.hook {
+        s.pieces
+            .iter()
+            .filter(|p| p.start.is_finite() && p.end.is_finite())
+            .map(|p| Piece { start: p.start.clamp(lo, hi), end: p.end.clamp(lo, hi) })
+            .filter(|p| p.end - p.start >= 0.5)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    s.pieces.clear();
+    if p.len() < 2 {
+        return;
+    }
+    let mut hook = p.remove(0);
+    hook.end = hook.end.min(hook.start + HOOK_SECONDS);
+    p.sort_by(|a, b| a.start.total_cmp(&b.start));
+    let mut rest: Vec<Piece> = Vec::new();
+    for x in p {
+        if rest.last().is_some_and(|l| x.start < l.end - 0.05) {
+            continue;
+        }
+        rest.push(x);
+    }
+    let mut room = w.max_seconds;
+    rest.retain_mut(|x| {
+        if room < 0.5 {
+            return false;
+        }
+        x.end = x.end.min(x.start + room);
+        room -= x.end - x.start;
+        true
+    });
+    if rest.is_empty() {
+        return;
+    }
+    s.pieces = std::iter::once(hook).chain(rest).collect();
+}
+
+/// FFmpeg's filter joining `pieces` of input 0, with or without sound.
+pub fn join_filter(pieces: &[Piece], audio: bool) -> String {
+    let mut f = String::new();
+    let mut ins = String::new();
+    for (i, p) in pieces.iter().enumerate() {
+        f.push_str(&format!("[0:v]trim=start={:.3}:end={:.3},setpts=PTS-STARTPTS[v{i}];", p.start, p.end));
+        ins.push_str(&format!("[v{i}]"));
+        if audio {
+            f.push_str(&format!("[0:a]atrim=start={:.3}:end={:.3},asetpts=PTS-STARTPTS[a{i}];", p.start, p.end));
+            ins.push_str(&format!("[a{i}]"));
+        }
+    }
+    f.push_str(&format!("{ins}concat=n={}:v=1:a={}[v]{}", pieces.len(), u8::from(audio), if audio { "[a]" } else { "" }));
+    f
+}
+
+/// Joins a segment's pieces of `source` into one MP4 beside it. Blocking (an encode).
+pub fn assemble(studio: &Studio, source: &Path, seg: &Segment) -> Result<PathBuf> {
+    if seg.pieces.len() < 2 {
+        return crate::err("this part has no edit to assemble");
+    }
+    let ffmpeg = crate::ytdlp::ffmpeg(studio).ok_or_else(|| StudioError::Other("FFmpeg is needed for the hook edit (Downloads & tools)".into()))?;
+    let stem = source.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "clip".into());
+    let out = source.with_file_name(format!("{stem} - edit {:.0}-{:.0}.mp4", seg.start, seg.end));
+    let mut last = String::new();
+    // With sound first; a source without an audio stream fails that and goes without.
+    for audio in [true, false] {
+        let mut c = std::process::Command::new(&ffmpeg);
+        c.args(["-y", "-hide_banner", "-loglevel", "error", "-i"]).arg(source);
+        c.args(["-filter_complex", &join_filter(&seg.pieces, audio), "-map", "[v]"]);
+        if audio {
+            c.args(["-map", "[a]", "-c:a", "aac", "-b:a", "192k"]);
+        }
+        c.args(["-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p", "-movflags", "+faststart"]).arg(&out);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            c.creation_flags(0x0800_0000);
+        }
+        let o = c.output()?;
+        if o.status.success() && out.is_file() {
+            return Ok(out);
+        }
+        last = String::from_utf8_lossy(&o.stderr).lines().last().unwrap_or("").to_string();
+    }
+    crate::err(format!("FFmpeg could not make the hook edit: {last}"))
 }
 
 /// Chapters that fit, else even parts from the start.
@@ -268,7 +413,7 @@ fn fallback(meta: &Value, duration: f64, w: &Wants) -> Vec<Segment> {
         .filter_map(|c| {
             let (a, b) = (c.get("start_time")?.as_f64()?, c.get("end_time")?.as_f64()?);
             let name = c.get("title").and_then(Value::as_str).unwrap_or("");
-            Some(Segment { start: a, end: b, card: card(format!("{title}: {name}")), why: format!("Chapter “{name}”") })
+            Some(Segment { start: a, end: b, card: card(format!("{title}: {name}")), why: format!("Chapter “{name}”"), ..Default::default() })
         })
         .collect();
     let chapters = clean(chapters, duration, w);
@@ -281,7 +426,7 @@ fn fallback(meta: &Value, duration: f64, w: &Wants) -> Vec<Segment> {
         .map(|i| {
             let start = i as f64 * w.max_seconds;
             let t = if n == 1 { title.clone() } else { format!("{title} (part {})", i + 1) };
-            Segment { start, end: (start + w.max_seconds).min(total), card: card(t), why: "Even split (no AI choice)".into() }
+            Segment { start, end: (start + w.max_seconds).min(total), card: card(t), why: "Even split (no AI choice)".into(), ..Default::default() }
         })
         .collect()
 }

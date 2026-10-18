@@ -358,6 +358,26 @@ pub fn register() {
                 Ok(json!({"waiting": st.waiting, "uploadedToday": st.uploaded_today, "next": st.next, "pausedUntil": st.paused_until}))
             },
         ),
+        spec(
+            "studio.writing",
+            "Writing Settings",
+            r#"{"channel":n,"set":{"instagram":str,"youtube":str,"style":str}?} — the workspace's description templates ({caption} {title} {line} {credit} {cta} {hashtags} {channel}) and on-video text style guide"#,
+            true,
+            |_, p| {
+                let s = studio()?;
+                let channel = int(p, "channel")?;
+                if let Some(v) = p.get("set") {
+                    let w: crate::writing::Writing = serde_json::from_value(v.clone()).map_err(|e| bad(e.to_string()))?;
+                    s.save_writing(channel, &w).map_err(err)?;
+                }
+                to_value(s.writing(channel))
+            },
+        ),
+        spec("studio.writingPrompt", "Prompt for Claude or ChatGPT", r#"{"channel":n,"notes":str} — a prompt that writes the card in the workspace's voice and style, answering with JSON"#, false, |_, p| {
+            let s = studio()?;
+            Ok(json!({"prompt": crate::writing::prompt(&s, int(p, "channel")?, p.get("notes").and_then(Value::as_str).unwrap_or(""))
+                .map_err(err)?}))
+        }),
         spec("studio.calendar", "Publishing Calendar", r#"{"channel":n?,"from":"ISO","to":"ISO"}"#, false, |_, p| {
             let channel = p.get("channel").and_then(Value::as_i64);
             to_value(studio()?.calendar(channel, text(p, "from")?, text(p, "to")?).map_err(err)?)

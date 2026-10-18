@@ -64,6 +64,16 @@ MediaDock is replaced by yt-dlp driven directly by the app (Create ▸ Download 
 |---|---|
 | Headline, subtitle, Instagram caption, hashtags, attribution | Done — Hermes or Ollama, the library's provider and channel voice |
 | From source metadata and notes | Done for notes and articles; MediaDock metadata with §3 |
+| Hermes with its own setup (e.g. Codex) | Done — the app runs Hermes with your Hermes provider, model and sign-in (tools off, rules ignored, an empty folder, `HERMES_TIMEOUT_MS`, default 4 minutes). `HERMES_PROVIDER=ollama` sends it to local Ollama instead; when Hermes fails the local Ollama (`OLLAMA_MODEL`) answers unless `AI_FALLBACK=off` |
+| One style for the text on every video | Done — Plugin Settings ▸ **Writing** ▸ On-video text style: a style guide for headline, supporting line, credit, caption and hashtags that the AI follows for every card (and the AI workflow) |
+| Claude or ChatGPT | Done — Create ▸ Write the card ▸ **Write with Claude or ChatGPT**: Copy prompt (voice, style guide, notes; MCP `studio.writingPrompt`), paste the JSON reply, Use the reply |
+
+**Standard descriptions.** Plugin Settings ▸ **Writing** holds two templates per workspace: the
+Instagram description and the YouTube description (the text on the video stays the same on
+both). They use `{caption}` `{title}` `{line}` `{credit}` `{cta}` `{hashtags}` `{channel}`;
+hashtags already in the text are not repeated, empty fields leave no gaps, and YouTube always
+gets `#Shorts`. Standard: Instagram `{caption}` + hashtags; YouTube `{caption}`, credit,
+hashtags, `#Shorts`. A preview shows the open Reel's post. MCP: `studio.writing`.
 
 ## 5. Video editing
 
@@ -205,6 +215,7 @@ Built as the **AI** panel (beside Reel Studio), with approval before anything is
 |---|---|
 | Paste up to ten video links; yt-dlp downloads each once | Built |
 | The AI (Hermes, Codex or Ollama) reads the video's title, description, chapters and captions and picks one part, several, or decides itself, with a card per part | Built — falls back to the chapters or even parts when no AI answers |
+| **Hook first, filler cut** (on by default): the AI also edits each part, opening with its strongest 1–5 seconds as a teaser and leaving out dead air, filler, false starts, repeats, intros and outros; FFmpeg joins the ranges into one clip beside the download (`<name> - edit <start>-<end>.mp4`) and the Reel is built from it | Built — needs the video's captions; the review shows the hook and the seconds cut, untick it (or change the times) for the plain range |
 | Review: tick parts, adjust their times and headlines | Built |
 | One Reel or Post per part from the same file (`reel.new` with `sourceIn`/`sourceOut`), queued to render into the library | Built |
 | Approve, then publish now or schedule, from the same panel | Built |
