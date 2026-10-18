@@ -122,7 +122,21 @@ Built. A workspace can publish to its YouTube channel too: tick the YouTube acco
 Instagram in Export ▸ Publish ▸ Local publishing, then Publish now or Schedule. The Short gets the
 Reel's headline as its title (up to 100 characters) and the Instagram caption and hashtags as its
 description, with `#Shorts` added; hashtags also become the video's tags. Uploads are resumable
-and retried like Instagram ones. Cloud publishing (Supabase) is Instagram only.
+and retried like Instagram ones.
+
+**In the cloud (this PC off).** With Cloud publishing chosen, Schedule books the YouTube Short in
+the cloud too: the Supabase worker uploads it up to a day and a half ahead with YouTube's own
+publish time, at most six uploads in any 24 hours (Google's default 10,000 units a day; a quota
+error waits six hours and continues). A Reel already in the cloud Instagram schedule reuses that
+stored video; otherwise the video goes to the cloud once, for YouTube only, and is deleted after
+the upload. The first booking gives the cloud the channel's key (client ID, secret and refresh
+token, encrypted in your own backend). Locally such a publication shows as `CLOUD` until the app
+sees the cloud upload it, then as published with its link. Queue ▸ **Move to the cloud** hands
+every Short waiting in the local YouTube queue to the cloud, keeping its time. Over MCP:
+`studio.youtubeQueue` with `"action":"cloud"` (items), `"toCloud"` or `"sync"`. Backend:
+migration `202610180001_youtube.sql` and the `publishing-api` / `publish-due-posts` /
+`cleanup-orphans` functions in the cloud project; both quotas share one Google project, so
+avoid running the local queue and the cloud for the same channel at once.
 
 **Scheduling.** Schedule with a YouTube account ticked uploads the Short to YouTube straight away
 as Private with YouTube's own publish time (`publishAt`); YouTube makes it Public at that time,

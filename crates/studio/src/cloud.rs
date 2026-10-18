@@ -236,7 +236,12 @@ pub(crate) fn schedule_with_key(
     Ok(done)
 }
 
-fn upload(url: &str, file: &Path, size: u64) -> Result<()> {
+/// The signed-in cloud project's URL.
+pub(crate) fn project_url(studio: &Studio) -> Result<String> {
+    Ok(active(studio)?.url)
+}
+
+pub(crate) fn upload(url: &str, file: &Path, size: u64) -> Result<()> {
     let f = std::fs::File::open(file)?;
     match agent(1800).put(url).set("Content-Type", "video/mp4").set("Content-Length", &size.to_string()).send(f) {
         Ok(_) => Ok(()),

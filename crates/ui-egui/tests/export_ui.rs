@@ -211,7 +211,8 @@ fn the_status_bar_and_the_queue_show_the_time_left() {
     d.frames(4);
     // the status bar says it next to the percentage, and agents read it from the same label
     let label = d.ok("ui.elements", json!({"prefix": "status.job.progress"}))[0]["label"].as_str().unwrap().to_string();
-    assert_eq!(label, "25% · 15 s left");
+    // the elapsed part depends on the real clock
+    assert!(label.starts_with("25% · Elapsed ") && label.ends_with(" · ETA 15 s"), "{label}");
     // the queue item has it too
     let item = d.queue().into_iter().next().unwrap();
     assert!((item["etaSeconds"].as_f64().unwrap() - 15.0).abs() < 0.5, "{item}");

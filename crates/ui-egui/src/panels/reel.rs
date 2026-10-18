@@ -755,10 +755,20 @@ pub fn poll(app: &mut FilmcraftApp, now: f64) {
     if background() && r.last_youtube_queue.is_none_or(|last| now - last >= 600.0) && !r.tasks.iter().any(|(label, _)| label == "YouTube queue") {
         r.last_youtube_queue = Some(now);
         if let Some(s) = studio(&mut r) {
-            spawn(&mut r, "YouTube queue", move || match filmcraft_studio::youtube_queue::run(&s) {
-                Ok(lines) => Done::Message(lines.join("
-")),
-                Err(e) => Done::Message(format!("YouTube queue: {e}")),
+            spawn(&mut r, "YouTube queue", move || {
+                let mut lines = Vec::new();
+                if filmcraft_studio::cloud::configured(&s) {
+                    match filmcraft_studio::cloud_youtube::sync(&s) {
+                        Ok(0) => {}
+                        Ok(n) => lines.push(format!("YouTube: {n} cloud upload(s) recorded")),
+                        Err(e) => lines.push(format!("Cloud YouTube: {e}")),
+                    }
+                }
+                match filmcraft_studio::youtube_queue::run(&s) {
+                    Ok(l) => lines.extend(l),
+                    Err(e) => lines.push(format!("YouTube queue: {e}")),
+                }
+                Done::Message(lines.join("\n"))
             });
         }
     }
@@ -1755,9 +1765,17 @@ fn queue_sent(r: &mut Runtime, id: u64, render: i64) {
                         spawn(r, "Publishing", move || Done::Published(name, filmcraft_studio::publish_now(&st, ch, render, a).map_err(|e| e.to_string()), None));
                     }
                 } else {
+                    // Booked in the cloud as well: it uploads with this PC off, within the quota.
                     let when = at.clone();
                     spawn(r, "Scheduling", move || {
-                        Done::Scheduled(name, filmcraft_studio::schedule_everywhere(&st, ch, render, &youtube, &when).map_err(|e| e.to_string()), when, 0)
+                        let lines: Vec<String> = youtube
+                            .iter()
+                            .map(|a| match filmcraft_studio::cloud_youtube::schedule(&st, ch, render, *a, &when) {
+                                Ok(_) => format!("YouTube: “{name}” booked in the cloud for {}", local_time(&when)),
+                                Err(e) => format!("YouTube: booking “{name}” in the cloud failed: {e}"),
+                            })
+                            .collect();
+                        Done::Message(lines.join("\n"))
                     });
                 }
             }
@@ -1846,6 +1864,25 @@ fn queue_view(app: &mut FilmcraftApp, ui: &mut egui::Ui, ctx: &Ctx) {
         }
         ui.label(RichText::new(line).small());
         ui.label(RichText::new("Shorts upload up to a day and a half ahead, while the app is open; YouTube publishes each at its time.").small().color(t.text_dim));
+        if q.waiting > 0 && filmcraft_studio::cloud::configured(&ctx.s) {
+            let busy = rt().tasks.iter().any(|(label, _)| label == "Moving YouTube to the cloud");
+            let b = ui.add_enabled(!busy, egui::Button::new("Move to the cloud"));
+            app.auto.add_response("reel.queue.youtubeToCloud", &b, "Move the YouTube queue to the cloud");
+            if b.on_hover_text("The cloud uploads them at their times with this PC off").clicked() {
+                let s = ctx.s.clone();
+                let mut runtime = rt();
+                spawn(&mut runtime, "Moving YouTube to the cloud", move || match filmcraft_studio::cloud_youtube::move_queue(&s) {
+                    Ok(lines) => Done::Message(lines.join("\n")),
+                    Err(e) => Done::Message(format!("Moving YouTube to the cloud: {e}")),
+                });
+            }
+        }
+        ui.separator();
+    }
+    if let Ok(n) = filmcraft_studio::cloud_youtube::waiting(&ctx.s)
+        && n > 0
+    {
+        ui.label(RichText::new(format!("{n} YouTube Short(s) waiting in the cloud: they upload with this PC off, within the daily quota.")).small());
         ui.separator();
     }
     ui.label(RichText::new("Upcoming in the cloud").strong());

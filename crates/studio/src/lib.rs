@@ -22,6 +22,7 @@ pub mod meta_token;
 pub mod notifications;
 pub mod settings;
 pub mod workflow;
+pub mod cloud_youtube;
 pub mod youtube;
 pub mod youtube_connect;
 pub mod youtube_queue;
@@ -165,6 +166,35 @@ pub fn publish_now(studio: &Studio, channel: i64, render: i64, account: i64) -> 
     run_job(studio, job, channel, render, account)
 }
 
+/// A render's YouTube title, description and tags: the Short's own title if one was written, else
+/// the headline; the Instagram caption as the description. YouTube refuses < and > in titles and
+/// descriptions, and #Shorts marks the vertical video as a Short.
+pub(crate) fn short_text(studio: &Studio, render: i64) -> Result<(String, String, Vec<String>)> {
+    let script = studio
+        .connect()?
+        .query_row("SELECT s.json FROM renders r JOIN scripts s ON s.id = r.script_id WHERE r.id = ?1", [render], |r| r.get::<_, String>(0))
+        .map_err(StudioError::from)?;
+    let v: serde_json::Value = serde_json::from_str(&script).unwrap_or_default();
+    let title = v
+        .get("youtubeTitle")
+        .and_then(serde_json::Value::as_str)
+        .filter(|t| !t.trim().is_empty())
+        .or_else(|| v.get("shortHeadline").and_then(serde_json::Value::as_str))
+        .unwrap_or("Reel")
+        .to_string();
+    let tags: Vec<String> = v
+        .get("hashtags")
+        .and_then(serde_json::Value::as_array)
+        .map(|a| a.iter().filter_map(|t| t.as_str()).map(|t| t.trim_start_matches('#').to_string()).filter(|t| !t.is_empty()).collect())
+        .unwrap_or_default();
+    let clean = |s: &str| s.replace(['<', '>'], "");
+    let mut description = clean(&studio.caption_for(render)?);
+    if !description.to_lowercase().contains("#shorts") {
+        description = format!("{}\n\n#Shorts", description.trim_end());
+    }
+    Ok((clean(&title).chars().take(100).collect(), description, tags))
+}
+
 pub(crate) fn run_job(studio: &Studio, job: i64, channel: i64, render: i64, account: i64) -> Result<Option<String>> {
     let outcome = (|| -> instagram::Published {
         let (_, a) = studio.account(account)?;
@@ -196,34 +226,7 @@ pub(crate) fn run_job(studio: &Studio, job: i64, channel: i64, render: i64, acco
                 }
             }
             "YOUTUBE" => {
-                let script = studio
-                    .connect()?
-                    .query_row("SELECT s.json FROM renders r JOIN scripts s ON s.id = r.script_id WHERE r.id = ?1", [render], |r| r.get::<_, String>(0))
-                    .map_err(StudioError::from)?;
-                let v: serde_json::Value = serde_json::from_str(&script).unwrap_or_default();
-                // The Short's own title if one was written, else the headline.
-                let title = v
-                    .get("youtubeTitle")
-                    .and_then(serde_json::Value::as_str)
-                    .filter(|t| !t.trim().is_empty())
-                    .or_else(|| v.get("shortHeadline").and_then(serde_json::Value::as_str))
-                    .unwrap_or("Reel")
-                    .to_string();
-                let tags: Vec<String> = v
-                    .get("hashtags")
-                    .and_then(serde_json::Value::as_array)
-                    .map(|a| a.iter().filter_map(|t| t.as_str()).map(|t| t.trim_start_matches('#').to_string()).filter(|t| !t.is_empty()).collect())
-                    .unwrap_or_default();
-                // The same words as the Instagram post; YouTube refuses < and > in titles and
-                // descriptions, and #Shorts marks the vertical video as a Short.
-                let clean = |s: &str| s.replace(['<', '>'], "");
-                let title = clean(&title);
-                let mut description = clean(&caption);
-                if !description.to_lowercase().contains("#shorts") {
-                    description = format!("{}
-
-#Shorts", description.trim_end());
-                }
+                let (title, description, tags) = short_text(studio, render)?;
                 // A job scheduled for later is uploaded now and published by YouTube at its time.
                 let publish_at = studio
                     .connect()?

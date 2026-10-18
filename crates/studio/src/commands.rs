@@ -317,7 +317,7 @@ pub fn register() {
         spec(
             "studio.youtubeQueue",
             "YouTube Upload Queue",
-            r#"{"action":"status"|"run"|"add","channel":n?,"account":n?,"items":[{"render":n,"at":"ISO UTC"}]?} — books Shorts at times, then uploads them ahead within Google's daily quota"#,
+            r#"{"action":"status"|"run"|"add"|"cloud"|"toCloud"|"sync","channel":n?,"account":n?,"items":[{"render":n,"at":"ISO UTC"}]?} — books Shorts at times, then uploads them ahead within Google's daily quota; "cloud" books items in the cloud instead, "toCloud" moves the waiting queue there, "sync" records cloud uploads"#,
             true,
             |_, p| {
                 let s = studio()?;
@@ -337,6 +337,21 @@ pub fn register() {
                         let n = crate::youtube_queue::add(&s, int(p, "channel")?, int(p, "account")?, &items).map_err(err)?;
                         return Ok(json!({"added": n}));
                     }
+                    "cloud" => {
+                        let (channel, account) = (int(p, "channel")?, int(p, "account")?);
+                        let mut out = Vec::new();
+                        for i in p.get("items").and_then(Value::as_array).into_iter().flatten() {
+                            let render = i.get("render").and_then(Value::as_i64).ok_or_else(|| bad("items need render"))?;
+                            let at = i.get("at").and_then(Value::as_str).ok_or_else(|| bad("items need at"))?;
+                            out.push(match crate::cloud_youtube::schedule(&s, channel, render, account, at) {
+                                Ok(v) => json!({"render": render, "id": v.get("id"), "status": v.get("status"), "at": v.get("scheduled_for")}),
+                                Err(e) => json!({"render": render, "error": e.to_string()}),
+                            });
+                        }
+                        return Ok(json!({"booked": out}));
+                    }
+                    "toCloud" => return Ok(json!({"log": crate::cloud_youtube::move_queue(&s).map_err(err)?})),
+                    "sync" => return Ok(json!({"changed": crate::cloud_youtube::sync(&s).map_err(err)?, "waiting": crate::cloud_youtube::waiting(&s).map_err(err)?})),
                     other => return Err(bad(format!("unknown action `{other}`"))),
                 }
                 let st = crate::youtube_queue::status(&s).map_err(err)?;
