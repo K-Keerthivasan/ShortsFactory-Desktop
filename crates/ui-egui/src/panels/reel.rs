@@ -241,6 +241,7 @@ enum Done {
     /// New thumbnails (their files, to reload) or why they could not be made.
     Thumbnails(Vec<std::path::PathBuf>, Result<String, String>),
     CloudAccounts(Result<Vec<serde_json::Value>, String>),
+    CloudYoutube(Result<Vec<serde_json::Value>, String>),
     CloudPosts(Result<Vec<serde_json::Value>, String>),
     Card(Result<Box<Card>, String>, Box<CardTarget>),
     /// The library hand-off finished, for this sequence (a Reel).
@@ -328,6 +329,8 @@ struct Runtime {
     cloud_posts: Vec<serde_json::Value>,
     cloud_error: String,
     cloud_loaded: bool,
+    /// The YouTube channels the cloud has (None until asked).
+    cloud_youtube: Option<Result<Vec<serde_json::Value>, String>>,
     archived: Option<(i64, i64)>,
     health: Option<filmcraft_studio::settings::HealthReport>,
     /// When the start-up popup opened.
@@ -654,6 +657,7 @@ pub fn poll(app: &mut FilmcraftApp, now: f64) {
                 r.cloud_error.clear();
             }
             Done::CloudAccounts(Err(e)) | Done::CloudPosts(Err(e)) => r.cloud_error = e,
+            Done::CloudYoutube(result) => r.cloud_youtube = Some(result),
             Done::Message(m) if m == "__imports_done" => {
                 r.imports_running = false;
                 if let Some(ch) = r.loaded_channel {
@@ -2296,6 +2300,8 @@ fn plugin_settings(app: &mut FilmcraftApp, ctx: &egui::Context) {
                         ],
                     );
                     ui.separator();
+                    cloud_youtube_settings(app, ui, &s);
+                    ui.separator();
                     ui.label("Local and cloud tokens are stored separately. You can use the same valid Meta token for both, but replacing one does not update the other.");
                     cloud(app,ui,None,channel,&s,true);
                 }
@@ -3057,6 +3063,89 @@ fn write_card(app: &mut FilmcraftApp, ui: &mut egui::Ui, channel: Option<i64>, s
             }
         }
     });
+}
+
+/// Plugin Settings ▸ Cloud ▸ YouTube: the Google client, and the channels the cloud uploads to.
+fn cloud_youtube_settings(app: &mut FilmcraftApp, ui: &mut egui::Ui, s: &Studio) {
+    let t = app.tokens;
+    ui.label(RichText::new("YouTube in the cloud").strong());
+    env_fields(app, ui, &[("YOUTUBE_CLIENT_ID", "Google client ID", false), ("YOUTUBE_CLIENT_SECRET", "Google client secret", true)]);
+    ui.label(
+        RichText::new(
+            "The same Google Desktop-app client as Accounts & keys ▸ YouTube. Each channel's key (client ID, secret and its sign-in) goes to your own cloud backend, encrypted there, so Shorts upload with this PC off.",
+        )
+        .small()
+        .color(t.text_dim),
+    );
+    if !filmcraft_studio::cloud::configured(s) {
+        ui.label(RichText::new("Set the Supabase project and sign-in above first.").small().color(t.text_dim));
+        return;
+    }
+    let mut r = rt();
+    let busy = r.tasks.iter().any(|(l, _)| l == "Cloud YouTube");
+    if r.cloud_youtube.is_none() && !busy {
+        let st = s.clone();
+        spawn(&mut r, "Cloud YouTube", move || {
+            Done::CloudYoutube(
+                filmcraft_studio::cloud::call(&st, "youtubeAccounts", json!({})).map(|v| v.as_array().cloned().unwrap_or_default()).map_err(|e| e.to_string()),
+            )
+        });
+    }
+    let listed = r.cloud_youtube.clone();
+    let local: Vec<filmcraft_studio::Account> = r.accounts.iter().filter(|a| a.platform == "YOUTUBE").cloned().collect();
+    drop(r);
+    let channels = match &listed {
+        Some(Ok(list)) => list.clone(),
+        Some(Err(e)) => {
+            ui.label(RichText::new(format!("Could not read the cloud's YouTube channels: {e}")).small().color(t.danger));
+            Vec::new()
+        }
+        None => {
+            ui.label(RichText::new("Checking the cloud…").small().color(t.text_dim));
+            Vec::new()
+        }
+    };
+    let text = |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or_default().to_string();
+    for c in &channels {
+        let status = text(c, "connection_status");
+        let ok = status == "valid";
+        ui.label(
+            RichText::new(format!(
+                "{} · {} · {}",
+                text(c, "channel_name"),
+                if ok { "connected".to_string() } else { status.replace('_', " ") },
+                text(c, "privacy_status")
+            ))
+            .small()
+            .color(if ok { t.text } else { t.danger }),
+        );
+    }
+    if listed.as_ref().is_some_and(|l| l.is_ok()) && channels.is_empty() {
+        ui.label(RichText::new("No YouTube channel in the cloud yet.").small().color(t.text_dim));
+    }
+    ui.horizontal_wrapped(|ui| {
+        for a in &local {
+            let there = channels.iter().any(|c| text(c, "channel_id") == a.external_id);
+            let label = if there { format!("Update “{}” in the cloud", a.display_name) } else { format!("Connect “{}” to the cloud", a.display_name) };
+            let b = ui.add_enabled(!busy, egui::Button::new(label));
+            app.auto.add_response(&format!("reel.settings.cloudYoutube.{}", a.id), &b, "Connect the YouTube channel to the cloud");
+            if b.on_hover_text("Sends this channel's key and visibility to your cloud backend").clicked() {
+                let (st, id, name) = (s.clone(), a.id, a.display_name.clone());
+                spawn(&mut rt(), "Cloud YouTube", move || match filmcraft_studio::cloud_youtube::connect(&st, id) {
+                    Ok(_) => Done::CloudYoutube(
+                        filmcraft_studio::cloud::call(&st, "youtubeAccounts", json!({})).map(|v| v.as_array().cloned().unwrap_or_default()).map_err(|e| e.to_string()),
+                    ),
+                    Err(e) => Done::CloudYoutube(Err(format!("connecting “{name}”: {e}"))),
+                });
+            }
+        }
+        if ui.add_enabled(!busy, egui::Button::new("Refresh")).clicked() {
+            rt().cloud_youtube = None;
+        }
+    });
+    if local.is_empty() {
+        ui.label(RichText::new("Connect YouTube to this workspace in Accounts & keys first.").small().color(t.text_dim));
+    }
 }
 
 /// Plugin Settings ▸ Writing: the workspace's standard descriptions and on-video text style.
