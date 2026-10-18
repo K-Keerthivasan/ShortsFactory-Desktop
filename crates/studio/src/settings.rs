@@ -322,12 +322,35 @@ pub fn health_check(studio: &Studio) -> HealthReport {
         }
     };
     out.lines.push(ai);
-    for ch in studio.channels().unwrap_or_default() {
+    let channels = studio.channels().unwrap_or_default();
+    let youtube: Vec<(String, crate::Account)> = channels
+        .iter()
+        .flat_map(|ch| studio.accounts(ch.id).unwrap_or_default().into_iter().filter(|a| a.enabled && a.platform == "YOUTUBE").map(|a| (ch.name.clone(), a)))
+        .collect();
+    // The Google sign-in client YouTube connections are made with.
+    let google = crate::youtube_connect::client(studio).ok().map(|(id, _)| id);
+    if google.is_some() || !youtube.is_empty() {
+        out.lines.push(match crate::youtube_connect::check_client(studio) {
+            Ok(short) => (format!("Google: sign-in client {short} works (YouTube)"), true),
+            Err(e) => (format!("Google: {e}"), false),
+        });
+    }
+    for ch in &channels {
         for a in studio.accounts(ch.id).unwrap_or_default().into_iter().filter(|a| a.enabled) {
             out.lines.push(match studio.test_account(a.id, false) {
+                // "YouTube channel “JKR”" already names the platform.
+                Ok(name) if a.platform == "YOUTUBE" => (format!("{}: {name} key works", ch.name), true),
                 Ok(name) => (format!("{}: {} {name} key works", ch.name, title(&a.platform)), true),
                 Err(e) => (format!("{}: {} — {e}", ch.name, title(&a.platform)), false),
             });
+        }
+    }
+    for (ch, a) in &youtube {
+        let key_client = studio.secret(&a.credentials_reference).ok().and_then(|s| s.get("clientId").and_then(Value::as_str).map(str::to_string));
+        if let (Some(k), Some(g)) = (key_client, google.as_ref())
+            && &k != g
+        {
+            out.lines.push((format!("{ch}: the YouTube key was made with another Google client (it still works; reconnect to use the current one)"), true));
         }
     }
     if crate::cloud::configured(studio) {
@@ -342,11 +365,43 @@ pub fn health_check(studio: &Studio) -> HealthReport {
             }
             Err(e) => out.lines.push((format!("Cloud: {e}"), false)),
         }
+        // Cloud YouTube: each channel's connection and its queue.
+        if let Ok(accounts) = crate::cloud::call(studio, "youtubeAccounts", json!({}))
+            && let Some(accounts) = accounts.as_array().filter(|a| !a.is_empty())
+        {
+            let shorts = crate::cloud::call(studio, "listYoutube", json!({})).ok().and_then(|v| v.get("items").and_then(Value::as_array).cloned()).unwrap_or_default();
+            let day_ago = crate::clock::now_ms() - 86_400_000;
+            for a in accounts {
+                let id = a.get("id").and_then(Value::as_str).unwrap_or_default();
+                let name = a.get("channel_name").and_then(Value::as_str).unwrap_or("YouTube");
+                let mine: Vec<&Value> = shorts.iter().filter(|s| s.get("youtube_account_id").and_then(Value::as_str) == Some(id)).collect();
+                let status = |s: &&Value| s.get("status").and_then(Value::as_str).unwrap_or_default().to_string();
+                let waiting = mine.iter().filter(|s| ["scheduled", "processing", "uploading"].contains(&status(s).as_str())).count();
+                let today = mine
+                    .iter()
+                    .filter(|s| s.get("uploaded_at").and_then(Value::as_str).and_then(crate::clock::parse_iso).is_some_and(|t| t > day_ago))
+                    .count();
+                let failed = mine.iter().filter(|s| status(s) == "failed").count();
+                let connected = a.get("connection_status").and_then(Value::as_str) == Some("valid");
+                let mut line = format!(
+                    "Cloud YouTube “{name}”: {} · {waiting} waiting · {today} of {} uploads in 24 h",
+                    if connected { "connected" } else { "reconnect needed" },
+                    crate::youtube_queue::DAILY_UPLOADS
+                );
+                if failed > 0 {
+                    line.push_str(&format!(" · {failed} failed"));
+                }
+                out.lines.push((line, connected && failed == 0));
+            }
+        }
     }
     out
 }
 
 fn title(platform: &str) -> String {
+    if platform == "YOUTUBE" {
+        return "YouTube".into();
+    }
     let mut c = platform.to_lowercase();
     if let Some(f) = c.get_mut(0..1) {
         f.make_ascii_uppercase();

@@ -78,7 +78,7 @@ fn random_state() -> String {
 }
 
 /// The workspace's Google client, from YOUTUBE_CLIENT_ID / YOUTUBE_CLIENT_SECRET.
-fn client(studio: &Studio) -> Result<(String, String)> {
+pub(crate) fn client(studio: &Studio) -> Result<(String, String)> {
     let id = studio.var("YOUTUBE_CLIENT_ID").map(str::trim).filter(|v| !v.is_empty());
     let secret = studio.var("YOUTUBE_CLIENT_SECRET").map(str::trim).filter(|v| !v.is_empty());
     match (id, secret) {
@@ -88,6 +88,33 @@ fn client(studio: &Studio) -> Result<(String, String)> {
         }
         (Some(i), Some(s)) => Ok((i.to_string(), s.to_string())),
         _ => err("Add your Google OAuth client (YOUTUBE_CLIENT_ID and YOUTUBE_CLIENT_SECRET) in Plugin Settings > Accounts & keys first"),
+    }
+}
+
+/// Asks Google whether the client ID and secret belong together: a refresh with a dummy token
+/// answers `invalid_grant` for a good client and `invalid_client` for a bad one. Returns the
+/// client ID's short form. Blocking.
+pub fn check_client(studio: &Studio) -> Result<String> {
+    let (id, secret) = client(studio)?;
+    let agent = ureq::AgentBuilder::new().timeout(std::time::Duration::from_secs(15)).build();
+    let short = format!("…{}", id.split('.').next().unwrap_or(&id).chars().rev().take(8).collect::<String>().chars().rev().collect::<String>());
+    match agent.post("https://oauth2.googleapis.com/token").send_form(&[
+        ("client_id", id.as_str()),
+        ("client_secret", secret.as_str()),
+        ("refresh_token", "health-check"),
+        ("grant_type", "refresh_token"),
+    ]) {
+        Ok(_) => Ok(short),
+        Err(ureq::Error::Status(_, r)) => {
+            let v: Value = r.into_json().unwrap_or(Value::Null);
+            match v.get("error").and_then(Value::as_str).unwrap_or_default() {
+                "invalid_grant" => Ok(short),
+                "invalid_client" => err("Google does not accept this client ID and secret together; copy both from the same Desktop client"),
+                "unauthorized_client" => err("this Google client may not refresh sign-ins; use a Desktop app client"),
+                other => err(format!("Google answered {other}")),
+            }
+        }
+        Err(e) => err(format!("Google is not reachable ({e})")),
     }
 }
 
