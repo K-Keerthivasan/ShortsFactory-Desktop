@@ -26,6 +26,8 @@ pub enum Mode {
     Auto,
     Single,
     Multiple,
+    /// One long 16:9 video: the whole video edited tighter, opening with a hook.
+    Long,
 }
 
 /// What to ask for.
@@ -78,8 +80,11 @@ impl Segment {
     }
 }
 
-/// The longest hook.
+/// The longest hook: a Reel's, and a long video's.
 const HOOK_SECONDS: f64 = 5.0;
+const LONG_HOOK_SECONDS: f64 = 15.0;
+
+const LONG_INSTRUCTION: &str = "You are editing a long video into ONE tighter long video for YouTube (16:9). Return exactly one part: \"start\" is where the useful content begins and \"end\" where it ends. \"keep\" lists the ranges to play, in playback order. The FIRST range is the cold-open hook: the most gripping 5 to 15 seconds of the whole video (a result, a reveal, a strong claim), shown first so viewers stay; it may repeat later. After it, list the rest in time order, leaving out dead air, filler words, false starts, repeated takes, long greetings, tangents that do not serve the story, sponsor segments, and calls to like and subscribe; keep every step the story needs and end right after the payoff. Every range begins and ends on a sentence, lasts at least two seconds, and the ranges after the hook do not overlap. Use the transcript times. Write the card as the video's title and description. If there is no transcript, return an empty \"keep\" list.";
 
 const HOOK_INSTRUCTION: &str = "Also edit each part like a short-form editor. \"keep\" lists the ranges to play, in playback order. The FIRST range is the hook: the single most striking 1 to 5 seconds of the part (a reveal, a punchline, a surprising line or the peak of the action), usually taken from later in the part and shown first as a teaser so viewers stay; it may repeat later. After the hook, list the rest of the part in time order, leaving out dead air, filler words, false starts, repeated takes, greetings, intros, outros and calls to subscribe, and ending right after the payoff. Every range lies between the part's start and end, begins and ends on a sentence or shot, lasts at least one second, and the ranges after the hook do not overlap. Use the transcript times. If there is no transcript, or the part needs no edit, return an empty list.";
 
@@ -199,13 +204,13 @@ pub fn plan(studio: &Studio, channel: i64, meta: &Value, duration: f64, wants: &
 fn tidy(w: &Wants, duration: f64) -> Wants {
     let mut w = w.clone();
     let finite = |v: f64, d: f64| if v.is_finite() && v > 0.0 { v } else { d };
-    w.max_seconds = finite(w.max_seconds, 60.0).clamp(3.0, 600.0);
+    w.max_seconds = if w.mode == Mode::Long { finite(w.max_seconds, 900.0).clamp(30.0, 14_400.0) } else { finite(w.max_seconds, 60.0).clamp(3.0, 600.0) };
     w.min_seconds = finite(w.min_seconds, 15.0).clamp(1.0, w.max_seconds);
     if duration.is_finite() && duration > 0.0 {
         w.min_seconds = w.min_seconds.min(duration);
     }
     w.max_reels = match w.mode {
-        Mode::Single => 1,
+        Mode::Single | Mode::Long => 1,
         _ => w.max_reels.clamp(1, 20),
     };
     w
@@ -216,21 +221,27 @@ fn ask(studio: &Studio, channel: i64, meta: &Value, duration: f64, w: &Wants, li
         Mode::Single => "Choose the ONE best part.".to_string(),
         Mode::Multiple => format!("Choose up to {} parts, each a different story or moment.", w.max_reels),
         Mode::Auto => format!("Choose one part, or up to {} when the video holds several separate stories or moments worth a Reel each.", w.max_reels),
+        Mode::Long => format!("The edited video should run at most {:.0} minutes.", w.max_seconds / 60.0),
     };
-    let instruction = [
-        crate::ai::voice(studio, channel)?.as_str(),
-        "You are cutting a long video into vertical short videos (Reels).",
-        &how,
-        &format!(
-            "Each part is one continuous range of the video: \"start\" and \"end\" in seconds, between {:.0} and {:.0} seconds long, starting where a sentence or shot starts and ending after the point lands. Parts must not overlap. Use the transcript times.",
-            w.min_seconds, w.max_seconds
-        ),
-        "For each part write its quote card as for a single post:",
-        crate::ai::CARD_INSTRUCTION,
-        "\"why\" says in one line why this part works on its own.",
-        if w.hook { HOOK_INSTRUCTION } else { "Leave \"keep\" empty." },
-    ]
-    .join(" ");
+    let instruction = if w.mode == Mode::Long {
+        [crate::ai::voice(studio, channel)?.as_str(), LONG_INSTRUCTION, &how, "For the part write its card:", crate::ai::CARD_INSTRUCTION, "\"why\" says in one line what the edit keeps."]
+            .join(" ")
+    } else {
+        [
+            crate::ai::voice(studio, channel)?.as_str(),
+            "You are cutting a long video into vertical short videos (Reels).",
+            &how,
+            &format!(
+                "Each part is one continuous range of the video: \"start\" and \"end\" in seconds, between {:.0} and {:.0} seconds long, starting where a sentence or shot starts and ending after the point lands. Parts must not overlap. Use the transcript times.",
+                w.min_seconds, w.max_seconds
+            ),
+            "For each part write its quote card as for a single post:",
+            crate::ai::CARD_INSTRUCTION,
+            "\"why\" says in one line why this part works on its own.",
+            if w.hook { HOOK_INSTRUCTION } else { "Leave \"keep\" empty." },
+        ]
+        .join(" ")
+    };
     let transcript: String = lines.iter().map(|(t, l)| format!("[{}] {l}\n", clock(*t))).collect::<String>().chars().take(40_000).collect();
     let chapters: Vec<Value> = meta
         .get("chapters")
@@ -283,9 +294,11 @@ fn ask(studio: &Studio, channel: i64, meta: &Value, duration: f64, w: &Wants, li
 pub fn clean(mut segments: Vec<Segment>, duration: f64, w: &Wants) -> Vec<Segment> {
     let total = if duration.is_finite() && duration > 0.0 { duration } else { f64::INFINITY };
     segments.retain(|s| s.start.is_finite() && s.end.is_finite());
+    // A long video's part spans the whole edit; its kept ranges keep to the length.
+    let hull = if w.mode == Mode::Long { f64::INFINITY } else { w.max_seconds };
     for s in &mut segments {
         s.start = s.start.clamp(0.0, total);
-        s.end = s.end.clamp(0.0, total).min(s.start + w.max_seconds);
+        s.end = s.end.clamp(0.0, total).min(s.start + hull);
     }
     segments.retain(|s| s.end - s.start >= w.min_seconds.min(total) - 0.5);
     segments.sort_by(|a, b| a.start.total_cmp(&b.start));
@@ -323,7 +336,7 @@ fn tidy_pieces(s: &mut Segment, w: &Wants) {
         return;
     }
     let mut hook = p.remove(0);
-    hook.end = hook.end.min(hook.start + HOOK_SECONDS);
+    hook.end = hook.end.min(hook.start + if w.mode == Mode::Long { LONG_HOOK_SECONDS } else { HOOK_SECONDS });
     p.sort_by(|a, b| a.start.total_cmp(&b.start));
     let mut rest: Vec<Piece> = Vec::new();
     for x in p {
@@ -363,10 +376,13 @@ pub fn join_filter(pieces: &[Piece], audio: bool) -> String {
     f
 }
 
-/// Joins a segment's pieces of `source` into one MP4 beside it. Blocking (an encode).
+/// Joins a segment's pieces of `source` into one MP4 beside it (a plain part is cut out as it
+/// is). Blocking (an encode).
 pub fn assemble(studio: &Studio, source: &Path, seg: &Segment) -> Result<PathBuf> {
-    if seg.pieces.len() < 2 {
-        return crate::err("this part has no edit to assemble");
+    let plain = [Piece { start: seg.start, end: seg.end }];
+    let pieces: &[Piece] = if seg.pieces.is_empty() { &plain } else { &seg.pieces };
+    if pieces.iter().all(|p| p.end - p.start < 0.1) {
+        return crate::err("this part is empty");
     }
     let ffmpeg = crate::ytdlp::ffmpeg(studio).ok_or_else(|| StudioError::Other("FFmpeg is needed for the hook edit (Downloads & tools)".into()))?;
     let stem = source.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "clip".into());
@@ -376,7 +392,7 @@ pub fn assemble(studio: &Studio, source: &Path, seg: &Segment) -> Result<PathBuf
     for audio in [true, false] {
         let mut c = std::process::Command::new(&ffmpeg);
         c.args(["-y", "-hide_banner", "-loglevel", "error", "-i"]).arg(source);
-        c.args(["-filter_complex", &join_filter(&seg.pieces, audio), "-map", "[v]"]);
+        c.args(["-filter_complex", &join_filter(pieces, audio), "-map", "[v]"]);
         if audio {
             c.args(["-map", "[a]", "-c:a", "aac", "-b:a", "192k"]);
         }
@@ -393,6 +409,23 @@ pub fn assemble(studio: &Studio, source: &Path, seg: &Segment) -> Result<PathBuf
         last = String::from_utf8_lossy(&o.stderr).lines().last().unwrap_or("").to_string();
     }
     crate::err(format!("FFmpeg could not make the hook edit: {last}"))
+}
+
+/// Makes a long video from a segment: its edit (or the plain part) as one MP4, added to the
+/// workspace's library as a long video (16:9, kind VIDEO) waiting for approval, with
+/// thumbnails that carry its headline. Returns the render. Blocking (an encode).
+pub fn make_long(studio: &Studio, channel: i64, source: &Path, seg: &Segment) -> Result<i64> {
+    let file = match seg.file.as_ref().filter(|f| f.is_file()) {
+        Some(f) => f.clone(),
+        None => assemble(studio, source, seg)?,
+    };
+    let info = filmcraft_reel::ReelInfo { channel_id: Some(channel), card: seg.card.clone(), format: "long".into(), template: String::new(), ..Default::default() };
+    let duration = crate::thumbnails::duration(studio, &file).unwrap_or(seg.seconds());
+    let (_, render) = studio.send_to_library(&info, &file, None, None, duration, false)?;
+    if let Err(e) = crate::thumbnails::ensure(studio, render) {
+        log::warn!("thumbnails for the long video {render}: {e}");
+    }
+    Ok(render)
 }
 
 /// Chapters that fit, else even parts from the start.
@@ -421,6 +454,10 @@ fn fallback(meta: &Value, duration: f64, w: &Wants) -> Vec<Segment> {
         return chapters;
     }
     let total = if duration.is_finite() && duration > 0.0 { duration } else { w.max_seconds };
+    if w.mode == Mode::Long {
+        // No AI edit: the whole video as it is.
+        return vec![Segment { start: 0.0, end: total, card: card(title.clone()), why: "The whole video (no AI edit)".into(), ..Default::default() }];
+    }
     let n = if w.mode == Mode::Single { 1 } else { ((total / w.max_seconds).floor() as usize).clamp(1, w.max_reels) };
     (0..n)
         .map(|i| {

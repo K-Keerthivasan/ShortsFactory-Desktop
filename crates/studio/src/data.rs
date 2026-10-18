@@ -997,7 +997,7 @@ pub fn script_json(reel: &ReelInfo, clip: Option<Value>, duration: f64) -> Value
     let layout = filmcraft_reel::find(&reel.template).map(|t| t.id).map(Value::from).unwrap_or(Value::Null);
     let badge = card.badge.trim();
     json!({
-        "contentKind": "REEL",
+        "contentKind": if reel.format == "long" { "VIDEO" } else { "REEL" },
         "card": {"title": title, "caption": cap(&card.caption, 200), "attribution": cap(&card.attribution, 160)},
         "clip": clip,
         "layout": layout,

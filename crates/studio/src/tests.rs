@@ -659,3 +659,33 @@ fn the_hook_edit_leads_and_stays_inside_the_part() {
     assert!(f.contains("[0:v]trim=start=1.000:end=2.000") && f.ends_with("concat=n=2:v=1:a=1[v][a]"), "{f}");
     assert!(join_filter(&[Piece { start: 1.0, end: 2.0 }], false).ends_with("concat=n=1:v=1:a=0[v]"));
 }
+
+#[test]
+fn the_thumbnail_moment_prefers_a_sharp_colourful_well_exposed_frame() {
+    use crate::thumbnails::{frame_score, pick, wrap};
+    let n = 128 * 128;
+    // flat grey: no edges, no colour
+    let flat = vec![128u8; n * 3];
+    // a dark frame with detail
+    let dark: Vec<u8> = (0..n * 3).map(|i| if (i / 3) % 2 == 0 { 8 } else { 2 }).collect();
+    // a colourful checkerboard at mid exposure
+    let busy: Vec<u8> = (0..n).flat_map(|i| if (i % 128 + i / 128) % 2 == 0 { [220u8, 60, 40] } else { [40u8, 90, 210] }).collect();
+    let scores = vec![(1.0, frame_score(&flat)), (2.0, frame_score(&dark)), (3.0, frame_score(&busy))];
+    assert_eq!(pick(&scores), Some(3.0));
+    assert!(frame_score(&busy).0 > frame_score(&flat).0);
+    assert_eq!(pick(&[]), None);
+    assert_eq!(wrap("Super Mario 64 falls in under seven minutes", 16), vec!["Super Mario 64", "falls in under", "seven minutes"]);
+    assert_eq!(wrap("one two three four five six seven eight nine ten", 8).len(), 3);
+}
+
+#[test]
+fn a_long_video_is_a_video_not_a_short() {
+    use crate::autopilot::{Mode, Piece, Segment, Wants, clean};
+    let w = Wants { mode: Mode::Long, max_seconds: 600.0, min_seconds: 10.0, ..Default::default() };
+    // the part spans the whole edit; the hook may be 15 s
+    let seg = Segment { start: 0.0, end: 1800.0, pieces: vec![Piece { start: 900.0, end: 930.0 }, Piece { start: 20.0, end: 400.0 }, Piece { start: 500.0, end: 900.0 }], ..Default::default() };
+    let out = clean(vec![seg], 2000.0, &w);
+    assert_eq!((out[0].start, out[0].end), (0.0, 1800.0));
+    let p: Vec<(f64, f64)> = out[0].pieces.iter().map(|p| (p.start, p.end)).collect();
+    assert_eq!(p, vec![(900.0, 915.0), (20.0, 400.0), (500.0, 720.0)], "hook 15 s, then 600 s in all");
+}

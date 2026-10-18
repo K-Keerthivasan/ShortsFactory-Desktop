@@ -209,6 +209,8 @@ pub(crate) fn schedule_with_key(
             "title": name.unwrap_or_else(|| format!("Render {render}")), "caption": caption.chars().take(2200).collect::<String>(),
             "filename": filename, "mimeType": "video/mp4", "fileSize": size,
             "scheduledFor": scheduled_for_iso, "timezone": local_timezone(), "publishNow": publish_now,
+            // The cover: the thumbnail's moment.
+            "thumbOffsetMs": crate::thumbnails::ensure(studio, render).ok().map(|c| (c.at * 1000.0).round() as u64),
         }),
     )?;
     let post = reserved.get("post").cloned().unwrap_or(Value::Null);
@@ -242,8 +244,12 @@ pub(crate) fn project_url(studio: &Studio) -> Result<String> {
 }
 
 pub(crate) fn upload(url: &str, file: &Path, size: u64) -> Result<()> {
+    upload_as(url, file, size, "video/mp4")
+}
+
+pub(crate) fn upload_as(url: &str, file: &Path, size: u64, content_type: &str) -> Result<()> {
     let f = std::fs::File::open(file)?;
-    match agent(1800).put(url).set("Content-Type", "video/mp4").set("Content-Length", &size.to_string()).send(f) {
+    match agent(1800).put(url).set("Content-Type", content_type).set("Content-Length", &size.to_string()).send(f) {
         Ok(_) => Ok(()),
         Err(ureq::Error::Status(code, _)) => err(format!("video upload not confirmed ({code}); retry the same schedule")),
         Err(e) => err(format!("video upload failed ({e}); retry the same schedule")),

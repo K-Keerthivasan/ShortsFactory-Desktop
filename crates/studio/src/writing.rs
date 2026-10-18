@@ -152,7 +152,9 @@ impl Studio {
     pub fn youtube_description(&self, render: i64) -> Result<String> {
         let (channel, f) = self.fields_for(render)?;
         let mut d = fill(&self.writing(channel).youtube, &f);
-        if !d.to_lowercase().contains("#shorts") {
+        if crate::long_video(self, render) {
+            d = d.replace("#Shorts", "").replace("#shorts", "").trim_end().to_string();
+        } else if !d.to_lowercase().contains("#shorts") {
             d = format!("{}\n\n#Shorts", d.trim_end());
         }
         Ok(d.chars().take(5000).collect())

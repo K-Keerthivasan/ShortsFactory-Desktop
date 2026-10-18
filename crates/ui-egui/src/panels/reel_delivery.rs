@@ -100,6 +100,72 @@ pub(super) fn preview_in(
     }
 }
 
+/// A render's thumbnails: the 16:9 and 9:16 ones side by side, made at the moment shown in the
+/// preview or the best moment, with an optional headline. Publishing uploads them.
+fn thumbnail_section(app: &mut FilmcraftApp, ui: &mut egui::Ui, render: i64, studio: &filmcraft_studio::Studio) {
+    use filmcraft_studio::thumbnails::{self, Size};
+    let t = app.tokens;
+    let covers = thumbnails::covers(studio, render);
+    egui::CollapsingHeader::new("Thumbnail").id_salt(("thumbnail", render)).default_open(true).show(ui, |ui| {
+        match &covers {
+            Some(c) => {
+                let h = 120.0;
+                ui.horizontal(|ui| {
+                    for (size, w) in [(Size::Landscape, h * 16.0 / 9.0), (Size::Vertical, h * 9.0 / 16.0), (Size::Portrait, h * 0.8), (Size::Square, h)] {
+                        let (rect, resp) = ui.allocate_exact_size(vec2(w, h), Sense::click());
+                        preview(app, ui, rect, c.file(size), 0.0, true);
+                        if resp.on_hover_text(size.label()).clicked()
+                            && let Some(f) = c.file(size)
+                            && let Err(e) = super::super::menu_dialogs::open_path(app, ui.ctx(), &f.to_string_lossy(), false)
+                        {
+                            app.ui.status = e;
+                        }
+                    }
+                });
+                ui.label(
+                    RichText::new(format!("From {:.1} s{} · YouTube gets the image, Instagram this moment as its cover", c.at, if c.headline.is_empty() { String::new() } else { format!(" · “{}”", c.headline) }))
+                        .small()
+                        .color(t.text_dim),
+                );
+            }
+            None => {
+                ui.label(RichText::new("No thumbnails yet: they are made when the video reaches the library, or here.").small().color(t.text_dim));
+            }
+        }
+        let busy = rt().tasks.iter().any(|(l, _)| l == "Thumbnails");
+        let draft_id = egui::Id::new(("thumb-headline", render));
+        let mut headline: String = ui.data_mut(|d| d.get_temp(draft_id)).unwrap_or_else(|| covers.as_ref().map(|c| c.headline.clone()).unwrap_or_default());
+        ui.add(egui::TextEdit::singleline(&mut headline).hint_text("Headline on the thumbnail (optional; Reels already show theirs)").desired_width(f32::INFINITY));
+        ui.data_mut(|d| d.insert_temp(draft_id, headline.clone()));
+        let at = app.ui.reel.library_preview_time;
+        let mut run: Option<Option<f64>> = None;
+        ui.horizontal_wrapped(|ui| {
+            let here = ui.add_enabled(!busy, egui::Button::new(format!("Use this moment ({at:.1} s)")));
+            app.auto.add_response("reel.library.thumbnail.here", &here, "Use the preview's moment as the thumbnail");
+            if here.on_hover_text("Scrub the preview above to the frame you want").clicked() {
+                run = Some(Some(at));
+            }
+            let best = ui.add_enabled(!busy, egui::Button::new(if busy { "Making…" } else { "Best moment" }));
+            app.auto.add_response("reel.library.thumbnail.best", &best, "Pick the best moment for the thumbnail");
+            if best.on_hover_text("The app picks the sharpest, most colourful, well-exposed frame").clicked() {
+                run = Some(None);
+            }
+        });
+        if let Some(at) = run {
+            let st = studio.clone();
+            let old: Vec<std::path::PathBuf> = covers.as_ref().map(|c| c.files.iter().map(|(_, f)| f.clone()).collect()).unwrap_or_default();
+            let mut r = rt();
+            for f in &old {
+                r.previews.remove(f);
+            }
+            spawn(&mut r, "Thumbnails", move || match thumbnails::make_for_render(&st, render, at, &headline) {
+                Ok(c) => Done::Thumbnails(c.files.iter().map(|(_, f)| f.clone()).collect(), Ok(format!("Thumbnails made from {:.1} s", c.at))),
+                Err(e) => Done::Thumbnails(old, Err(e.to_string())),
+            });
+        }
+    });
+}
+
 fn columns(rect: Rect) -> (Rect, Rect) {
     let width = (rect.width() * 0.38).clamp(240.0, 460.0).min((rect.width() - 140.0).max(120.0));
     (Rect::from_min_max(rect.min, pos2(rect.min.x + width, rect.max.y)), Rect::from_min_max(pos2(rect.min.x + width + 8.0, rect.min.y), rect.max))
@@ -161,6 +227,9 @@ pub(super) fn library_page(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect
             }
             ui.label(format!("{} · {}", post.kind.to_lowercase(), post.status.to_lowercase()));
         });
+        if let Some(render) = post.render.as_ref().filter(|_| path.is_some()) {
+            thumbnail_section(app, ui, render.id, &studio);
+        }
         if let Some(channel) = channel {
             library_actions(app, ui, &post, channel, &studio);
             if !app.ui.reel.show_archived {

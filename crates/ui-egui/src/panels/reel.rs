@@ -238,6 +238,8 @@ enum Done {
     CloudQueued(u64, Result<bool, String>, bool),
     Updates(Result<filmcraft_studio::notifications::Updates, String>),
     Preview(std::path::PathBuf, Result<Box<delivery::Preview>, String>),
+    /// New thumbnails (their files, to reload) or why they could not be made.
+    Thumbnails(Vec<std::path::PathBuf>, Result<String, String>),
     CloudAccounts(Result<Vec<serde_json::Value>, String>),
     CloudPosts(Result<Vec<serde_json::Value>, String>),
     Card(Result<Box<Card>, String>, Box<CardTarget>),
@@ -668,6 +670,15 @@ pub fn poll(app: &mut FilmcraftApp, now: f64) {
                     !failed,
                 );
             }
+            Done::Thumbnails(files, result) => {
+                for f in &files {
+                    r.previews.remove(f);
+                }
+                match result {
+                    Ok(m) => log(&mut r, m),
+                    Err(e) => notify(&mut r, format!("Thumbnails: {e}"), false),
+                }
+            }
             Done::Message(m) => {
                 if m.starts_with("Cloud") {
                     r.last_updates = None;
@@ -710,16 +721,22 @@ pub fn poll(app: &mut FilmcraftApp, now: f64) {
                         log(&mut r, "Export finished; sending to the library…");
                         spawn(&mut r, "Send to library", move || {
                             let f = pending.footage.as_ref().map(|(p, a, b)| (p.as_path(), *a, *b));
+                            let sent = s.send_to_library(
+                                &pending.info,
+                                &pending.path,
+                                thumb.is_file().then_some(thumb.as_path()),
+                                f,
+                                pending.duration,
+                                pending.approve,
+                            );
+                            // Thumbnails for every platform, from the render's best moment.
+                            if let Ok((_, render)) = &sent
+                                && let Err(e) = filmcraft_studio::thumbnails::ensure(&s, *render)
+                            {
+                                log::warn!("thumbnails for render {render}: {e}");
+                            }
                             Done::Sent(
-                                s.send_to_library(
-                                    &pending.info,
-                                    &pending.path,
-                                    thumb.is_file().then_some(thumb.as_path()),
-                                    f,
-                                    pending.duration,
-                                    pending.approve,
-                                )
-                                .map_err(|e| e.to_string()),
+                                sent.map_err(|e| e.to_string()),
                                 pending.sequence,
                                 pending.project,
                                 pending.queue,

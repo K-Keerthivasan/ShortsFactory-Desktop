@@ -117,6 +117,25 @@ preview guide area. An empty supporting line adds no reserved space.
 | Reopen for editing | Built for new native exports, which save an adjacent `.fcproj`; older renders without that snapshot cannot reopen |
 | Published page | Partial — publication status shown per post |
 
+## 8b. Thumbnails for every platform
+
+Every video that reaches the library gets thumbnails from its best moment: the app samples
+frames across it (skipping the opening and the end card), scores each for sharpness, colour,
+contrast and exposure, and enhances the winner (contrast, colour, sharpening) into four sizes:
+1280×720 (YouTube, link previews), 1080×1920 (Shorts, Reels, TikTok, Stories), 1080×1350 (feed)
+and 1080×1080 (square), each filled with a blurred copy of the frame where its shape differs.
+Long videos get their headline set on them in bold type. They are saved beside the video
+(`thumbnails/cover-<render>-<size>.jpg`).
+
+Library ▸ a post ▸ **Thumbnail**: the four sizes; scrub the preview and **Use this moment**, or
+**Best moment**, with an optional headline. Publishing uses them: **YouTube** gets the image
+(`thumbnails.set`, the 9:16 one for Shorts, 16:9 for long videos; a channel must be verified for
+custom thumbnails, and a failure never fails the post), **Instagram** the same moment as the
+Reel's cover (`thumb_offset`; the Graph API takes a frame of the video, not an image). Cloud
+schedules do the same: cloud posts carry the cover moment and cloud YouTube Shorts their
+image, which the worker sets after the upload. MCP: `studio.thumbnails`, and
+`studio.youtubeQueue` `"thumbnails"` sends them for Shorts already in the cloud.
+
 ## 9. Post directly to Instagram
 
 | Feature | Status |
@@ -216,6 +235,7 @@ Built as the **AI** panel (beside Reel Studio), with approval before anything is
 | Paste up to ten video links; yt-dlp downloads each once | Built |
 | The AI (Hermes, Codex or Ollama) reads the video's title, description, chapters and captions and picks one part, several, or decides itself, with a card per part | Built — falls back to the chapters or even parts when no AI answers |
 | **Hook first, filler cut** (on by default): the AI also edits each part, opening with its strongest 1–5 seconds as a teaser and leaving out dead air, filler, false starts, repeats, intros and outros; FFmpeg joins the ranges into one clip beside the download (`<name> - edit <start>-<end>.mp4`) and the Reel is built from it | Built — needs the video's captions; the review shows the hook and the seconds cut, untick it (or change the times) for the plain range |
+| **One long video (16:9)**: the AI edits the whole video into a tighter long video (at most the minutes chosen), opening with its most gripping 5–15 seconds and leaving out filler, tangents, sponsor reads and long intros/outros; **Make the long video** adds it to the library as a long video (kind VIDEO) for approval, with headline thumbnails; **Open the edit in the editor** puts it in a new 16:9 sequence to polish by hand | Built — YouTube posts it as a normal video (no #Shorts) with its 16:9 thumbnail |
 | Review: tick parts, adjust their times and headlines | Built |
 | One Reel or Post per part from the same file (`reel.new` with `sourceIn`/`sourceOut`), queued to render into the library | Built |
 | Approve, then publish now or schedule, from the same panel | Built |

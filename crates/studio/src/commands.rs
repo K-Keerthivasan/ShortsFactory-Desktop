@@ -317,7 +317,7 @@ pub fn register() {
         spec(
             "studio.youtubeQueue",
             "YouTube Upload Queue",
-            r#"{"action":"status"|"run"|"add"|"cloud"|"toCloud"|"sync","channel":n?,"account":n?,"items":[{"render":n,"at":"ISO UTC"}]?} — books Shorts at times, then uploads them ahead within Google's daily quota; "cloud" books items in the cloud instead, "toCloud" moves the waiting queue there, "sync" records cloud uploads"#,
+            r#"{"action":"status"|"run"|"add"|"cloud"|"toCloud"|"sync"|"thumbnails","channel":n?,"account":n?,"items":[{"render":n,"at":"ISO UTC"}]?} — books Shorts at times, then uploads them ahead within Google's daily quota; "cloud" books items in the cloud instead, "toCloud" moves the waiting queue there, "sync" records cloud uploads"#,
             true,
             |_, p| {
                 let s = studio()?;
@@ -351,6 +351,7 @@ pub fn register() {
                         return Ok(json!({"booked": out}));
                     }
                     "toCloud" => return Ok(json!({"log": crate::cloud_youtube::move_queue(&s).map_err(err)?})),
+                    "thumbnails" => return Ok(json!({"log": crate::cloud_youtube::send_thumbnails(&s).map_err(err)?})),
                     "sync" => return Ok(json!({"changed": crate::cloud_youtube::sync(&s).map_err(err)?, "waiting": crate::cloud_youtube::waiting(&s).map_err(err)?})),
                     other => return Err(bad(format!("unknown action `{other}`"))),
                 }
@@ -378,6 +379,23 @@ pub fn register() {
             Ok(json!({"prompt": crate::writing::prompt(&s, int(p, "channel")?, p.get("notes").and_then(Value::as_str).unwrap_or(""))
                 .map_err(err)?}))
         }),
+        spec(
+            "studio.thumbnails",
+            "Thumbnails",
+            r#"{"render":n,"make":bool?,"at":f64? (seconds; default the best moment),"headline":str?} — the render's thumbnails for every platform (16:9, 9:16, 4:5, 1:1), made at its best moment the first time; "make" remakes them"#,
+            true,
+            |_, p| {
+                let s = studio()?;
+                let render = int(p, "render")?;
+                let c = if p.get("make").and_then(Value::as_bool) == Some(true) || p.get("at").is_some() || p.get("headline").is_some() {
+                    crate::thumbnails::make_for_render(&s, render, p.get("at").and_then(Value::as_f64), p.get("headline").and_then(Value::as_str).unwrap_or(""))
+                } else {
+                    crate::thumbnails::ensure(&s, render)
+                }
+                .map_err(err)?;
+                Ok(crate::thumbnails::describe(&c))
+            },
+        ),
         spec("studio.calendar", "Publishing Calendar", r#"{"channel":n?,"from":"ISO","to":"ISO"}"#, false, |_, p| {
             let channel = p.get("channel").and_then(Value::as_i64);
             to_value(studio()?.calendar(channel, text(p, "from")?, text(p, "to")?).map_err(err)?)

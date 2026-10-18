@@ -53,6 +53,8 @@ pub(super) struct Run {
     pub fallback: Option<String>,
     pub error: Option<String>,
     pub made: usize,
+    /// Asked for one long 16:9 video rather than Reels.
+    pub long: bool,
 }
 
 pub(super) type Runs = Arc<Mutex<Vec<Run>>>;
@@ -78,26 +80,45 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 .desired_rows(3)
                 .desired_width(f32::INFINITY),
         );
+        let dim = app.tokens.text_dim;
         let w = &mut app.ui.reel.ai.wants;
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new("Make").small());
-            for (m, l) in [(Mode::Auto, "AI decides"), (Mode::Single, "One Reel"), (Mode::Multiple, "Several Reels")] {
-                ui.selectable_value(&mut w.mode, m, l);
+            for (m, l) in [(Mode::Auto, "AI decides"), (Mode::Single, "One Reel"), (Mode::Multiple, "Several Reels"), (Mode::Long, "One long video (16:9)")] {
+                if ui.selectable_value(&mut w.mode, m, l).changed() {
+                    // A long video's length is minutes; a Reel's seconds.
+                    w.max_seconds = if m == Mode::Long { w.max_seconds.max(600.0) } else { w.max_seconds.min(180.0) };
+                }
             }
-            if w.mode != Mode::Single {
+            if !matches!(w.mode, Mode::Single | Mode::Long) {
                 ui.label(RichText::new("up to").small());
                 ui.add(egui::DragValue::new(&mut w.max_reels).range(1..=20));
             }
         });
-        ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new("Each").small());
-            ui.add(egui::DragValue::new(&mut w.min_seconds).range(3.0..=600.0).suffix(" s"));
-            ui.label(RichText::new("to").small());
-            ui.add(egui::DragValue::new(&mut w.max_seconds).range(3.0..=600.0).suffix(" s"));
-            if w.min_seconds > w.max_seconds {
-                w.min_seconds = w.max_seconds;
-            }
-        });
+        if w.mode == Mode::Long {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new("At most").small());
+                let mut minutes = (w.max_seconds / 60.0).round();
+                if ui.add(egui::DragValue::new(&mut minutes).range(1.0..=240.0).suffix(" min")).changed() {
+                    w.max_seconds = minutes * 60.0;
+                }
+                ui.label(
+                    RichText::new("The AI edits the whole video tighter, opening with its best moment; it goes to the library as a long video with thumbnails.")
+                        .small()
+                        .color(dim),
+                );
+            });
+        } else {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new("Each").small());
+                ui.add(egui::DragValue::new(&mut w.min_seconds).range(3.0..=600.0).suffix(" s"));
+                ui.label(RichText::new("to").small());
+                ui.add(egui::DragValue::new(&mut w.max_seconds).range(3.0..=600.0).suffix(" s"));
+                if w.min_seconds > w.max_seconds {
+                    w.min_seconds = w.max_seconds;
+                }
+            });
+        }
         ui.add(egui::TextEdit::singleline(&mut w.notes).hint_text("Direction for the AI (optional): what to look for").desired_width(f32::INFINITY));
         ui.checkbox(&mut w.hook, "Hook first, filler cut")
             .on_hover_text("The AI opens each Reel with its strongest moment and cuts dead air, filler and repeats (needs the video's captions and FFmpeg)");
@@ -202,7 +223,7 @@ fn find(
             .map(|url| {
                 let id = super::next_id();
                 let import = Import { url: url.clone(), options: options.clone(), no_draft: true, save_to: save_to.clone(), ..Default::default() };
-                l.insert(0, Run { id, channel, import, stage: "Waiting".into(), ..Default::default() });
+                l.insert(0, Run { id, channel, import, stage: "Waiting".into(), long: wants.mode == Mode::Long, ..Default::default() });
                 id
             })
             .collect()
@@ -330,7 +351,9 @@ fn review(app: &mut FilmcraftApp, ui: &mut egui::Ui, ctx: &super::Ctx, runs: &Ru
             }
         }
         let ticked = run.segments.iter().filter(|(s, on)| *on && s.end > s.start).count();
-        if run.import.file.is_some() && !run.segments.is_empty() {
+        if run.long && run.import.file.is_some() && !run.segments.is_empty() {
+            long_actions(app, ui, &mut run);
+        } else if run.import.file.is_some() && !run.segments.is_empty() {
             ui.horizontal_wrapped(|ui| {
                 let label = format!("Make {ticked} {}{}", app.ui.reel.ai.format.label(), if ticked == 1 { "" } else { "s" });
                 let b = ui.add_enabled(ticked > 0, egui::Button::new(label));
@@ -355,6 +378,49 @@ fn review(app: &mut FilmcraftApp, ui: &mut egui::Ui, ctx: &super::Ctx, runs: &Ru
             x.segments = run.segments;
         }
         x.made = run.made;
+    }
+}
+
+/// A long video's actions: make it into the library, or open the edit in a 16:9 sequence.
+fn long_actions(app: &mut FilmcraftApp, ui: &mut egui::Ui, run: &mut Run) {
+    let Some(file) = run.import.file.clone() else { return };
+    let Some((seg, _)) = run.segments.iter().find(|(s, on)| *on && s.end > s.start).cloned() else { return };
+    let busy = rt().tasks.iter().any(|(l, _)| l == "Long video");
+    ui.horizontal_wrapped(|ui| {
+        let make = ui.add_enabled(!busy, egui::Button::new(if busy { "Making the long video…" } else { "Make the long video" }));
+        app.auto.add_response(&format!("ai.makeLong.{}", run.id), &make, "Make the long video");
+        if make.on_hover_text("Edits it, adds it to the library for approval, and makes its thumbnails").clicked() {
+            let Some(s) = super::studio(&mut rt()) else { return };
+            let (channel, title, seg) = (run.channel, seg.card.title.clone(), seg.clone());
+            run.made += 1;
+            spawn(&mut rt(), "Long video", move || match filmcraft_studio::autopilot::make_long(&s, channel, &file, &seg) {
+                Ok(render) => Done::Notice((format!("Long video “{title}” is in the library (render {render}) with its thumbnails"), true)),
+                Err(e) => Done::Notice((format!("The long video failed: {e}"), false)),
+            });
+        }
+        let open = ui.add_enabled(seg.file.as_ref().is_some_and(|f| f.is_file()), egui::Button::new("Open the edit in the editor"));
+        app.auto.add_response(&format!("ai.openLong.{}", run.id), &open, "Open the long edit in a 16:9 sequence");
+        if open.on_hover_text("A new 16:9 sequence with the edited video, to polish by hand").clicked()
+            && let Some(edit) = seg.file.clone()
+        {
+            let name: String = seg.card.title.chars().take(60).collect();
+            let result = (|| -> Result<(), String> {
+                app.session
+                    .execute("file.newSequence", json!({"name": name, "width": 1920, "height": 1080, "fps": 30, "video": 2, "audio": 2}))
+                    .map_err(|e| e.to_string())?;
+                let imported = app.session.execute("file.import", json!({"paths": [edit.to_string_lossy()]})).map_err(|e| e.to_string())?;
+                let item = imported.get("items").and_then(|v| v.as_array()).and_then(|a| a.first()).and_then(|v| v.as_u64()).ok_or("the edit could not be imported")?;
+                app.session.execute("timeline.place", json!({"item": item})).map_err(|e| e.to_string())?;
+                Ok(())
+            })();
+            app.ui.status = match result {
+                Ok(()) => "The long edit is open in a new 16:9 sequence".into(),
+                Err(e) => format!("Could not open the edit: {e}"),
+            };
+        }
+    });
+    if run.made > 0 {
+        ui.label(RichText::new("Approve it in 3 · Approve and publish; YouTube gets it as a normal video with its 16:9 thumbnail.").small().color(app.tokens.text_dim));
     }
 }
 

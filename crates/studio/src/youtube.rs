@@ -61,6 +61,50 @@ fn range_end(r: &ureq::Response) -> u64 {
 /// Uploads the Short. With `publish_at` (UTC, RFC 3339) it is uploaded Private and YouTube itself
 /// makes it Public at that time (YouTube Studio shows it as Scheduled).
 #[allow(clippy::too_many_arguments)]
+/// Sets the uploaded video's thumbnail from the render's thumbnails (16:9 for a long video, 9:16
+/// for a Short), once per publication; a failure is noted on the publication, never fails it.
+pub fn thumbnail_once(studio: &Studio, job: i64, channel: i64, secret: &Value, video: &str, render: i64) {
+    let mut state = studio.remote_state(job).unwrap_or_else(|_| json!({}));
+    if state.get("thumbnail").is_some() {
+        return;
+    }
+    let result = (|| -> std::result::Result<(), String> {
+        let covers = crate::thumbnails::ensure(studio, render).map_err(|e| e.to_string())?;
+        let size = if crate::long_video(studio, render) { crate::thumbnails::Size::Landscape } else { crate::thumbnails::Size::Vertical };
+        let image = covers.file(size).ok_or("the thumbnail file is missing")?;
+        set_thumbnail(secret, video, image)
+    })();
+    state["thumbnail"] = match &result {
+        Ok(()) => json!("set"),
+        Err(e) => json!(format!("not set: {e}")),
+    };
+    let _ = studio.checkpoint(job, channel, &state);
+}
+
+/// Uploads a JPEG as a video's thumbnail (`thumbnails.set`, 50 quota units).
+pub fn set_thumbnail(secret: &Value, video: &str, image: &Path) -> std::result::Result<(), String> {
+    if video.len() != 11 || !video.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
+        return Err("unexpected YouTube video id".into());
+    }
+    let agent = ureq::AgentBuilder::new().timeout_connect(Duration::from_secs(30)).timeout(Duration::from_secs(120)).build();
+    let access = token(&agent, secret).map_err(|e| match e {
+        PublishError::Retry(m) | PublishError::Reconcile(m) => m,
+    })?;
+    let bytes = std::fs::read(image).map_err(|e| format!("cannot read the thumbnail: {e}"))?;
+    match agent
+        .post(&format!("https://www.googleapis.com/upload/youtube/v3/thumbnails/set?videoId={video}&uploadType=media"))
+        .set("Authorization", &format!("Bearer {access}"))
+        .set("Content-Type", "image/jpeg")
+        .send_bytes(&bytes)
+    {
+        Ok(_) => Ok(()),
+        Err(ureq::Error::Status(403, _)) => Err("YouTube allows custom thumbnails only on verified channels (youtube.com/verify)".into()),
+        Err(e) => Err(match api_error("YouTube thumbnail upload", e) {
+            PublishError::Retry(m) | PublishError::Reconcile(m) => m,
+        }),
+    }
+}
+
 pub fn publish(
     studio: &Studio,
     job: i64,

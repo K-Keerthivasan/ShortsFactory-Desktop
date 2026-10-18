@@ -129,6 +129,9 @@ pub fn schedule(studio: &Studio, channel: i64, render: i64, account: i64, at_iso
     if !["scheduled", "processing", "uploaded"].contains(&field(&short, "status")) {
         return err(format!("the cloud did not book it ({})", field(&short, "status")));
     }
+    if let Err(e) = send_thumbnail(studio, render, account, &short) {
+        log::warn!("thumbnail for the cloud Short of render {render}: {e}");
+    }
     let state = json!({"cloudYoutube": field(&short, "id")}).to_string();
     let now = clock::now_iso();
     studio.connect()?.execute(
@@ -138,6 +141,70 @@ pub fn schedule(studio: &Studio, channel: i64, render: i64, account: i64, at_iso
         params![now, channel, render, account, CLOUD, when, state],
     )?;
     Ok(short)
+}
+
+/// Gives a cloud Short its thumbnail: uploaded with it while it waits (the worker sets it after
+/// the video), or set from this PC with the channel's own key once it is on YouTube.
+pub fn send_thumbnail(studio: &Studio, render: i64, account: i64, short: &Value) -> Result<()> {
+    let covers = crate::thumbnails::ensure(studio, render)?;
+    let size = if crate::long_video(studio, render) { crate::thumbnails::Size::Landscape } else { crate::thumbnails::Size::Vertical };
+    let image = covers.file(size).ok_or_else(|| StudioError::Other("the thumbnail file is missing".into()))?.to_path_buf();
+    match field(short, "status") {
+        "uploaded" => {
+            let (_, a) = studio.account(account)?;
+            let secret = studio.secret(&a.credentials_reference)?;
+            crate::youtube::set_thumbnail(&secret, field(short, "youtube_video_id"), &image).map_err(StudioError::Other)
+        }
+        "scheduled" | "uploading" => {
+            let bytes = std::fs::metadata(&image)?.len();
+            let r = cloud::call(studio, "youtubeThumbnail", json!({"id": field(short, "id"), "fileSize": bytes}))?;
+            let url = r.get("uploadUrl").and_then(Value::as_str).unwrap_or_default();
+            let path = r.get("path").and_then(Value::as_str).unwrap_or_default();
+            let s = r.get("short").unwrap_or(&Value::Null);
+            let project = cloud::project_url(studio)?;
+            if !path.starts_with("reels/yt/thumbs/") || !cloud::valid_upload_target(url, &project, field(s, "storage_provider"), field(s, "storage_bucket"), path) {
+                return err("unexpected cloud thumbnail destination");
+            }
+            cloud::upload_as(url, &image, bytes, "image/jpeg")
+        }
+        other => err(format!("the Short is {other}")),
+    }
+}
+
+/// Thumbnails for every Short this PC booked in the cloud (made first where missing). Blocking.
+pub fn send_thumbnails(studio: &Studio) -> Result<Vec<String>> {
+    let jobs: Vec<(i64, i64, String)> = {
+        let c = studio.connect()?;
+        let mut q = c.prepare(
+            "SELECT render_id, social_account_id, COALESCE(remote_state_json, '{}') FROM publishing_jobs WHERE platform = 'YOUTUBE' AND status IN (?1, 'PUBLISHED') AND remote_state_json LIKE '%cloudYoutube%'",
+        )?;
+        q.query_map([CLOUD], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect::<std::result::Result<_, _>>()?
+    };
+    let mut shorts: HashMap<String, Value> = HashMap::new();
+    let mut offset = 0;
+    for _ in 0..10 {
+        let page = cloud::call(studio, "listYoutube", json!({"offset": offset}))?;
+        for s in page.get("items").and_then(Value::as_array).into_iter().flatten() {
+            shorts.insert(field(s, "id").to_string(), s.clone());
+        }
+        match page.get("nextOffset").and_then(Value::as_i64) {
+            Some(n) => offset = n,
+            None => break,
+        }
+    }
+    let mut log = Vec::new();
+    for (render, account, state) in jobs {
+        let id = serde_json::from_str::<Value>(&state).ok().map(|v| field(&v, "cloudYoutube").to_string()).unwrap_or_default();
+        let Some(short) = shorts.get(&id) else { continue };
+        if field(short, "thumbnail_status") == "set" || short.get("thumbnail_path").is_some_and(|p| !p.is_null()) && field(short, "status") != "uploaded" {
+            continue;
+        }
+        log.push(match send_thumbnail(studio, render, account, short) {
+            Ok(()) => format!("render {render}: thumbnail sent"),
+            Err(e) => format!("render {render}: no thumbnail ({e})"),
+        });
+    }
+    Ok(log)
 }
 
 /// A YouTube-only cloud upload of the render's video.

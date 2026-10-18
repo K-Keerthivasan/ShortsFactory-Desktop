@@ -135,7 +135,8 @@ pub(crate) fn can_replace_upload(studio: &Studio, job: i64, account: &str, token
 }
 
 /// Publishes `file` as a Reel on the Instagram account, resuming from `job`'s checkpoints.
-pub fn publish(studio: &Studio, job: i64, channel: i64, account_id: &str, token: &str, file: &Path, caption: &str) -> Published {
+#[allow(clippy::too_many_arguments)]
+pub fn publish(studio: &Studio, job: i64, channel: i64, account_id: &str, token: &str, file: &Path, caption: &str, cover_ms: Option<u64>) -> Published {
     let meta = Meta {
         version: graph(studio)?,
         account: account_id.to_string(),
@@ -173,7 +174,12 @@ pub fn publish(studio: &Studio, job: i64, channel: i64, account_id: &str, token:
         let mut s = state.clone();
         s["phase"] = json!("INITIALIZING");
         checkpoint(&s)?;
-        let created = meta.request(&format!("{}/media", meta.account), &[("media_type", "REELS"), ("upload_type", "resumable"), ("caption", caption)], true)?;
+        let offset = cover_ms.map(|ms| ms.to_string());
+        let mut fields = vec![("media_type", "REELS"), ("upload_type", "resumable"), ("caption", caption)];
+        if let Some(ms) = offset.as_deref() {
+            fields.push(("thumb_offset", ms));
+        }
+        let created = meta.request(&format!("{}/media", meta.account), &fields, true)?;
         let id = created.get("id").and_then(Value::as_str).ok_or_else(|| PublishError::Retry("Meta did not return a container id".into()))?.to_string();
         if !id.bytes().all(|b| b.is_ascii_digit()) {
             return Err(PublishError::Retry("unexpected Instagram container id".into()));

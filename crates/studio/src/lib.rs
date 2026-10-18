@@ -23,6 +23,7 @@ pub mod notifications;
 pub mod settings;
 pub mod workflow;
 pub mod cloud_youtube;
+pub mod thumbnails;
 pub mod writing;
 pub mod youtube;
 pub mod youtube_connect;
@@ -194,6 +195,16 @@ pub(crate) fn short_text(studio: &Studio, render: i64) -> Result<(String, String
     Ok((clean(&title).chars().take(100).collect(), description, tags))
 }
 
+/// Is the render a long video (a library post of kind VIDEO, 16:9) rather than a Reel?
+pub fn long_video(studio: &Studio, render: i64) -> bool {
+    studio
+        .connect()
+        .ok()
+        .and_then(|c| c.query_row("SELECT s.json FROM renders r JOIN scripts s ON s.id = r.script_id WHERE r.id = ?1", [render], |r| r.get::<_, String>(0)).ok())
+        .and_then(|j| serde_json::from_str::<serde_json::Value>(&j).ok())
+        .is_some_and(|v| v.get("contentKind").and_then(serde_json::Value::as_str) == Some("VIDEO"))
+}
+
 pub(crate) fn run_job(studio: &Studio, job: i64, channel: i64, render: i64, account: i64) -> Result<Option<String>> {
     let outcome = (|| -> instagram::Published {
         let (_, a) = studio.account(account)?;
@@ -214,7 +225,9 @@ pub(crate) fn run_job(studio: &Studio, job: i64, channel: i64, render: i64, acco
                 if cloud_pending || (cloud::configured(studio) && instagram::can_replace_upload(studio, job, &a.external_id, token)?) {
                     return instagram_cloud::publish(studio, job, channel, render, &a.external_id, &caption);
                 }
-                let result = instagram::publish(studio, job, channel, &a.external_id, token, &file, &caption);
+                // The cover is the thumbnail's moment (Instagram takes a frame of the video).
+                let cover = thumbnails::ensure(studio, render).ok().map(|c| (c.at * 1000.0).round() as u64);
+                let result = instagram::publish(studio, job, channel, &a.external_id, token, &file, &caption, cover);
                 if matches!(result, Err(instagram::PublishError::Retry(_)))
                     && cloud::configured(studio)
                     && instagram::can_replace_upload(studio, job, &a.external_id, token).unwrap_or(false)
@@ -235,7 +248,11 @@ pub(crate) fn run_job(studio: &Studio, job: i64, channel: i64, render: i64, acco
                     .filter(|t| *t > clock::now_ms() + 60_000)
                     .and_then(chrono::DateTime::from_timestamp_millis)
                     .map(|d| d.to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
-                youtube::publish(studio, job, channel, &secret, &file, &title, &description, &tags, publish_at.as_deref())
+                let published = youtube::publish(studio, job, channel, &secret, &file, &title, &description, &tags, publish_at.as_deref());
+                if let Ok((id, _)) = &published {
+                    youtube::thumbnail_once(studio, job, channel, &secret, id, render);
+                }
+                published
             }
             other => Err(instagram::PublishError::Retry(format!("{other} publishing is not supported"))),
         }
