@@ -352,6 +352,8 @@ pub fn register() {
                     }
                     "toCloud" => return Ok(json!({"log": crate::cloud_youtube::move_queue(&s).map_err(err)?})),
                     "thumbnails" => return Ok(json!({"log": crate::cloud_youtube::send_thumbnails(&s).map_err(err)?})),
+                    "rebalance" => return Ok(json!({"log": crate::cloud_youtube::rebalance(&s).map_err(err)?})),
+                    "cloudList" => return Ok(json!({"shorts": crate::cloud_youtube::list(&s).map_err(err)?})),
                     "sync" => return Ok(json!({"changed": crate::cloud_youtube::sync(&s).map_err(err)?, "waiting": crate::cloud_youtube::waiting(&s).map_err(err)?})),
                     other => return Err(bad(format!("unknown action `{other}`"))),
                 }

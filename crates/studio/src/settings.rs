@@ -289,6 +289,8 @@ pub const EDITABLE_ENV: &[&str] = &[
     "META_APP_ID",
     "YOUTUBE_CLIENT_ID",
     "YOUTUBE_CLIENT_SECRET",
+    "YOUTUBE_PER_DAY",
+    "YOUTUBE_SLOTS",
     "META_APP_SECRET",
 ];
 

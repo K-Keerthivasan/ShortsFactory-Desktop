@@ -53,7 +53,11 @@ pub fn connect(studio: &Studio, local_account: i64) -> Result<String> {
     let saved = cloud::call(
         studio,
         "connectYoutube",
-        json!({"clientId": get("clientId"), "clientSecret": get("clientSecret"), "refreshToken": get("refreshToken"), "privacy": privacy}),
+        json!({
+            "clientId": get("clientId"), "clientSecret": get("clientSecret"), "refreshToken": get("refreshToken"), "privacy": privacy,
+            // At most this many Shorts publish on a day of this PC's time zone.
+            "dailyLimit": per_day(studio), "timezone": cloud::local_timezone(),
+        }),
     )?;
     if field(&saved, "channel_id") != a.external_id {
         return err(format!("the key posts to “{}”, not this account's channel", field(&saved, "channel_name")));
@@ -235,6 +239,133 @@ fn upload(studio: &Studio, channel: i64, render: i64, mut body: Value) -> Result
         return cloud::call(studio, "finalizeYoutubeUpload", json!({"id": id}));
     }
     Ok(short)
+}
+
+/// Shorts a channel publishes per day (`YOUTUBE_PER_DAY`, default 3).
+pub fn per_day(studio: &Studio) -> usize {
+    studio.var("YOUTUBE_PER_DAY").and_then(|v| v.parse().ok()).filter(|n| (1..=20).contains(n)).unwrap_or(3)
+}
+
+/// The day's publishing times (`YOUTUBE_SLOTS`, local `HH:MM` list, default 10:00, 15:00, 20:00).
+fn slots(studio: &Studio) -> Vec<chrono::NaiveTime> {
+    let raw = studio.var("YOUTUBE_SLOTS").unwrap_or("10:00,15:00,20:00").to_string();
+    let mut v: Vec<chrono::NaiveTime> = raw.split(',').filter_map(|s| chrono::NaiveTime::parse_from_str(s.trim(), "%H:%M").ok()).collect();
+    v.sort();
+    if v.is_empty() {
+        v = ["10:00", "15:00", "20:00"].iter().filter_map(|s| chrono::NaiveTime::parse_from_str(s, "%H:%M").ok()).collect();
+    }
+    v
+}
+
+/// Keeps every channel to its Shorts per day: a day with more has its latest ones that are not
+/// public yet moved to the first free publishing times after it (on YouTube too, for ones
+/// already uploaded, with the channel's own key). Returns a line per move. Blocking.
+pub fn rebalance(studio: &Studio) -> Result<Vec<String>> {
+    use chrono::{Local, TimeZone};
+    let limit = per_day(studio);
+    let times = slots(studio);
+    let shorts = list(studio)?;
+    let accounts = cloud::call(studio, "youtubeAccounts", json!({}))?;
+    let now = clock::now_ms();
+    let local_day = |iso: &str| clock::parse_iso(iso).and_then(|t| Local.timestamp_millis_opt(t).single()).map(|d| d.date_naive());
+    let mut log = Vec::new();
+    for account in accounts.as_array().into_iter().flatten() {
+        let aid = field(account, "id");
+        let mut by_day: std::collections::BTreeMap<chrono::NaiveDate, Vec<Value>> = std::collections::BTreeMap::new();
+        for s in shorts.iter().filter(|s| field(s, "youtube_account_id") == aid && ["uploading", "scheduled", "processing", "uploaded"].contains(&field(s, "status"))) {
+            if let Some(d) = local_day(field(s, "scheduled_for")) {
+                by_day.entry(d).or_default().push(s.clone());
+            }
+        }
+        for list in by_day.values_mut() {
+            list.sort_by_key(|s| field(s, "scheduled_for").to_string());
+        }
+        // Too many on a day: the latest that can still move (time ahead, not mid-upload).
+        let movable = |s: &Value| {
+            clock::parse_iso(field(s, "scheduled_for")).is_some_and(|t| t > now + 30 * 60_000) && ["scheduled", "uploaded"].contains(&field(s, "status"))
+        };
+        let mut extra: Vec<Value> = Vec::new();
+        for list in by_day.values_mut() {
+            while list.len() > limit {
+                let Some(i) = list.iter().rposition(|s| movable(s)) else { break };
+                extra.push(list.remove(i));
+            }
+        }
+        if extra.is_empty() {
+            continue;
+        }
+        extra.sort_by_key(|s| field(s, "scheduled_for").to_string());
+        let local = studio
+            .channels()?
+            .iter()
+            .flat_map(|c| studio.accounts(c.id).unwrap_or_default())
+            .find(|a| a.platform == "YOUTUBE" && a.external_id == field(account, "channel_id"));
+        let mut day = by_day.keys().next().copied().unwrap_or_else(|| Local::now().date_naive());
+        for s in extra {
+            // The first free publishing time on or after the Short's own day.
+            let own = local_day(field(&s, "scheduled_for")).unwrap_or(day);
+            day = day.max(own);
+            let at = loop {
+                let used: Vec<String> = by_day.get(&day).map(|l| l.iter().map(|x| field(x, "scheduled_for").to_string()).collect()).unwrap_or_default();
+                let free = (used.len() < limit)
+                    .then(|| {
+                        times.iter().find_map(|t| {
+                            let when = Local.from_local_datetime(&day.and_time(*t)).single()?;
+                            let iso = clock::iso(when.timestamp_millis());
+                            (when.timestamp_millis() > now + 60 * 60_000 && !used.iter().any(|u| clock::parse_iso(u) == Some(when.timestamp_millis()))).then_some(iso)
+                        })
+                    })
+                    .flatten();
+                match free {
+                    Some(iso) => break iso,
+                    None => day = day.succ_opt().unwrap_or(day),
+                }
+            };
+            let id = field(&s, "id").to_string();
+            let result = (|| -> Result<()> {
+                if field(&s, "status") == "uploaded" {
+                    let a = local.as_ref().ok_or_else(|| StudioError::Other("this PC has no key for the channel".into()))?;
+                    let secret = studio.secret(&a.credentials_reference)?;
+                    crate::youtube::set_publish_at(&secret, field(&s, "youtube_video_id"), &at).map_err(StudioError::Other)?;
+                    cloud::call(studio, "rescheduleYoutube", json!({"id": id, "scheduledFor": at, "movedOnYoutube": true}))?;
+                } else {
+                    cloud::call(studio, "rescheduleYoutube", json!({"id": id, "scheduledFor": at}))?;
+                }
+                // The calendar on this PC follows.
+                studio.connect()?.execute(
+                    "UPDATE publishing_jobs SET scheduled_at = ?1, updated_at = ?2 WHERE platform = 'YOUTUBE' AND remote_state_json LIKE ?3",
+                    params![at, clock::now_iso(), format!("%{id}%")],
+                )?;
+                Ok(())
+            })();
+            let what = field(&s, "local_content_id").to_string();
+            match result {
+                Ok(()) => {
+                    log.push(format!("{what}: moved from {} to {}", clock::local_time(field(&s, "scheduled_for")), clock::local_time(&at)));
+                    let mut moved = s.clone();
+                    moved["scheduled_for"] = json!(at);
+                    by_day.entry(day).or_default().push(moved);
+                }
+                Err(e) => log.push(format!("{what}: not moved ({e})")),
+            }
+        }
+    }
+    Ok(log)
+}
+
+/// Every cloud Short (newest time first), as the cloud lists them.
+pub fn list(studio: &Studio) -> Result<Vec<Value>> {
+    let mut out = Vec::new();
+    let mut offset = 0;
+    for _ in 0..20 {
+        let page = cloud::call(studio, "listYoutube", json!({"offset": offset}))?;
+        out.extend(page.get("items").and_then(Value::as_array).cloned().unwrap_or_default());
+        match page.get("nextOffset").and_then(Value::as_i64) {
+            Some(n) => offset = n,
+            None => break,
+        }
+    }
+    Ok(out)
 }
 
 /// How many of this PC's YouTube publications the cloud is still to upload.

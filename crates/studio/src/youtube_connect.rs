@@ -18,7 +18,8 @@ use serde_json::{Value, json};
 
 use crate::{Result, Studio, StudioError, err};
 
-const SCOPES: &str = "https://www.googleapis.com/auth/youtube.upload https://www.googleapis.com/auth/youtube.readonly";
+// Uploading, reading the channel, and moving a scheduled video's publish time (force-ssl).
+const SCOPES: &str = "https://www.googleapis.com/auth/youtube.upload https://www.googleapis.com/auth/youtube.readonly https://www.googleapis.com/auth/youtube.force-ssl";
 
 /// A sign-in waiting for Google to send the browser back.
 pub struct Pending {

@@ -3069,7 +3069,16 @@ fn write_card(app: &mut FilmcraftApp, ui: &mut egui::Ui, channel: Option<i64>, s
 fn cloud_youtube_settings(app: &mut FilmcraftApp, ui: &mut egui::Ui, s: &Studio) {
     let t = app.tokens;
     ui.label(RichText::new("YouTube in the cloud").strong());
-    env_fields(app, ui, &[("YOUTUBE_CLIENT_ID", "Google client ID", false), ("YOUTUBE_CLIENT_SECRET", "Google client secret", true)]);
+    env_fields(
+        app,
+        ui,
+        &[
+            ("YOUTUBE_CLIENT_ID", "Google client ID", false),
+            ("YOUTUBE_CLIENT_SECRET", "Google client secret", true),
+            ("YOUTUBE_PER_DAY", "Shorts per day (default 3)", false),
+            ("YOUTUBE_SLOTS", "Publishing times (default 10:00,15:00,20:00)", false),
+        ],
+    );
     ui.label(
         RichText::new(
             "The same Google Desktop-app client as Accounts & keys ▸ YouTube. Each channel's key (client ID, secret and its sign-in) goes to your own cloud backend, encrypted there, so Shorts upload with this PC off.",
@@ -3138,6 +3147,17 @@ fn cloud_youtube_settings(app: &mut FilmcraftApp, ui: &mut egui::Ui, s: &Studio)
                     Err(e) => Done::CloudYoutube(Err(format!("connecting “{name}”: {e}"))),
                 });
             }
+        }
+        let per_day = filmcraft_studio::cloud_youtube::per_day(s);
+        let even = ui.add_enabled(!busy, egui::Button::new(format!("Keep to {per_day} a day")));
+        app.auto.add_response("reel.settings.cloudYoutube.rebalance", &even, "Keep YouTube Shorts to the daily limit");
+        if even.on_hover_text("Moves Shorts beyond the daily limit (YOUTUBE_PER_DAY) to the next free publishing times (YOUTUBE_SLOTS), on YouTube too").clicked() {
+            let st = s.clone();
+            spawn(&mut rt(), "Cloud YouTube", move || match filmcraft_studio::cloud_youtube::rebalance(&st) {
+                Ok(lines) if lines.is_empty() => Done::Notice(("YouTube: every day is within the limit".into(), true)),
+                Ok(lines) => Done::Notice((format!("YouTube: {}", lines.join("; ")), !lines.iter().any(|l| l.contains("not moved")))),
+                Err(e) => Done::Notice((format!("YouTube: {e}"), false)),
+            });
         }
         if ui.add_enabled(!busy, egui::Button::new("Refresh")).clicked() {
             rt().cloud_youtube = None;

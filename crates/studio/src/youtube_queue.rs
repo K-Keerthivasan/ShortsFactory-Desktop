@@ -2,8 +2,8 @@
 //!
 //! [`add`] books Shorts for a YouTube account at given times: one `SCHEDULED` publishing job each,
 //! without touching the post's library status (a post already live on Instagram stays as it is).
-//! [`run`] uploads the jobs whose time is within the next day and a half, oldest time first, as
-//! many as Google's daily quota allows (about six uploads a day): a job whose time is still ahead
+//! [`run`] uploads the jobs whose time is within the next day, oldest time first, at most three
+//! in any 24 hours (the channel's pace, inside Google's daily quota): a job whose time is still ahead
 //! is uploaded Private with YouTube's own publish time, so YouTube makes it Public then even with
 //! this PC off; one whose time has come is published at once. When Google reports the quota is
 //! used up, the job goes back to waiting and the queue pauses until the quota has had time to
@@ -13,10 +13,11 @@ use rusqlite::params;
 
 use crate::{Result, Studio, clock, err};
 
-/// Uploads allowed in any 24 hours (Google's default 10,000 units at about 1,600 per upload).
-pub const DAILY_UPLOADS: usize = 6;
+/// Uploads in any 24 hours: the channel's pace of three Shorts a day (well inside Google's
+/// default 10,000 units at about 1,600 per upload).
+pub const DAILY_UPLOADS: usize = 3;
 /// How far ahead of their time Shorts are uploaded.
-const AHEAD_MS: i64 = 36 * 3_600_000;
+const AHEAD_MS: i64 = 24 * 3_600_000;
 /// How long the queue rests after Google reports the quota is used up.
 const QUOTA_REST_MS: i64 = 6 * 3_600_000;
 

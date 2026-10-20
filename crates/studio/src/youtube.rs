@@ -81,6 +81,30 @@ pub fn thumbnail_once(studio: &Studio, job: i64, channel: i64, secret: &Value, v
     let _ = studio.checkpoint(job, channel, &state);
 }
 
+/// Moves a scheduled (private, not yet public) video's YouTube publish time.
+pub fn set_publish_at(secret: &Value, video: &str, at: &str) -> std::result::Result<(), String> {
+    if video.len() != 11 || !video.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
+        return Err("unexpected YouTube video id".into());
+    }
+    let agent = ureq::AgentBuilder::new().timeout_connect(Duration::from_secs(30)).timeout(Duration::from_secs(60)).build();
+    let access = token(&agent, secret).map_err(|e| match e {
+        PublishError::Retry(m) | PublishError::Reconcile(m) => m,
+    })?;
+    match agent
+        .put("https://www.googleapis.com/youtube/v3/videos?part=status")
+        .set("Authorization", &format!("Bearer {access}"))
+        .send_json(json!({"id": video, "status": {"privacyStatus": "private", "publishAt": at, "selfDeclaredMadeForKids": false}}))
+    {
+        Ok(_) => Ok(()),
+        Err(e) => Err(match api_error("Changing the YouTube publish time", e) {
+            PublishError::Retry(m) | PublishError::Reconcile(m) if m.contains("insufficientPermissions") => {
+                "the channel's sign-in only allows uploads: reconnect YouTube (Accounts & keys) to let the app move publish times".into()
+            }
+            PublishError::Retry(m) | PublishError::Reconcile(m) => m,
+        }),
+    }
+}
+
 /// Uploads a JPEG as a video's thumbnail (`thumbnails.set`, 50 quota units).
 pub fn set_thumbnail(secret: &Value, video: &str, image: &Path) -> std::result::Result<(), String> {
     if video.len() != 11 || !video.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
