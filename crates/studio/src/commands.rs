@@ -410,6 +410,14 @@ pub fn register() {
                 to_value(crate::virality::analyze(&s, int(p, "channel")?, &file, p.get("meta"), &wants, &|_| {}).map_err(err)?)
             },
         ),
+        spec("studio.aiEditor", "AI Editors (Claude, Codex)", r#"{"action":"status"|"setup"} — the shorts-factory MCP server for Claude Code, the Claude app and Codex, and the editing skill"#, true, |_, p| {
+            let s = studio()?;
+            match text(p, "action")? {
+                "status" => to_value(crate::ai_editor::status(&s)),
+                "setup" => Ok(json!({"log": crate::ai_editor::setup(&s).map_err(err)?, "status": crate::ai_editor::status(&s)})),
+                other => Err(bad(format!("unknown action `{other}`"))),
+            }
+        }),
         spec("studio.transcribe", "Transcribe with Whisper", r#"{"file":str} — the video's words in lines [[seconds, text], ...] (local Whisper)"#, false, |_, p| {
             let file = std::path::PathBuf::from(text(p, "file")?);
             let lines = crate::virality::whisper_here(&file).map_err(err)?;

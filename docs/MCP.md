@@ -22,6 +22,31 @@ filmcraft-cli exec studio.workspaces
 | `studio.publishNow`, `studio.schedule` | Direct Instagram / YouTube; `schedule` queues Instagram locally and uploads YouTube now with YouTube's own publish time |
 | `studio.cloudSchedule`, `studio.cloud`, `studio.calendar` | Supabase + B2 scheduling and the calendar |
 
+## One server for Claude and Codex (set up from the app)
+
+Plugin Settings ▸ AI ▸ **AI editors** ▸ **Set up AI editors** (MCP: `studio.aiEditor`
+`{"action":"setup"}`) does it all once:
+
+- turns on **Let Claude edit**: the app starts its localhost control server on port 9876 from
+  its next start (**Turn off the control server** undoes it);
+- registers the same server, `shorts-factory` → `filmcraft-cli mcp --bridge 127.0.0.1:9876`,
+  with **Claude Code** (user scope), the **Claude desktop app** (`claude_desktop_config.json`)
+  and **Codex** (`~/.codex/config.toml`), keeping every other setting (the previous files are
+  kept as `.bak`);
+- installs the **`shorts-factory-edit` skill**, the quality-edit playbook (brief, watch, cut plan
+  for approval, rough cut, framing, captions, design, sound, colour, review, deliver), for
+  Claude (`~/.claude/skills`) and Codex (`~/.codex/skills`).
+
+Then Create ▸ **Edit with Claude** / **Edit with Codex** opens the agent in a terminal on the open
+project with a brief (`AI edit/ai-edit-brief.md` in the project's folder); talk to it there and
+watch it edit the live timeline. The ChatGPT app itself only connects to MCP servers on the
+internet (HTTPS), not to local ones; Codex is ChatGPT's agent that uses this local server.
+
+The server's tools: `command_run` / `command_batch` (any of the editor's ~750 commands),
+`command_list`, `project_inspect`, `sequence_inspect`, `render_frame`, `render_preview`,
+`doc_inspect`, `media_import`, `workflow_*`, and with the app running `ui_screenshot`,
+`ui_click`, `ui_type`, `ui_key`, `ui_drag`, `ui_elements`, `ui_inspect`.
+
 ## Two ways to connect
 
 **Headless** – the agent edits project files without the app open:

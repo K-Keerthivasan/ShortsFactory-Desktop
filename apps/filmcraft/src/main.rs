@@ -83,7 +83,7 @@ fn main() -> eframe::Result {
     filmcraft_studio::commands::register();
     // lossy, so a value that is not Unicode is reported like any other bad port instead of ignored
     let env_port = std::env::var_os("FILMCRAFT_CONTROL_PORT").map(|p| p.to_string_lossy().into_owned());
-    let launch = match args::parse(env_port, std::env::args_os().skip(1)) {
+    let mut launch = match args::parse(env_port, std::env::args_os().skip(1)) {
         Ok(Cli::Run(l)) => l,
         Ok(Cli::Help) => {
             tell(args::USAGE, false);
@@ -98,6 +98,12 @@ fn main() -> eframe::Result {
             std::process::exit(2);
         }
     };
+    // Started by an agent (`--control`): the window does not take the keyboard. "Let Claude
+    // edit" (Plugin Settings > AI) starts the control server for the user's own session too.
+    let agent_started = launch.control_port.is_some();
+    if launch.control_port.is_none() && filmcraft_studio::Studio::open_default().is_ok_and(|s| s.app_settings().claude_editor) {
+        launch.control_port = Some(filmcraft_studio::settings::CLAUDE_PORT);
+    }
     let data_root = launch.data_dir.clone().or_else(default_data_dir);
     let log_dir = data_root.as_ref().map(|d| d.join(logging::LOG_DIR));
     log::info!("Shorts Factory Desktop (made with FilmCraft) {} ({} {})", env!("CARGO_PKG_VERSION"), std::env::consts::OS, std::env::consts::ARCH);
@@ -133,7 +139,7 @@ fn main() -> eframe::Result {
         register_gpu_frame_renderer();
     }
     let started = loop {
-        let mut options = native_options(launch.control_port.is_some());
+        let mut options = native_options(agent_started);
         // Before eframe creates the wgpu instance (e.g. no OpenGL on Windows, see graphics.rs).
         graphics::apply(&mut options, graphics.mode(), backend_override);
         let app_created = Arc::new(AtomicBool::new(false));

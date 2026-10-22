@@ -1207,6 +1207,14 @@ pub fn show_create(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                     Err(e) => app.ui.status = e.to_string(),
                 }
             }
+            let on = filmcraft_studio::ai_editor::status(&ctx.s).enabled;
+            for (agent, label) in [("claude", "Edit with Claude"), ("codex", "Edit with Codex")] {
+                let b = ui.add_enabled(on, egui::Button::new(label)).on_disabled_hover_text("Set up AI editors in Plugin Settings ▸ AI, then restart the app");
+                app.auto.add_response(&format!("reel.create.editWith.{agent}"), &b, label);
+                if b.clicked() {
+                    edit_with_agent(app, &ctx, agent);
+                }
+            }
             let b = ui.button("Download videos");
             app.auto.add_response("reel.create.downloads", &b, "Download videos");
             if b.clicked() {
@@ -2322,7 +2330,10 @@ fn plugin_settings(app: &mut FilmcraftApp, ctx: &egui::Context) {
                 }
                 PluginTab::Accounts => accounts_settings(app, ui, channel, &s),
                 PluginTab::Writing => writing_settings(app, ui, channel, &s),
-                PluginTab::Ai => env_fields(
+                PluginTab::Ai => {
+                    ai_editors(app, ui, &s);
+                    ui.separator();
+                    env_fields(
                     app,
                     ui,
                     &[
@@ -2343,7 +2354,8 @@ fn plugin_settings(app: &mut FilmcraftApp, ctx: &egui::Context) {
                         ("HERMES_TIMEOUT_MS", "Hermes time limit (ms, default 240000)", false),
                         ("AI_FALLBACK", "Fall back to Ollama when Hermes fails (off to disable)", false),
                     ],
-                ),
+                    );
+                }
                 PluginTab::Cloud => {
                     env_fields(
                         app,
@@ -3225,6 +3237,85 @@ fn cloud_youtube_settings(app: &mut FilmcraftApp, ui: &mut egui::Ui, s: &Studio)
     if local.is_empty() {
         ui.label(RichText::new("Connect YouTube to this workspace in Accounts & keys first.").small().color(t.text_dim));
     }
+}
+
+/// Plugin Settings ▸ AI ▸ AI editors: Claude and Codex driving this app through one MCP server.
+fn ai_editors(app: &mut FilmcraftApp, ui: &mut egui::Ui, s: &Studio) {
+    let t = app.tokens;
+    ui.label(RichText::new("AI editors (Claude and Codex)").strong());
+    ui.label(
+        RichText::new("Claude and Codex (ChatGPT's coding agent) can edit in this app through one MCP server, shorts-factory: every editor command, the timeline, captions, effects, frames and screenshots. Set up registers it with Claude Code, the Claude app and Codex, installs the quality-edit playbook (skill), and turns on the app's local control server (port 9876, from the next start).")
+            .small()
+            .color(t.text_dim),
+    );
+    let st = filmcraft_studio::ai_editor::status(s);
+    let mark = |b: bool| if b { "✓" } else { "–" };
+    ui.label(
+        RichText::new(format!(
+            "{} control server · {} Claude Code · {} Claude app · {} Codex · {} skill",
+            mark(st.enabled),
+            mark(st.claude_code),
+            mark(st.claude_desktop),
+            mark(st.codex),
+            mark(st.skill)
+        ))
+        .small(),
+    );
+    ui.horizontal_wrapped(|ui| {
+        let busy = rt().tasks.iter().any(|(l, _)| l == "AI editors");
+        let b = ui.add_enabled(!busy && st.cli.is_some(), egui::Button::new(if busy { "Setting up…" } else { "Set up AI editors" }));
+        app.auto.add_response("reel.settings.aiEditors.setup", &b, "Set up AI editors");
+        if b.clicked() {
+            let st = s.clone();
+            spawn(&mut rt(), "AI editors", move || match filmcraft_studio::ai_editor::setup(&st) {
+                Ok(lines) => Done::Notice((format!("AI editors: {}. Restart the app to turn on its control server.", lines.join("; ")), true)),
+                Err(e) => Done::Notice((format!("AI editors: {e}"), false)),
+            });
+        }
+        if st.enabled {
+            let off = ui.small_button("Turn off the control server");
+            if off.clicked() {
+                let mut a = s.app_settings();
+                a.claude_editor = false;
+                app.ui.status = match s.save_app_settings(&a) {
+                    Ok(()) => "The control server stays off from the next start".into(),
+                    Err(e) => e.to_string(),
+                };
+            }
+        }
+    });
+}
+
+/// Opens Claude or Codex on the open project with a brief.
+fn edit_with_agent(app: &mut FilmcraftApp, ctx: &Ctx, agent: &str) {
+    let dir = match filmcraft_studio::project_folder(app.session.path.as_deref(), "AI edit") {
+        Ok(d) => d,
+        Err(e) => {
+            app.ui.status = e.to_string();
+            return;
+        }
+    };
+    let seq = app.session.state.active_sequence.and_then(|id| app.session.project.item(id)).map(|i| i.name.clone()).unwrap_or_else(|| "(none open)".into());
+    let workspace = rt().channels.iter().find(|c| Some(c.id) == ctx.channel).map(|c| c.name.clone()).unwrap_or_default();
+    let brief = format!(
+        "# Edit brief
+
+- App: Shorts Factory Desktop (running; reach it through the shorts-factory MCP server).
+- Project: {}
+- Open sequence: {seq}
+- Workspace (brand): {workspace} (channel id {})
+- Format: {}
+
+Ask me what this video is and what I want before you change anything, then follow the shorts-factory-edit skill.
+",
+        app.session.path.as_deref().unwrap_or("(not saved yet)"),
+        ctx.channel.map(|c| c.to_string()).unwrap_or_default(),
+        app.ui.reel.format.label(),
+    );
+    app.ui.status = match filmcraft_studio::ai_editor::launch(&ctx.s, agent, &dir, &brief) {
+        Ok(()) => format!("{} is starting in a new window: talk to it there; it edits this project live.", if agent == "codex" { "Codex" } else { "Claude" }),
+        Err(e) => format!("Could not start {agent}: {e}"),
+    };
 }
 
 /// Plugin Settings ▸ Writing: the workspace's standard descriptions and on-video text style.

@@ -737,3 +737,22 @@ fn a_moments_words_follow_its_edit_into_reel_time() {
     assert_eq!(plain.reel_lines()[1], (10.0, 13.0, "the reveal".to_string()));
     assert_eq!(crate::flick::kebab("The Big Reveal!! 2"), "the-big-reveal-2");
 }
+
+#[test]
+fn the_ai_editor_server_is_added_without_touching_other_settings() {
+    use crate::ai_editor::{codex_with_server, json_with_server};
+    let codex = "model = \"gpt\"\n\n[mcp_servers.blender]\ncommand = \"b\"\n\n[mcp_servers.shorts-factory]\ncommand = \"old\"\n\n[mcp_servers.shorts-factory.env]\nX = \"1\"\n\n[mcp_servers.hermes]\ncommand = \"h\"\n";
+    let out = codex_with_server(codex, r"C:\apps\filmcraft-cli.exe", 9876);
+    assert!(out.contains("[mcp_servers.blender]\ncommand = \"b\"") && out.contains("[mcp_servers.hermes]\ncommand = \"h\""), "{out}");
+    assert_eq!(out.matches("[mcp_servers.shorts-factory]").count(), 1);
+    assert!(!out.contains("old") && !out.contains("X = \"1\""));
+    assert!(out.contains(r#"command = "C:\\apps\\filmcraft-cli.exe"
+args = ["mcp", "--bridge", "127.0.0.1:9876"]"#), "{out}");
+    let j = json_with_server("{\"mcpServers\":{\"other\":{\"command\":\"x\"}},\"theme\":\"dark\"}", "cli", 9876).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&j).unwrap();
+    assert_eq!(v["theme"], "dark");
+    assert_eq!(v["mcpServers"]["other"]["command"], "x");
+    assert_eq!(v["mcpServers"]["shorts-factory"]["args"][2], "127.0.0.1:9876");
+    assert!(json_with_server("not json", "cli", 1).is_err());
+    assert!(crate::ai_editor::SKILL.starts_with("---\nname: shorts-factory-edit"));
+}

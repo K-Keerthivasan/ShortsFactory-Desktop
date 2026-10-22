@@ -28,7 +28,14 @@ pub struct AppSettings {
     pub done_clips: Vec<i64>,
     /// The YouTube queue rests until then after Google reported the daily quota used up.
     pub youtube_paused_until: Option<String>,
+    /// Let Claude edit: the app starts its localhost control server (port [`CLAUDE_PORT`]) so
+    /// Claude Code drives the editor through FilmCraft's MCP server.
+    #[serde(default)]
+    pub claude_editor: bool,
 }
+
+/// The localhost port Claude's FilmCraft MCP server talks to.
+pub const CLAUDE_PORT: u16 = 9876;
 
 impl Studio {
     fn app_settings_file(&self) -> PathBuf {
@@ -42,6 +49,7 @@ impl Studio {
             ai_provider: None,
             done_clips: Vec::new(),
             youtube_paused_until: None,
+            claude_editor: false,
         })
     }
     pub fn save_app_settings(&self, s: &AppSettings) -> Result<()> {
