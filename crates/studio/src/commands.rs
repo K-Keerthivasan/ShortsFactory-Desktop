@@ -410,6 +410,11 @@ pub fn register() {
                 to_value(crate::virality::analyze(&s, int(p, "channel")?, &file, p.get("meta"), &wants, &|_| {}).map_err(err)?)
             },
         ),
+        spec("studio.transcribe", "Transcribe with Whisper", r#"{"file":str} — the video's words in lines [[seconds, text], ...] (local Whisper)"#, false, |_, p| {
+            let file = std::path::PathBuf::from(text(p, "file")?);
+            let lines = crate::virality::whisper_here(&file).map_err(err)?;
+            Ok(json!({"lines": lines.iter().map(|(t, l)| json!([t, l])).collect::<Vec<_>>()}))
+        }),
         spec("studio.viralityResults", "Virality vs Results", r#"{"channel":n} — published posts with a virality prediction and their real views, likes and comments, and the rank correlation"#, false, |_, p| {
             let s = studio()?;
             let (rows, rho) = crate::virality::results(&s, int(p, "channel")?).map_err(err)?;

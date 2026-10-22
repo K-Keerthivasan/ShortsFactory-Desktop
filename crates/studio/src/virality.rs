@@ -119,8 +119,76 @@ pub fn lines_from_words(words: &[(f64, f64, String)]) -> Vec<(f64, String)> {
 
 /// Local Whisper (FilmCraft's speech recogniser): the video's words in lines. Needs a build with
 /// speech and a downloaded model (`transcript.downloadModel`). Blocking (slow on long videos).
+///
+/// It runs in a separate process (the `filmcraft-cli` beside the app, `studio.transcribe`), so a
+/// long or failing transcription can never stall or close the app; without that tool it runs
+/// here, in a session whose ids cannot meet the open project's in the shared media caches.
 pub fn whisper(video: &Path) -> Result<Vec<(f64, String)>> {
+    let cli = std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.join(if cfg!(windows) { "filmcraft-cli.exe" } else { "filmcraft-cli" })));
+    match cli.filter(|c| c.is_file() && std::env::var_os("SHORTS_FACTORY_WHISPER_CHILD").is_none()) {
+        Some(cli) => whisper_child(&cli, video),
+        None => whisper_here(video),
+    }
+}
+
+/// Whisper in a child `filmcraft-cli` (at most an hour).
+fn whisper_child(cli: &Path, video: &Path) -> Result<Vec<(f64, String)>> {
+    let params = json!({"file": video.to_string_lossy()}).to_string();
+    let mut c = Command::new(cli);
+    c.args(["exec", "studio.transcribe", &params])
+        .env("SHORTS_FACTORY_WHISPER_CHILD", "1")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut child = quiet(&mut c).spawn().map_err(|e| StudioError::Other(format!("could not start Whisper: {e}")))?;
+    let mut out = child.stdout.take();
+    let reader = std::thread::spawn(move || {
+        let mut s = String::new();
+        if let Some(o) = out.as_mut() {
+            let _ = std::io::Read::read_to_string(o, &mut s);
+        }
+        s
+    });
+    let mut errs = child.stderr.take();
+    let err_reader = std::thread::spawn(move || {
+        let mut s = String::new();
+        if let Some(o) = errs.as_mut() {
+            let _ = std::io::Read::read_to_string(o, &mut s);
+        }
+        s
+    });
+    let started = std::time::Instant::now();
+    let status = loop {
+        if let Some(st) = child.try_wait()? {
+            break st;
+        }
+        if started.elapsed() > Duration::from_secs(3600) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return err("Whisper took over an hour and was stopped");
+        }
+        std::thread::sleep(Duration::from_millis(300));
+    };
+    let (text, stderr) = (reader.join().unwrap_or_default(), err_reader.join().unwrap_or_default());
+    if !status.success() {
+        let why = stderr.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("it stopped").to_string();
+        return err(format!("Whisper: {}", why.chars().take(300).collect::<String>()));
+    }
+    let v: Value = serde_json::from_str(text.trim()).map_err(|e| StudioError::Other(format!("Whisper's answer is unreadable: {e}")))?;
+    Ok(v.get("lines")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|l| Some((l.get(0)?.as_f64()?, l.get(1)?.as_str()?.to_string())))
+        .collect())
+}
+
+/// Whisper in this process, in a session with ids of its own.
+pub fn whisper_here(video: &Path) -> Result<Vec<(f64, String)>> {
     let mut s = filmcraft_engine::Session::default();
+    // The decoder and frame caches are shared by item id: keep this session's ids apart.
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64);
+    std::sync::Arc::make_mut(&mut s.project).next_id = (1u64 << 62) | ((stamp & ((1u64 << 58) - 1)) << 2);
     let imported = s.execute("file.import", json!({"paths": [video.to_string_lossy()]})).map_err(|e| StudioError::Other(e.to_string()))?;
     let id = imported
         .get("items")
@@ -135,7 +203,10 @@ pub fn whisper(video: &Path) -> Result<Vec<(f64, String)>> {
         .get(&filmcraft_project::ItemId(id))
         .ok_or_else(|| StudioError::Other("Whisper returned no transcript".into()))?;
     let words: Vec<(f64, f64, String)> = t.words.iter().map(|w| (w.start.seconds(), w.end.seconds(), w.text.clone())).collect();
-    Ok(lines_from_words(&words))
+    // Over music Whisper repeats itself: a line said again at once is kept once.
+    let mut lines = lines_from_words(&words);
+    lines.dedup_by(|b, a| b.1.trim().eq_ignore_ascii_case(a.1.trim()));
+    Ok(lines)
 }
 
 /// Can this build run Whisper, and is a model there? Panels ask every frame, so the answer is
