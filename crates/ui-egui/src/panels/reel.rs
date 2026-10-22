@@ -1254,6 +1254,15 @@ pub fn show_create(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                             Err(e) => app.ui.status = e.to_string(),
                         }
                     }
+                    let mut pick = app.ui.reel.maker.picked_items.contains(&id);
+                    let pk = ui.checkbox(&mut pick, "Pick").on_hover_text("Use this footage in AI Reels");
+                    app.auto.add_response(&format!("reel.pickItem.{id}"), &pk, "Pick for AI Reels");
+                    if pk.changed() {
+                        app.ui.reel.maker.picked_items.retain(|x| *x != id);
+                        if pick {
+                            app.ui.reel.maker.picked_items.push(id);
+                        }
+                    }
                     let b = ui.small_button(format!("New {}", app.ui.reel.format.label()));
                     app.auto.add_response(&format!("reel.newFromItem.{id}"), &b, &name);
                     ui.add(egui::Label::new(RichText::new(format!("{name}  {secs:.1}s")).small()).truncate());

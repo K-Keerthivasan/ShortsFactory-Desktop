@@ -522,12 +522,14 @@ pub struct Maker {
     pub max_seconds: f64,
     /// Workspace clips picked for AI Reels.
     pub picked: Vec<i64>,
+    /// Footage already in the project picked for AI Reels (item ids).
+    pub picked_items: Vec<u64>,
     pub links: String,
 }
 
 impl Default for Maker {
     fn default() -> Self {
-        Maker { per_video: 2, min_seconds: 60.0, max_seconds: 90.0, picked: Vec::new(), links: String::new() }
+        Maker { per_video: 2, min_seconds: 60.0, max_seconds: 90.0, picked: Vec::new(), picked_items: Vec::new(), links: String::new() }
     }
 }
 
@@ -537,7 +539,7 @@ pub(super) fn maker(app: &mut FilmcraftApp, ui: &mut egui::Ui, ctx: &super::Ctx,
     let t = app.tokens;
     let runs = rt().ai_runs.clone();
     ui.label(
-        RichText::new("Pick trailers below (or paste links): the AI finds the best part of each, edits it on the timeline (hook first, dull shots cut, framed for 9:16) and makes Reels with your template, ready to open and refine.")
+        RichText::new("Tick Pick on footage in this project or on workspace clips below (or paste links): the AI finds the best part of each, edits it on the timeline (hook first, dull shots cut, framed for 9:16) and makes Reels with your template, ready to open and refine.")
             .small()
             .color(t.text_dim),
     );
@@ -566,8 +568,20 @@ pub(super) fn maker(app: &mut FilmcraftApp, ui: &mut egui::Ui, ctx: &super::Ctx,
         }
         ui.checkbox(&mut app.ui.reel.ai.queue, "Render into the library too");
     });
-    let picked: Vec<(std::path::PathBuf, String)> =
+    let mut picked: Vec<(std::path::PathBuf, String)> =
         clips.iter().filter(|(id, _, _)| app.ui.reel.maker.picked.contains(id)).map(|(_, p, l)| (p.clone(), l.clone())).collect();
+    // Footage already in the project, by its file.
+    for id in app.ui.reel.maker.picked_items.clone() {
+        let Some(item) = app.session.project.item(filmcraft_project::ItemId(id)) else { continue };
+        let Some(filmcraft_project::MediaRef::File { path }) = item.as_media().map(|m| &m.media) else { continue };
+        let p = std::path::PathBuf::from(path);
+        if !picked.iter().any(|(x, _)| x == &p) {
+            picked.push((p, item.name.clone()));
+        }
+    }
+    if !picked.is_empty() {
+        ui.label(RichText::new(format!("Picked: {}", picked.iter().map(|(_, l)| l.as_str()).collect::<Vec<_>>().join(" · "))).small());
+    }
     let links: Vec<String> = app.ui.reel.maker.links.lines().map(str::trim).filter(|l| l.starts_with("http")).map(str::to_string).collect();
     let n = picked.len() + links.len();
     let busy = lock(&runs).iter().any(|r| r.channel == ctx.channel.unwrap_or_default() && r.error.is_none() && (r.auto_make || (r.segments.is_empty() && r.stage != "Done")));
@@ -575,10 +589,11 @@ pub(super) fn maker(app: &mut FilmcraftApp, ui: &mut egui::Ui, ctx: &super::Ctx,
         let b = ui.add_enabled(ctx.channel.is_some() && n > 0 && n <= 20, egui::Button::new(format!("Make AI Reels ({n} video{})", if n == 1 { "" } else { "s" })));
         app.auto.add_response("reel.create.aiReels", &b, "Make AI Reels");
         if n == 0 {
-            ui.label(RichText::new("Tick Pick on the clips to use").small().color(t.text_dim));
+            ui.label(RichText::new("Tick Pick next to the footage or clips to use").small().color(t.text_dim));
         }
-        if !app.ui.reel.maker.picked.is_empty() && ui.small_button("Clear picks").clicked() {
+        if (!app.ui.reel.maker.picked.is_empty() || !app.ui.reel.maker.picked_items.is_empty()) && ui.small_button("Clear picks").clicked() {
             app.ui.reel.maker.picked.clear();
+            app.ui.reel.maker.picked_items.clear();
         }
         if b.clicked()
             && let Some(ch) = ctx.channel
@@ -596,6 +611,7 @@ pub(super) fn maker(app: &mut FilmcraftApp, ui: &mut egui::Ui, ctx: &super::Ctx,
             find(&ctx.s, ch, links, picked, wants, true, true, options, None, &runs);
             app.ui.reel.maker.links.clear();
             app.ui.reel.maker.picked.clear();
+            app.ui.reel.maker.picked_items.clear();
         }
     });
     let _ = busy;
