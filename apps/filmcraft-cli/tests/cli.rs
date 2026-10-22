@@ -3,7 +3,7 @@
 use std::io::Write;
 use std::process::{Command, Output, Stdio};
 
-use serde_json::Value;
+use serde_json::{Value, json};
 
 fn cli(args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_filmcraft-cli")).args(args).output().expect("spawn filmcraft-cli")
@@ -150,6 +150,23 @@ fn export_wav_waits_for_job() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn run_waits_for_an_export_on_its_last_line() {
+    // #2342: `file.exportMedia` as the last line of a script is written before `run` exits
+    let dir = std::env::temp_dir().join(format!("fc-cli-run-x-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let out = dir.join("last.wav");
+    // `"wait": null` waits too: only an explicit `false` doesn't
+    let script = json!({"id": "file.exportMedia", "params": {"path": out.to_str().unwrap(), "format": "wav", "wait": null}}).to_string();
+    let mut child =
+        Command::new(env!("CARGO_BIN_EXE_filmcraft-cli")).args(["--demo", "run", "-"]).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
+    child.stdin.take().unwrap().write_all(format!("{script}\n").as_bytes()).unwrap();
+    let o = child.wait_with_output().unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stdout));
+    assert!(std::fs::metadata(&out).map(|m| m.len() > 44).unwrap_or(false), "{}", String::from_utf8_lossy(&o.stdout));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// `export --preset`: a built-in preset by name (dash or en dash), a custom range, a user preset
 /// from `--data-dir`, `--list-presets`, `--queue`, and a clean failure for an unknown preset.
 #[test]
@@ -292,6 +309,27 @@ fn closed_stdout_still_runs_the_script_and_saves() {
         b"{\"id\":\"no.such.command\"}\n{\"id\":\"file.newBin\",\"params\":{\"name\":\"x\"}}\n",
     );
     assert_eq!(out.status.code(), Some(1));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `render` with a non-numeric or non-finite `--seconds` / `--scale` is a usage error (exit 2) and
+/// writes nothing, instead of silently rendering frame 0 at full scale.
+#[test]
+fn render_rejects_bad_numbers() {
+    let dir = std::env::temp_dir().join(format!("fc-cli-render-nan-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let still = dir.join("s.png").to_str().unwrap().to_string();
+    for (opt, bad) in
+        [("--seconds", "1s"), ("--seconds", "1,5"), ("--seconds", "abc"), ("--seconds", "NaN"), ("--seconds", "inf"), ("--scale", "xyz"), ("--scale", "NaN")]
+    {
+        let (secs, scale) = if opt == "--seconds" { (bad, "0.1") } else { ("1", bad) };
+        let o = cli(&["--demo", "render", "--seconds", secs, "--scale", scale, "--out", &still]);
+        let err = String::from_utf8_lossy(&o.stderr);
+        assert_eq!(o.status.code(), Some(2), "{opt} {bad}: {err}");
+        assert!(err.contains("filmcraft-cli:") && err.contains(opt), "{opt} {bad}: {err}");
+        assert!(!std::path::Path::new(&still).exists(), "{opt} {bad} wrote a file");
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }
 
