@@ -398,6 +398,29 @@ pub fn register() {
                 Ok(crate::thumbnails::describe(&c))
             },
         ),
+        spec(
+            "studio.analyze",
+            "Virality Analyzer",
+            r#"{"channel":n,"file":str (a downloaded video),"meta":{}? (yt-dlp details, for captions),"wants":{"maxReels":n,"minSeconds":f,"maxSeconds":f,"notes":str}?} — viral moments with a 0-100 prediction, its parts, three hooks, timestamps and the edit (Whisper, a vision model and FFmpeg on this PC)"#,
+            false,
+            |_, p| {
+                let s = studio()?;
+                let wants: crate::autopilot::Wants = p.get("wants").cloned().and_then(|w| serde_json::from_value(w).ok()).unwrap_or_default();
+                let file = std::path::PathBuf::from(text(p, "file")?);
+                to_value(crate::virality::analyze(&s, int(p, "channel")?, &file, p.get("meta"), &wants, &|_| {}).map_err(err)?)
+            },
+        ),
+        spec("studio.viralityResults", "Virality vs Results", r#"{"channel":n} — published posts with a virality prediction and their real views, likes and comments, and the rank correlation"#, false, |_, p| {
+            let s = studio()?;
+            let (rows, rho) = crate::virality::results(&s, int(p, "channel")?).map_err(err)?;
+            Ok(json!({"posts": rows, "spearman": rho}))
+        }),
+        spec("studio.klap", "Klap Shorts (paid)", r#"{"url":str (public video link),"maxClips":n?,"maxSeconds":f?} — Klap's shorts and virality scores, for comparison (uses Klap credits)"#, false, |_, p| {
+            let s = studio()?;
+            let clips = crate::klap::shorts(&s, text(p, "url")?, p.get("maxClips").and_then(Value::as_u64).unwrap_or(5) as usize, p.get("maxSeconds").and_then(Value::as_f64).unwrap_or(60.0), &|_| {})
+                .map_err(err)?;
+            to_value(clips)
+        }),
         spec("studio.calendar", "Publishing Calendar", r#"{"channel":n?,"from":"ISO","to":"ISO"}"#, false, |_, p| {
             let channel = p.get("channel").and_then(Value::as_i64);
             to_value(studio()?.calendar(channel, text(p, "from")?, text(p, "to")?).map_err(err)?)

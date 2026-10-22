@@ -153,6 +153,12 @@ Reel's headline as its title (up to 100 characters) and the Instagram caption an
 description, with `#Shorts` added; hashtags also become the video's tags. Uploads are resumable
 and retried like Instagram ones.
 
+**Pace.** A channel publishes at most `YOUTUBE_PER_DAY` Shorts a day (default 3) at
+`YOUTUBE_SLOTS` (default 10:00, 15:00, 20:00): the cloud refuses a booking for a full day and
+uploads at most three a day, within 24 hours of their time; Plugin Settings ▸ Cloud ▸ **Keep to
+3 a day** moves any extras to the next free times, on YouTube too (this needs the
+`youtube.force-ssl` permission: reconnect YouTube once).
+
 **In the cloud (this PC off).** With Cloud publishing chosen, Schedule books the YouTube Short in
 the cloud too: the Supabase worker uploads it up to a day and a half ahead with YouTube's own
 publish time, at most six uploads in any 24 hours (Google's default 10,000 units a day; a quota
@@ -240,6 +246,41 @@ Built as the **AI** panel (beside Reel Studio), with approval before anything is
 | One Reel or Post per part from the same file (`reel.new` with `sourceIn`/`sourceOut`), queued to render into the library | Built |
 | Approve, then publish now or schedule, from the same panel | Built |
 | The same workflow for agents over MCP (`studio.download`, `studio.plan`, `reel.new`, `studio.sendToLibrary`, …) | Built — see [MCP.md](MCP.md) |
+
+## 11b. Virality analyzer (local first)
+
+AI panel ▸ **Virality analyzer** (on by default) finds the moments of a downloaded video on
+this PC and scores them:
+
+1. **Transcript**: the video's captions, else local **Whisper** (FilmCraft's built-in recogniser
+   with word timestamps; **Download Whisper** once, about 290 MB, in the AI panel).
+2. **Signals** with **FFmpeg**: loudness every half second and scene cuts.
+3. **Candidates**: sentence-aligned windows of the asked length, scored on pace, loudness,
+   peaks, cuts and hook words.
+4. **Vision**: a 2×2 grid of frames of each candidate goes to a vision-language model, local
+   Ollama `gemma3` by default (`VISION_PROVIDER`, `OLLAMA_VISION_MODEL`) or NVIDIA NIM
+   (`VISION_PROVIDER=nvidia`, `NVIDIA_API_KEY`, `NVIDIA_VISION_MODEL`, default
+   `meta/llama-3.2-90b-vision-instruct`; others on the free catalogue include
+   `nvidia/nemotron-3.5-super-vl-120b-a12b`, `google/gemma-4-31b-it` and the video model
+   `nvidia/cosmos-reason2-8b`). It rates the pictures and finds the subject for the crop.
+5. **Ranking** by the workspace's AI (Hermes/Codex, Ollama, or `AI_PROVIDER=nvidia` with
+   `NVIDIA_MODEL`): a 0–100 virality score with hook, emotion, clarity, visual and share parts,
+   three suggested hooks, the timestamps and a hook-first edit. Without an AI the signals rank.
+
+The review shows each moment's score, parts and hooks (**Use** puts a hook on the headline);
+**Make** builds the Reels from the edit, cropped to 9:16 on the subject, into the editor, where
+captions and the GPU export work as before. MCP: `studio.analyze`.
+
+**A score is a prediction, not a guarantee of views.** Reels made with the analyzer carry their
+score into the library; AI panel ▸ **4 · Predictions vs results** ▸ Check results lists the
+published ones with their real YouTube views, likes and comments (and Instagram's where the
+token allows) and the rank correlation between score and views (MCP:
+`studio.viralityResults`). Trust it for JKR only once that correlation holds up.
+
+**Klap (optional, paid)**: with `KLAP_API_KEY`, **Compare with Klap** sends the same link to
+Klap and lists its shorts with Klap's own scores and explanations; each can be downloaded and
+opened as a Reel. Klap does not return source times, so its clips are finished videos rather
+than editable ranges. Uses Klap credits. MCP: `studio.klap`.
 
 ## 12. Account health and token notifications
 

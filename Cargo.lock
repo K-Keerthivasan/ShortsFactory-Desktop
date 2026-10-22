@@ -2311,6 +2311,7 @@ dependencies = [
  "filmcraft-codecs",
  "filmcraft-engine",
  "filmcraft-media",
+ "filmcraft-project",
  "filmcraft-reel",
  "iana-time-zone",
  "log",

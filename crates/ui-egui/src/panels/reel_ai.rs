@@ -32,11 +32,13 @@ pub struct AiDraft {
     pub format: Format,
     /// Queue each new Reel to render into the library for approval.
     pub queue: bool,
+    /// Use the virality analyzer (Whisper, a vision model and FFmpeg) to find the moments.
+    pub analyzer: bool,
 }
 
 impl Default for AiDraft {
     fn default() -> Self {
-        AiDraft { links: String::new(), wants: Wants::default(), template: String::new(), format: Format::Reel, queue: true }
+        AiDraft { links: String::new(), wants: Wants::default(), template: String::new(), format: Format::Reel, queue: true, analyzer: true }
     }
 }
 
@@ -55,6 +57,10 @@ pub(super) struct Run {
     pub made: usize,
     /// Asked for one long 16:9 video rather than Reels.
     pub long: bool,
+    /// Found by the virality analyzer.
+    pub analyzed: bool,
+    /// Klap's shorts for comparison: each with its downloaded file, or why it failed.
+    pub klap: Option<Result<Vec<(filmcraft_studio::klap::Clip, Option<std::path::PathBuf>)>, String>>,
 }
 
 pub(super) type Runs = Arc<Mutex<Vec<Run>>>;
@@ -122,6 +128,30 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         ui.add(egui::TextEdit::singleline(&mut w.notes).hint_text("Direction for the AI (optional): what to look for").desired_width(f32::INFINITY));
         ui.checkbox(&mut w.hook, "Hook first, filler cut")
             .on_hover_text("The AI opens each Reel with its strongest moment and cuts dead air, filler and repeats (needs the video's captions and FFmpeg)");
+        let analyzer = &mut app.ui.reel.ai.analyzer;
+        ui.horizontal_wrapped(|ui| {
+            ui.checkbox(analyzer, "Virality analyzer")
+                .on_hover_text("Whisper (when there are no captions), a vision model and FFmpeg find the viral moments, score them 0-100, suggest hooks and crop to 9:16 on the subject");
+            let (vp, vm) = filmcraft_studio::virality::vision_provider(&ctx.s);
+            ui.label(RichText::new(format!("vision: {}", if vp == "off" { "off".to_string() } else { format!("{vp} {vm}") })).small().color(t.text_dim));
+        });
+        if app.ui.reel.ai.analyzer {
+            match filmcraft_studio::virality::whisper_ready() {
+                Ok(()) => {}
+                Err(e) => {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(RichText::new(format!("Whisper: {e}; videos with captions still work.")).small().color(t.text_dim));
+                        let busy = rt().tasks.iter().any(|(l, _)| l == "Whisper model");
+                        if ui.add_enabled(!busy && e.contains("model"), egui::Button::new(if busy { "Downloading…" } else { "Download Whisper (about 290 MB)" })).clicked() {
+                            spawn(&mut rt(), "Whisper model", move || match filmcraft_studio::virality::download_whisper() {
+                                Ok(m) => Done::Notice((format!("Whisper model {m} is ready"), true)),
+                                Err(e) => Done::Notice((format!("Whisper download failed: {e}"), false)),
+                            });
+                        }
+                    });
+                }
+            }
+        }
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new("As").small());
             for f in [Format::Reel, Format::Post] {
@@ -155,7 +185,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         {
             let wants = app.ui.reel.ai.wants.clone();
             let options = app.ui.reel.download.clone();
-            find(&ctx.s, ch, links, wants, options, None, &runs);
+            find(&ctx.s, ch, links, wants, app.ui.reel.ai.analyzer, options, None, &runs);
             app.ui.reel.ai.links.clear();
         }
 
@@ -169,7 +199,10 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
             review(app, ui, &ctx, &runs, run);
         }
 
-        // 4. Approval.
+        // 4. Predictions vs results.
+        results_view(app, ui, &ctx);
+
+        // Approval.
         ui.separator();
         ui.label(RichText::new("3 · Approve and publish").strong());
         let n = app.ui.reel.accounts.len();
@@ -207,11 +240,13 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
 }
 
 /// Downloads each link and asks the AI for its parts, on a worker.
+#[allow(clippy::too_many_arguments)]
 fn find(
     s: &Studio,
     channel: i64,
     links: Vec<String>,
     wants: Wants,
+    analyzer: bool,
     options: filmcraft_studio::ytdlp::Options,
     save_to: Option<std::path::PathBuf>,
     runs: &Runs,
@@ -223,7 +258,7 @@ fn find(
             .map(|url| {
                 let id = super::next_id();
                 let import = Import { url: url.clone(), options: options.clone(), no_draft: true, save_to: save_to.clone(), ..Default::default() };
-                l.insert(0, Run { id, channel, import, stage: "Waiting".into(), long: wants.mode == Mode::Long, ..Default::default() });
+                l.insert(0, Run { id, channel, import, stage: "Waiting".into(), long: wants.mode == Mode::Long, analyzed: analyzer && wants.mode != Mode::Long, ..Default::default() });
                 id
             })
             .collect()
@@ -256,12 +291,32 @@ fn find(
             }
             set(&|x| x.stage = "The AI is choosing the parts".into());
             let meta = done.metadata.clone().unwrap_or_default();
-            let (mut segments, fallback) = filmcraft_studio::autopilot::plan(&st, channel, &meta, done.duration.unwrap_or(0.0), &wants);
+            let (mut segments, fallback) = match done.file.clone().filter(|_| analyzer && wants.mode != Mode::Long) {
+                Some(file) => {
+                    let say = |m: &str| {
+                        let m = m.to_string();
+                        set(&|x| x.stage = m.clone());
+                    };
+                    match filmcraft_studio::virality::analyze(&st, channel, &file, Some(&meta), &wants, &say) {
+                        Ok(a) => {
+                            let mut notes = a.notes.clone();
+                            notes.insert(0, format!("Transcript: {} · vision: {} · scored by {}", a.transcript, if a.vision.is_empty() { "none" } else { &a.vision }, a.ranked_by));
+                            (a.segments, Some(notes.join(" · ")))
+                        }
+                        Err(e) => {
+                            let (s, f) = filmcraft_studio::autopilot::plan(&st, channel, &meta, done.duration.unwrap_or(0.0), &wants);
+                            (s, Some(format!("the analyzer failed ({e}); {}", f.unwrap_or_else(|| "the AI chose instead".into()))))
+                        }
+                    }
+                }
+                None => filmcraft_studio::autopilot::plan(&st, channel, &meta, done.duration.unwrap_or(0.0), &wants),
+            };
             // The hook edits, made into clips beside the download.
             let mut failed = None;
             if let Some(file) = done.file.clone() {
                 for (i, seg) in segments.iter_mut().enumerate() {
-                    if seg.pieces.len() < 2 {
+                    // A hook edit, or a 9:16 crop on the subject.
+                    if seg.pieces.len() < 2 && seg.focus_x.is_none() {
                         continue;
                     }
                     set(&|x| x.stage = format!("Editing part {} (hook first)", i + 1));
@@ -308,7 +363,17 @@ fn review(app: &mut FilmcraftApp, ui: &mut egui::Ui, ctx: &super::Ctx, runs: &Ru
             return;
         }
         if let Some(f) = &run.fallback {
-            ui.label(RichText::new(format!("The AI did not choose ({f}); these are the chapters or even parts.")).small().color(t.text_dim));
+            if run.analyzed {
+                ui.label(RichText::new(f).small().color(t.text_dim));
+                ui.label(
+                    RichText::new("A virality score is a prediction, not a guarantee of views: check it against real results below (4 · Predictions vs results).")
+                        .small()
+                        .italics()
+                        .color(t.text_dim),
+                );
+            } else {
+                ui.label(RichText::new(format!("The AI did not choose ({f}); these are the chapters or even parts.")).small().color(t.text_dim));
+            }
         }
         let duration = run.import.duration.unwrap_or(f64::INFINITY);
         for (i, (seg, on)) in run.segments.iter_mut().enumerate() {
@@ -345,7 +410,26 @@ fn review(app: &mut FilmcraftApp, ui: &mut egui::Ui, ctx: &super::Ctx, runs: &Ru
                     );
                 });
             }
+            if let Some(score) = seg.score {
+                let colour = if score >= 75.0 { t.accent } else if score >= 55.0 { t.text } else { t.text_dim };
+                let parts = seg.scores.as_ref().map(|p| format!("hook {:.0} · emotion {:.0} · clarity {:.0} · visual {:.0} · share {:.0}", p.hook, p.emotion, p.clarity, p.visual, p.share)).unwrap_or_default();
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new(format!("Virality {score:.0}")).strong().color(colour));
+                    ui.label(RichText::new(parts).small().color(t.text_dim));
+                    if seg.focus_x.is_some() && seg.file.is_some() {
+                        ui.label(RichText::new("· cropped 9:16 on the subject").small().color(t.text_dim));
+                    }
+                });
+            }
             ui.add(egui::TextEdit::multiline(&mut seg.card.title).desired_rows(1).desired_width(f32::INFINITY).id_salt(("ai-title", run.id, i)));
+            for (k, h) in seg.hooks.clone().iter().enumerate() {
+                ui.horizontal_wrapped(|ui| {
+                    if ui.small_button("Use").on_hover_text("Make this hook the headline").clicked() {
+                        seg.card.title = h.clone();
+                    }
+                    ui.label(RichText::new(format!("Hook {}: {h}", k + 1)).small());
+                });
+            }
             if !seg.why.is_empty() {
                 ui.label(RichText::new(&seg.why).small().italics().color(t.text_dim));
             }
@@ -364,6 +448,7 @@ fn review(app: &mut FilmcraftApp, ui: &mut egui::Ui, ctx: &super::Ctx, runs: &Ru
             if run.made > 0 {
                 ui.label(RichText::new(format!("{} made — open them from the Project panel", run.made)).small().color(t.text_dim));
             }
+            klap_compare(app, ui, runs, &run);
         }
     });
     if make {
@@ -378,6 +463,129 @@ fn review(app: &mut FilmcraftApp, ui: &mut egui::Ui, ctx: &super::Ctx, runs: &Ru
             x.segments = run.segments;
         }
         x.made = run.made;
+    }
+}
+
+/// Klap, the optional paid provider: its shorts and scores for the same link, to compare; each
+/// can be downloaded and opened as a Reel.
+fn klap_compare(app: &mut FilmcraftApp, ui: &mut egui::Ui, runs: &Runs, run: &Run) {
+    let Some(s) = super::studio(&mut rt()) else { return };
+    if !filmcraft_studio::klap::configured(&s) || !run.import.url.starts_with("https://") {
+        return;
+    }
+    let t = app.tokens;
+    let busy = rt().tasks.iter().any(|(l, _)| l == "Klap");
+    match &run.klap {
+        None => {
+            let b = ui.add_enabled(!busy, egui::Button::new(if busy { "Klap is working…" } else { "Compare with Klap (paid)" }));
+            app.auto.add_response(&format!("ai.klap.{}", run.id), &b, "Compare with Klap");
+            if b.on_hover_text("Klap makes its own shorts with its virality scores from the same link (uses your Klap credits)").clicked() {
+                let (url, id, runs, w) = (run.import.url.clone(), run.id, runs.clone(), app.ui.reel.ai.wants.clone());
+                spawn(&mut rt(), "Klap", move || {
+                    let r = filmcraft_studio::klap::shorts(&s, &url, w.max_reels, w.max_seconds, &|_| {})
+                        .map(|c| c.into_iter().map(|c| (c, None)).collect())
+                        .map_err(|e| e.to_string());
+                    if let Some(x) = lock(&runs).iter_mut().find(|x| x.id == id) {
+                        x.klap = Some(r);
+                    }
+                    Done::Notice(("Klap's shorts are ready to compare".into(), true))
+                });
+            }
+        }
+        Some(Err(e)) => {
+            ui.label(RichText::new(format!("Klap: {e}")).small().color(t.danger));
+        }
+        Some(Ok(clips)) => {
+            ui.label(RichText::new("Klap's shorts (its own scores, for comparison)").small().strong());
+            for (n, (c, file)) in clips.iter().enumerate() {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new(format!("Klap {:.0}", c.score)).strong());
+                    ui.label(RichText::new(&c.name).small());
+                    match file {
+                        Some(f) => {
+                            if ui.small_button("Open as a Reel").clicked() {
+                                let p = json!({"name": format!("Klap – {}", c.name), "template": "logoOnly", "channelId": run.channel, "paths": [f.to_string_lossy()]});
+                                if let Err(e) = app.session.execute("reel.new", p) {
+                                    app.ui.status = e.to_string();
+                                }
+                            }
+                        }
+                        None => {
+                            if ui.add_enabled(!busy, egui::Button::new("Download").small()).clicked() {
+                                let (st, clip, id, runs) = (s.clone(), c.clone(), run.id, runs.clone());
+                                let dir = run.import.file.as_ref().and_then(|f| f.parent().map(|p| p.join("klap"))).unwrap_or_else(std::env::temp_dir);
+                                spawn(&mut rt(), "Klap", move || {
+                                    let r = filmcraft_studio::klap::download(&st, &clip, &dir, &|_| {});
+                                    let msg = match &r {
+                                        Ok(f) => (format!("Klap's clip is saved: {}", f.display()), true),
+                                        Err(e) => (format!("Klap download failed: {e}"), false),
+                                    };
+                                    if let (Ok(f), Some(x)) = (r, lock(&runs).iter_mut().find(|x| x.id == id))
+                                        && let Some(Ok(list)) = x.klap.as_mut()
+                                        && let Some(slot) = list.get_mut(n)
+                                    {
+                                        slot.1 = Some(f);
+                                    }
+                                    Done::Notice(msg)
+                                });
+                            }
+                        }
+                    }
+                });
+                if !c.explanation.is_empty() {
+                    ui.label(RichText::new(&c.explanation).small().italics().color(t.text_dim));
+                }
+            }
+        }
+    }
+}
+
+/// Published posts with a virality prediction, beside their real views, likes and comments.
+fn results_view(app: &mut FilmcraftApp, ui: &mut egui::Ui, ctx: &super::Ctx) {
+    let t = app.tokens;
+    let Some(ch) = ctx.channel else { return };
+    ui.separator();
+    ui.label(RichText::new("4 · Predictions vs results").strong());
+    ui.label(
+        RichText::new("Virality scores are predictions. This compares them with how the published posts actually did, so you can see whether they hold for JKR.")
+            .small()
+            .color(t.text_dim),
+    );
+    let id = egui::Id::new(("virality-results", ch));
+    let busy = rt().tasks.iter().any(|(l, _)| l == "Virality results");
+    let b = ui.add_enabled(!busy, egui::Button::new(if busy { "Checking…" } else { "Check results" }));
+    app.auto.add_response("ai.viralityResults", &b, "Check virality predictions against results");
+    if b.clicked() {
+        let s = ctx.s.clone();
+        let ectx = ui.ctx().clone();
+        spawn(&mut rt(), "Virality results", move || {
+            let r = filmcraft_studio::virality::results(&s, ch).map_err(|e| e.to_string());
+            ectx.data_mut(|d| d.insert_temp(id, std::sync::Arc::new(r)));
+            Done::Message(String::new())
+        });
+    }
+    let shown: Option<std::sync::Arc<Result<(Vec<filmcraft_studio::virality::PostResult>, Option<f64>), String>>> = ui.data(|d| d.get_temp(id));
+    match shown.as_deref() {
+        Some(Ok((rows, rho))) if rows.is_empty() => {
+            let _ = rho;
+            ui.label(RichText::new("No published post carries a score yet: Reels made with the analyzer do, once published.").small().color(t.text_dim));
+        }
+        Some(Ok((rows, rho))) => {
+            ui.label(RichText::new(match rho {
+                Some(r) => format!("Rank correlation of score and views: {r:+.2} over {} posts (near +1: the score predicts; near 0: it does not yet)", rows.iter().filter(|r| r.views.is_some()).count()),
+                None => "Fewer than three posts with views: too few to judge yet.".to_string(),
+            }).small());
+            let mut rows = rows.clone();
+            rows.sort_by(|a, b| b.score.total_cmp(&a.score));
+            for r in rows {
+                let n = |v: Option<f64>| v.map_or("–".to_string(), |v| format!("{v:.0}"));
+                ui.label(RichText::new(format!("{:.0} · {} · {} views · {} likes · {} comments · {}", r.score, r.platform.to_lowercase(), n(r.views), n(r.likes), n(r.comments), r.title)).small());
+            }
+        }
+        Some(Err(e)) => {
+            ui.label(RichText::new(e).small().color(t.danger));
+        }
+        None => {}
     }
 }
 
@@ -441,6 +649,10 @@ pub(super) fn make_reels(app: &mut FilmcraftApp, ctx: &super::Ctx, run: &Run) ->
     for (i, seg) in parts.into_iter().enumerate() {
         let name = if many { format!("{base} – part {}", i + 1) } else { base.clone() };
         // The hook edit is its own clip; otherwise the range of the download.
+        // The prediction travels with the post, to compare with its results later.
+        let mut seg = seg.clone();
+        seg.card.virality = seg.score;
+        let seg = &seg;
         let params = match seg.file.as_ref().filter(|f| f.is_file()) {
             Some(edit) => json!({
                 "name": name, "template": template, "brand": ctx.brand, "channelId": run.channel, "card": seg.card, "format": format.id(),

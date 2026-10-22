@@ -63,6 +63,13 @@ pub struct Segment {
     pub pieces: Vec<Piece>,
     /// The clip [`assemble`] made from `pieces`.
     pub file: Option<PathBuf>,
+    /// The analyzer's virality prediction, 0–100 (not a guarantee of views).
+    pub score: Option<f64>,
+    pub scores: Option<crate::virality::Scores>,
+    /// Suggested opening lines for the on-screen text.
+    pub hooks: Vec<String>,
+    /// The main subject's horizontal centre (0–1): the edit is cropped to 9:16 around it.
+    pub focus_x: Option<f64>,
 }
 
 /// A range of the source, in seconds.
@@ -283,7 +290,7 @@ fn ask(studio: &Studio, channel: i64, meta: &Value, duration: f64, w: &Wants, li
                 .flatten()
                 .filter_map(|k| Some(Piece { start: k.get("start")?.as_f64()?, end: k.get("end")?.as_f64()? }))
                 .collect(),
-            file: None,
+            ..Default::default()
         });
     }
     Ok(out)
@@ -360,6 +367,19 @@ fn tidy_pieces(s: &mut Segment, w: &Wants) {
     s.pieces = std::iter::once(hook).chain(rest).collect();
 }
 
+/// [`join_filter`], then a 9:16 crop centred on `focus_x` (0–1) for wide video (a portrait
+/// video is kept as it is), with even sides for H.264.
+pub fn join_filter_cropped(pieces: &[Piece], audio: bool, focus_x: Option<f64>) -> String {
+    let joined = join_filter(pieces, audio);
+    let Some(x) = focus_x.filter(|x| x.is_finite()) else { return joined };
+    let x = x.clamp(0.0, 1.0);
+    // The joined picture is [v]; crop it into [vc] and hand that on as [v].
+    let joined = joined.replacen("[v]", "[vj]", 1);
+    format!(
+        "{joined};[vj]crop='min(iw,ih*9/16)':'ih':'(iw-min(iw,ih*9/16))*{x:.3}':'0',scale='trunc(iw/2)*2':'trunc(ih/2)*2'[v]"
+    )
+}
+
 /// FFmpeg's filter joining `pieces` of input 0, with or without sound.
 pub fn join_filter(pieces: &[Piece], audio: bool) -> String {
     let mut f = String::new();
@@ -392,7 +412,7 @@ pub fn assemble(studio: &Studio, source: &Path, seg: &Segment) -> Result<PathBuf
     for audio in [true, false] {
         let mut c = std::process::Command::new(&ffmpeg);
         c.args(["-y", "-hide_banner", "-loglevel", "error", "-i"]).arg(source);
-        c.args(["-filter_complex", &join_filter(pieces, audio), "-map", "[v]"]);
+        c.args(["-filter_complex", &join_filter_cropped(pieces, audio, seg.focus_x), "-map", "[v]"]);
         if audio {
             c.args(["-map", "[a]", "-c:a", "aac", "-b:a", "192k"]);
         }

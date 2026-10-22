@@ -689,3 +689,34 @@ fn a_long_video_is_a_video_not_a_short() {
     let p: Vec<(f64, f64)> = out[0].pieces.iter().map(|p| (p.start, p.end)).collect();
     assert_eq!(p, vec![(900.0, 915.0), (20.0, 400.0), (500.0, 720.0)], "hook 15 s, then 600 s in all");
 }
+
+#[test]
+fn the_analyzer_groups_words_and_picks_lively_sentence_aligned_moments() {
+    use crate::autopilot::{Piece, Wants, join_filter_cropped};
+    use crate::virality::{candidates, lines_from_words, spearman};
+    let words = vec![(0.0, 0.4, "Hello".to_string()), (0.5, 0.9, "there.".to_string()), (1.0, 1.3, "Next".to_string()), (3.0, 3.4, "after".to_string())];
+    assert_eq!(lines_from_words(&words), vec![(0.0, "Hello there.".to_string()), (1.0, "Next".to_string()), (3.0, "after".to_string())]);
+    // a quiet minute with one loud, cut-heavy, hook-worded stretch at 40-60 s
+    let lines: Vec<(f64, String)> = (0..20).map(|i| (i as f64 * 5.0, if i == 8 { "Wait, you won't believe this?".into() } else { "and then we kept going".into() })).collect();
+    let mut loud = vec![-35.0; 200];
+    for v in &mut loud[80..120] {
+        *v = -12.0;
+    }
+    loud[95] = -2.0;
+    let cuts: Vec<f64> = (0..10).map(|i| 41.0 + i as f64 * 2.0).collect();
+    let w = Wants { min_seconds: 15.0, max_seconds: 20.0, ..Default::default() };
+    let c = candidates(&lines, &loud, &cuts, 100.0, &w, 3);
+    assert!((c[0].start - 40.0).abs() < 0.01, "{c:?}");
+    assert!((c[0].peak - 47.5).abs() < 0.01);
+    assert!(c.windows(2).all(|p| p[0].signal >= p[1].signal));
+    assert!(c.iter().enumerate().all(|(i, a)| c.iter().skip(i + 1).all(|b| a.end <= b.start || b.end <= a.start)), "apart");
+    // the crop centres the subject in a 9:16 window and keeps even sides
+    let f = join_filter_cropped(&[Piece { start: 0.0, end: 2.0 }], true, Some(0.3));
+    assert!(f.contains("concat=n=1:v=1:a=1[vj][a];[vj]crop='min(iw,ih*9/16)':'ih':'(iw-min(iw,ih*9/16))*0.300':'0'"), "{f}");
+    assert!(f.ends_with("[v]"));
+    assert_eq!(join_filter_cropped(&[Piece { start: 0.0, end: 2.0 }], false, None), crate::autopilot::join_filter(&[Piece { start: 0.0, end: 2.0 }], false));
+    // predictions vs results
+    assert_eq!(spearman(&[1.0, 2.0, 3.0, 4.0], &[10.0, 20.0, 30.0, 40.0]).map(|r| (r * 100.0).round()), Some(100.0));
+    assert_eq!(spearman(&[1.0, 2.0, 3.0], &[30.0, 20.0, 10.0]).map(|r| (r * 100.0).round()), Some(-100.0));
+    assert_eq!(spearman(&[1.0, 2.0], &[1.0, 2.0]), None);
+}

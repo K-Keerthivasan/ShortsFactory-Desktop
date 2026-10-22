@@ -81,6 +81,26 @@ pub fn thumbnail_once(studio: &Studio, job: i64, channel: i64, secret: &Value, v
     let _ = studio.checkpoint(job, channel, &state);
 }
 
+/// A video's views, likes and comments (`videos.list` statistics, 1 quota unit).
+pub fn statistics(secret: &Value, video: &str) -> std::result::Result<(Option<f64>, Option<f64>, Option<f64>), String> {
+    let agent = ureq::AgentBuilder::new().timeout_connect(Duration::from_secs(30)).timeout(Duration::from_secs(60)).build();
+    let access = token(&agent, secret).map_err(|e| match e {
+        PublishError::Retry(m) | PublishError::Reconcile(m) => m,
+    })?;
+    let v: Value = agent
+        .get("https://www.googleapis.com/youtube/v3/videos")
+        .query("part", "statistics")
+        .query("id", video)
+        .set("Authorization", &format!("Bearer {access}"))
+        .call()
+        .map_err(|e| e.to_string())?
+        .into_json()
+        .map_err(|e| e.to_string())?;
+    let st = v.pointer("/items/0/statistics").cloned().unwrap_or(Value::Null);
+    let n = |k: &str| st.get(k).and_then(Value::as_str).and_then(|s| s.parse::<f64>().ok());
+    Ok((n("viewCount"), n("likeCount"), n("commentCount")))
+}
+
 /// Moves a scheduled (private, not yet public) video's YouTube publish time.
 pub fn set_publish_at(secret: &Value, video: &str, at: &str) -> std::result::Result<(), String> {
     if video.len() != 11 || !video.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {

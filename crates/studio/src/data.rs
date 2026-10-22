@@ -1012,5 +1012,6 @@ pub fn script_json(reel: &ReelInfo, clip: Option<Value>, duration: f64) -> Value
         "hashtags": card.hashtags,
         "cta": if card.cta.trim().is_empty() { Value::Null } else { Value::from(cap(&card.cta, 250)) },
         "topic": "",
+        "virality": card.virality,
     })
 }

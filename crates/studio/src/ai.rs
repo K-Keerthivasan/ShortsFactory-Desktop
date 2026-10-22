@@ -87,6 +87,7 @@ pub(crate) fn ask(studio: &Studio, instruction: &str, input: &Value, schema: &Va
     Ok(match provider(studio).as_str() {
         "mock" => None,
         "ollama" => Some(ollama(studio, instruction, input, schema)?),
+        "nvidia" => Some(nvidia(studio, instruction, input, schema)?),
         "codex" => Some(codex(studio, instruction, input, schema)?),
         // Hermes (the user's own setup, e.g. Codex); when it fails, the local Ollama if it answers.
         _ => Some(match hermes(studio, instruction, input, schema) {
@@ -97,6 +98,31 @@ pub(crate) fn ask(studio: &Studio, instruction: &str, input: &Value, schema: &Va
             Err(e) => return Err(e),
         }),
     })
+}
+
+/// NVIDIA NIM (build.nvidia.com, free with an API key): `NVIDIA_API_KEY`, `NVIDIA_MODEL`
+/// (default nvidia/nemotron-3-super-120b-a12b), OpenAI-compatible chat completions.
+fn nvidia(studio: &Studio, instruction: &str, input: &Value, schema: &Value) -> Result<Value> {
+    let key = studio.var("NVIDIA_API_KEY").ok_or_else(|| StudioError::Other("set NVIDIA_API_KEY (Plugin Settings ▸ AI) to use NVIDIA".into()))?;
+    let model = studio.var("NVIDIA_MODEL").unwrap_or("nvidia/nemotron-3-super-120b-a12b").to_string();
+    let system = [instruction, UNTRUSTED, "Reply with a single JSON object matching this JSON Schema. No prose, no markdown fences.", &schema.to_string()].join("\n\n");
+    let body = json!({"model": model, "temperature": 0.4, "max_tokens": 4096, "messages": [
+        {"role": "system", "content": system},
+        {"role": "user", "content": format!("INPUT:\n{input}")}
+    ]});
+    let reply: Value = ureq::AgentBuilder::new()
+        .timeout(Duration::from_secs(300))
+        .build()
+        .post("https://integrate.api.nvidia.com/v1/chat/completions")
+        .set("Authorization", &format!("Bearer {key}"))
+        .send_json(body)
+        .map_err(|e| StudioError::Other(format!("NVIDIA ({model}): {}", crate::virality::nim_error(e))))?
+        .into_json()
+        .map_err(|e| StudioError::Other(format!("NVIDIA returned an unreadable reply: {e}")))?;
+    let content = reply.pointer("/choices/0/message/content").and_then(Value::as_str).unwrap_or_default();
+    // Reasoning models think first; the JSON follows.
+    let content = content.rsplit("</think>").next().unwrap_or(content);
+    serde_json::from_str(extract_json(content)?).map_err(|e| StudioError::Other(format!("NVIDIA's answer is not JSON: {e}")))
 }
 
 /// The Codex CLI (`codex exec`), read-only and in an empty folder, for its last message.

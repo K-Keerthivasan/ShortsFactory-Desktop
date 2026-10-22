@@ -121,6 +121,9 @@ pub struct Card {
     pub hashtags: Vec<String>,
     /// The Short's title on YouTube (up to 100 characters); empty uses the headline.
     pub youtube_title: String,
+    /// The analyzer's virality prediction (0–100) for the moment this Reel was made from.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub virality: Option<f64>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
