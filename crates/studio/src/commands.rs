@@ -421,6 +421,44 @@ pub fn register() {
                 .map_err(err)?;
             to_value(clips)
         }),
+        spec(
+            "studio.flick",
+            "Flick Motion Scenes",
+            r#"{"action":"status"|"setup"|"run","channel":n?,"dir":str? (where the run goes),"lines":[{"start":f,"end":f,"text":str}]?,"direction":str?,"size":[w,h]?,"footageArea":[x,y,w,h]?,"overlay":bool?,"build":bool?} — Flick's animated Remotion scenes: plan (and build, rendering each scene) for a Reel's words"#,
+            true,
+            |_, p| {
+                let s = studio()?;
+                match text(p, "action")? {
+                    "status" => to_value(crate::flick::status(&s)),
+                    "setup" => {
+                        crate::flick::setup(&s, &|m| log::info!("flick: {m}")).map_err(err)?;
+                        to_value(crate::flick::status(&s))
+                    }
+                    "run" => {
+                        let lines: Vec<(f64, f64, String)> = p
+                            .get("lines")
+                            .and_then(Value::as_array)
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|l| Some((l.get("start")?.as_f64()?, l.get("end")?.as_f64()?, l.get("text")?.as_str()?.to_string())))
+                            .collect();
+                        let size = p.get("size").and_then(Value::as_array).and_then(|a| Some((a.first()?.as_u64()? as u32, a.get(1)?.as_u64()? as u32))).unwrap_or((1080, 1920));
+                        let dir = std::path::PathBuf::from(text(p, "dir")?);
+                        let mut run = crate::flick::start(&s, &dir, lines, size, p.get("direction").and_then(Value::as_str).unwrap_or(""), &[]).map_err(err)?;
+                        run.footage_area = p.get("footageArea").and_then(Value::as_array).and_then(|a| Some([a.first()?.as_f64()?, a.get(1)?.as_f64()?, a.get(2)?.as_f64()?, a.get(3)?.as_f64()?]));
+                        if let Some(o) = p.get("overlay").and_then(Value::as_bool) {
+                            run.overlay = o;
+                        }
+                        crate::flick::plan(&s, int(p, "channel")?, &mut run).map_err(err)?;
+                        if p.get("build").and_then(Value::as_bool) == Some(true) {
+                            crate::flick::build(&s, &mut run, &|m| log::info!("flick: {m}")).map_err(err)?;
+                        }
+                        to_value(run)
+                    }
+                    other => Err(bad(format!("unknown action `{other}`"))),
+                }
+            },
+        ),
         spec("studio.calendar", "Publishing Calendar", r#"{"channel":n?,"from":"ISO","to":"ISO"}"#, false, |_, p| {
             let channel = p.get("channel").and_then(Value::as_i64);
             to_value(studio()?.calendar(channel, text(p, "from")?, text(p, "to")?).map_err(err)?)

@@ -23,6 +23,7 @@ pub mod notifications;
 pub mod settings;
 pub mod workflow;
 pub mod cloud_youtube;
+pub mod flick;
 pub mod klap;
 pub mod thumbnails;
 pub mod virality;

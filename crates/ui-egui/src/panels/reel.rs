@@ -30,6 +30,8 @@ use crate::FilmcraftApp;
 
 #[path = "reel_ai.rs"]
 mod ai;
+#[path = "reel_motion.rs"]
+mod motion;
 #[path = "reel_delivery.rs"]
 mod delivery;
 #[path = "reel_gaps.rs"]
@@ -148,6 +150,7 @@ pub enum DesignTab {
     Card,
     Ai,
     Caption,
+    Motion,
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PublishTab {
@@ -453,6 +456,8 @@ fn footage(app: &FilmcraftApp, info: &ReelInfo) -> Option<(std::path::PathBuf, f
 
 /// Background results and exports finishing; runs every frame, also when the panel is hidden.
 pub fn poll(app: &mut FilmcraftApp, now: f64) {
+    // Flick's finished scenes go onto their Reel when it is open.
+    motion::tick(app);
     let mut r = rt();
     let mut finished = Vec::new();
     r.tasks.retain(|(label, rx)| match rx.try_recv() {
@@ -1511,6 +1516,7 @@ pub fn show_design(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
             (DesignTab::Card, "card", "Card"),
             (DesignTab::Ai, "ai", "Use AI"),
             (DesignTab::Caption, "caption", "Caption & hashtags"),
+            (DesignTab::Motion, "motion", "Motion (Flick)"),
         ],
     );
     app.ui.reel.design_tab = tab;
@@ -1536,6 +1542,12 @@ pub fn show_design(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 }
             },
             DesignTab::Caption => card(app, ui, is_reel, CardPart::Caption),
+            DesignTab::Motion => match &ctx {
+                Some(c) => motion::show(app, ui, &c.s),
+                None => {
+                    ui.label(RichText::new("Flick needs the Shorts Factory library.").small().color(t.text_dim));
+                }
+            },
         }
     });
 }
@@ -2284,6 +2296,8 @@ fn plugin_settings(app: &mut FilmcraftApp, ctx: &egui::Context) {
                         ("OLLAMA_VISION_MODEL", "Ollama vision model (default gemma3:latest)", false),
                         ("NVIDIA_VISION_MODEL", "NVIDIA vision model (default meta/llama-3.2-90b-vision-instruct)", false),
                         ("KLAP_API_KEY", "Klap API key (optional, paid)", true),
+                        ("FLICK_AGENT", "Flick builder: claude (default), codex or hermes", false),
+                        ("FLICK_TIMEOUT_MS", "Flick build time limit (ms, default 2400000)", false),
                         ("HERMES_BIN", "Hermes program", false),
                         ("HERMES_MODEL_POST", "Hermes model (empty: Hermes's own default)", false),
                         ("HERMES_PROVIDER", "Hermes provider (empty: Hermes's own, e.g. Codex; ollama: local)", false),

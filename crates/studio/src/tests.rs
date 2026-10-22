@@ -720,3 +720,20 @@ fn the_analyzer_groups_words_and_picks_lively_sentence_aligned_moments() {
     assert_eq!(spearman(&[1.0, 2.0, 3.0], &[30.0, 20.0, 10.0]).map(|r| (r * 100.0).round()), Some(-100.0));
     assert_eq!(spearman(&[1.0, 2.0], &[1.0, 2.0]), None);
 }
+
+#[test]
+fn a_moments_words_follow_its_edit_into_reel_time() {
+    use crate::autopilot::{Piece, Segment};
+    let seg = Segment {
+        start: 10.0,
+        end: 30.0,
+        lines: vec![(10.0, 14.0, "intro".into()), (20.0, 23.0, "the reveal".into()), (25.0, 29.0, "ending".into())],
+        // hook 20-23 first, then 10-15 and 25-30
+        pieces: vec![Piece { start: 20.0, end: 23.0 }, Piece { start: 10.0, end: 15.0 }, Piece { start: 25.0, end: 30.0 }],
+        ..Default::default()
+    };
+    assert_eq!(seg.reel_lines(), vec![(0.0, 3.0, "the reveal".to_string()), (3.0, 7.0, "intro".to_string()), (8.0, 12.0, "ending".to_string())]);
+    let plain = Segment { pieces: vec![], ..seg.clone() };
+    assert_eq!(plain.reel_lines()[1], (10.0, 13.0, "the reveal".to_string()));
+    assert_eq!(crate::flick::kebab("The Big Reveal!! 2"), "the-big-reveal-2");
+}

@@ -282,6 +282,35 @@ Klap and lists its shorts with Klap's own scores and explanations; each can be d
 opened as a Reel. Klap does not return source times, so its clips are finished videos rather
 than editable ranges. Uses Klap credits. MCP: `studio.klap`.
 
+## 11c. Flick motion scenes (Remotion), merged with the analyzer
+
+[Flick](https://github.com/Creatorberry/flick) (Creatorberry, MIT) turns a video's words into
+original animated scenes, one per line, built in Remotion. The app runs Flick's workflow itself
+with Flick's own rules, starter project, sound effects and saved animations, fetched once at a
+pinned version (no Claude Code plugin needed):
+
+1. **Words**: the analyzer's transcript of the moment, mapped into the Reel's time (the hook
+   piece first), or Whisper on the Reel's footage, or pasted lines (`[12.5] text`).
+2. **Plan**: the workspace's AI writes Flick's storyboard (step 2's rules): per scene the
+   transcript, what is on screen, text, sequence, sound effect and transition. From the
+   analyzer, the direction is the moment's best hook and why it scored.
+3. **Build**: a coding agent writes one Remotion component per approved scene from the brief and
+   scene spec the app writes (`FLICK_AGENT`: `claude`, the default, `codex` or `hermes`;
+   `FLICK_TIMEOUT_MS`), then the app renders each scene and its poster.
+4. **Onto the Reel**: the scenes go on a new top video track at their times, their sound effects
+   on a new audio track, the first time the Reel is open; caption rendering and the GPU export
+   stay the editor's.
+
+AI panel: **Add Flick motion scenes** queues this for every Reel the analyzer makes (one job at a
+time); **Review Flick's plan first** stops at the plan. Reel Studio ▸ Design ▸ **Motion (Flick)**
+shows each Reel's plan to edit and approve, the rendered scenes, **Revise this scene** from
+feedback (only that scene), **Preview in Remotion Studio**, and **Save as reusable** (adds the
+component to Flick's library for later runs). **Set up Flick** (once) fetches Flick and installs
+Remotion and its headless browser in the app's tools folder; it needs Node.js 20+. Each run's
+files are in the project's `Motion` folder (`flick-<time>/`: `transcript.json`,
+`flick-plan.md`, `remotion-brief.md`, `scene-spec.json`, `remotion/`, `scenes/`). MCP:
+`studio.flick` (`status`, `setup`, `run`).
+
 ## 12. Account health and token notifications
 
 | Feature | Status |

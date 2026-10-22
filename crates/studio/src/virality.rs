@@ -526,6 +526,15 @@ pub fn analyze(studio: &Studio, channel: i64, video: &Path, meta: Option<&Value>
         }
     };
     let mut segs = crate::autopilot::clean(ranked, a.duration, &w);
+    // Each moment keeps its words, for Flick's scenes.
+    for s in &mut segs {
+        s.lines = lines
+            .iter()
+            .enumerate()
+            .map(|(i, (t, l))| (*t, lines.get(i + 1).map_or(t + 5.0, |n| n.0.min(t + 8.0)), l.clone()))
+            .filter(|(a, b, _)| *b > s.start && *a < s.end)
+            .collect();
+    }
     segs.sort_by(|x, y| y.score.unwrap_or(0.0).total_cmp(&x.score.unwrap_or(0.0)));
     a.segments = segs;
     Ok(a)

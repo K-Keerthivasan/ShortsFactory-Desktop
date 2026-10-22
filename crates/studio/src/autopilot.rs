@@ -70,6 +70,8 @@ pub struct Segment {
     pub hooks: Vec<String>,
     /// The main subject's horizontal centre (0–1): the edit is cropped to 9:16 around it.
     pub focus_x: Option<f64>,
+    /// The words spoken in the part (start, end, text), in source seconds.
+    pub lines: Vec<(f64, f64, String)>,
 }
 
 /// A range of the source, in seconds.
@@ -84,6 +86,37 @@ impl Segment {
     /// How long the Reel plays.
     pub fn seconds(&self) -> f64 {
         if self.pieces.is_empty() { (self.end - self.start).max(0.0) } else { self.pieces.iter().map(|p| (p.end - p.start).max(0.0)).sum() }
+    }
+}
+
+impl Segment {
+    /// The part's words in the time of the Reel made from it: the edit's pieces play one after
+    /// another (the hook first), so a word keeps its place within its piece.
+    pub fn reel_lines(&self) -> Vec<(f64, f64, String)> {
+        let plain = [Piece { start: self.start, end: self.end }];
+        let pieces: &[Piece] = if self.pieces.is_empty() { &plain } else { &self.pieces };
+        let mut out = Vec::new();
+        let mut offset = 0.0;
+        for p in pieces {
+            for (a, b, t) in &self.lines {
+                let (a2, b2) = (a.max(p.start), b.min(p.end));
+                if b2 - a2 >= 0.3 {
+                    out.push((offset + a2 - p.start, offset + b2 - p.start, t.clone()));
+                }
+            }
+            offset += (p.end - p.start).max(0.0);
+        }
+        out
+    }
+
+    /// Flick's direction for the Reel: open on the hook, make every line a visual proof.
+    pub fn motion_direction(&self) -> String {
+        let hook = self.hooks.first().cloned().unwrap_or_else(|| self.card.title.clone());
+        format!(
+            "This is a {}-second vertical short for a gaming/tech channel. Hook: \"{hook}\". Why it works: {}. The first scene must be the visual proof of the hook in the first two seconds; every later scene animates exactly what is said, as an overlay that complements the footage (leave the main subject visible where you can). Fast, bold, readable, built to stop the scroll; no generic title cards.",
+            self.seconds().round(),
+            if self.why.is_empty() { "a striking moment" } else { &self.why }
+        )
     }
 }
 

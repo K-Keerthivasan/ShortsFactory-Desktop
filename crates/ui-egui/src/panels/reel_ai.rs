@@ -34,11 +34,15 @@ pub struct AiDraft {
     pub queue: bool,
     /// Use the virality analyzer (Whisper, a vision model and FFmpeg) to find the moments.
     pub analyzer: bool,
+    /// Animate each new Reel with Flick (Remotion scenes over the footage).
+    pub flick: bool,
+    /// Stop at Flick's plan for review before building.
+    pub flick_review: bool,
 }
 
 impl Default for AiDraft {
     fn default() -> Self {
-        AiDraft { links: String::new(), wants: Wants::default(), template: String::new(), format: Format::Reel, queue: true, analyzer: true }
+        AiDraft { links: String::new(), wants: Wants::default(), template: String::new(), format: Format::Reel, queue: true, analyzer: true, flick: false, flick_review: true }
     }
 }
 
@@ -134,6 +138,17 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 .on_hover_text("Whisper (when there are no captions), a vision model and FFmpeg find the viral moments, score them 0-100, suggest hooks and crop to 9:16 on the subject");
             let (vp, vm) = filmcraft_studio::virality::vision_provider(&ctx.s);
             ui.label(RichText::new(format!("vision: {}", if vp == "off" { "off".to_string() } else { format!("{vp} {vm}") })).small().color(t.text_dim));
+        });
+        let flick_ready = { let st = filmcraft_studio::flick::status(&ctx.s); st.skill && st.remotion };
+        ui.horizontal_wrapped(|ui| {
+            ui.add_enabled(flick_ready, egui::Checkbox::new(&mut app.ui.reel.ai.flick, "Add Flick motion scenes"))
+                .on_hover_text("After each Reel is made, Flick plans and builds animated Remotion scenes for its words, opening on the hook, and puts them on the Reel");
+            if app.ui.reel.ai.flick {
+                ui.checkbox(&mut app.ui.reel.ai.flick_review, "Review Flick's plan first");
+            }
+            if !flick_ready {
+                ui.label(RichText::new("(set up Flick in Reel Studio ▸ Design ▸ Motion)").small().color(t.text_dim));
+            }
         });
         if app.ui.reel.ai.analyzer {
             match filmcraft_studio::virality::whisper_ready() {
@@ -664,8 +679,21 @@ pub(super) fn make_reels(app: &mut FilmcraftApp, ctx: &super::Ctx, run: &Run) ->
             }),
         };
         match app.session.execute("reel.new", params) {
-            Ok(_) => {
+            Ok(v) => {
                 made += 1;
+                // Flick: animated scenes for the Reel's words, opening on its hook.
+                let lines = seg.reel_lines();
+                if app.ui.reel.ai.flick
+                    && !lines.is_empty()
+                    && let Some(seq) = v.get("sequence").and_then(|x| x.as_u64())
+                    && let Some(s) = super::studio(&mut rt())
+                {
+                    let size = app.session.active_sequence().map_or((1080, 1920), |q| (q.settings.width, q.settings.height));
+                    match filmcraft_studio::project_folder(app.session.path.as_deref(), "Motion") {
+                        Ok(parent) => super::motion::queue_plan(seq, &s, run.channel, parent, lines, size, seg.motion_direction(), super::motion::brand_files(), app.ui.reel.ai.flick_review, super::motion::footage_area(app)),
+                        Err(e) => log(&mut rt(), format!("Flick skipped for “{name}”: {e}")),
+                    }
+                }
                 if queue && let Some(info) = filmcraft_engine::reel::current(&app.session) {
                     enqueue(app, &info, QueueAction::LibraryOnly);
                 }
