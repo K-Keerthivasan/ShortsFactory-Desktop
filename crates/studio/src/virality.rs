@@ -136,8 +136,25 @@ pub fn whisper(video: &Path) -> Result<Vec<(f64, String)>> {
     Ok(lines_from_words(&words))
 }
 
-/// Can this build run Whisper, and is a model there?
+/// Can this build run Whisper, and is a model there? Panels ask every frame, so the answer is
+/// kept for ten seconds (a download clears it).
 pub fn whisper_ready() -> std::result::Result<(), String> {
+    static CACHE: std::sync::Mutex<Option<(std::time::Instant, std::result::Result<(), String>)>> = std::sync::Mutex::new(None);
+    let mut c = CACHE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if WHISPER_FRESH.swap(false, std::sync::atomic::Ordering::SeqCst) {
+        *c = None;
+    }
+    if let Some((_, r)) = c.as_ref().filter(|(at, _)| at.elapsed() < Duration::from_secs(10)) {
+        return r.clone();
+    }
+    let r = whisper_ready_now();
+    *c = Some((std::time::Instant::now(), r.clone()));
+    r
+}
+
+static WHISPER_FRESH: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn whisper_ready_now() -> std::result::Result<(), String> {
     let mut s = filmcraft_engine::Session::default();
     let models = s.execute("transcript.models", json!({})).map_err(|e| e.to_string())?;
     if !filmcraft_engine::transcript::speech_available() {
@@ -151,6 +168,7 @@ pub fn whisper_ready() -> std::result::Result<(), String> {
 pub fn download_whisper() -> Result<String> {
     let mut s = filmcraft_engine::Session::default();
     let r = s.execute("transcript.downloadModel", json!({})).map_err(|e| StudioError::Other(e.to_string()))?;
+    WHISPER_FRESH.store(true, std::sync::atomic::Ordering::SeqCst);
     Ok(r.get("model").and_then(Value::as_str).unwrap_or("whisper-base").to_string())
 }
 

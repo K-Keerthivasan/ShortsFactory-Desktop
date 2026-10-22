@@ -75,7 +75,28 @@ pub fn agent(studio: &Studio) -> String {
     studio.var("FLICK_AGENT").map(str::to_ascii_lowercase).filter(|a| ["claude", "codex", "hermes"].contains(&a.as_str())).unwrap_or_else(|| "claude".into())
 }
 
+/// [`status`] as of the last few seconds: panels ask every frame, and finding Node starts a
+/// process, so the answer is kept for ten seconds (setup clears it).
 pub fn status(studio: &Studio) -> Status {
+    static CACHE: std::sync::Mutex<Option<(std::time::Instant, Status)>> = std::sync::Mutex::new(None);
+    let mut c = CACHE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if FRESH.swap(false, std::sync::atomic::Ordering::SeqCst) {
+        *c = None;
+    }
+    if let Some((at, s)) = c.as_ref().filter(|(at, _)| at.elapsed() < Duration::from_secs(10)) {
+        let _ = at;
+        return s.clone();
+    }
+    let s = status_now(studio);
+    *c = Some((std::time::Instant::now(), s.clone()));
+    s
+}
+
+/// Set when setup changed what is installed.
+static FRESH: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// What is ready, checked now.
+pub fn status_now(studio: &Studio) -> Status {
     let node = quiet(&mut Command::new("node")).arg("--version").output().ok().filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
     Status {
         node,
@@ -88,7 +109,7 @@ pub fn status(studio: &Studio) -> Status {
 /// Fetches Flick's files at [`COMMIT`], installs Remotion in the starter project and its
 /// headless browser. Blocking (minutes; downloads a few hundred MB once).
 pub fn setup(studio: &Studio, say: &dyn Fn(&str)) -> Result<()> {
-    let st = status(studio);
+    let st = status_now(studio);
     let major: u32 = st.node.as_deref().and_then(|v| v.trim_start_matches('v').split('.').next()?.parse().ok()).unwrap_or(0);
     if major < 20 {
         return err("Flick needs Node.js 20 or newer (winget install OpenJS.NodeJS.LTS)");
@@ -136,12 +157,13 @@ pub fn setup(studio: &Studio, say: &dyn Fn(&str)) -> Result<()> {
     if !t.join("package.json").is_file() {
         copy_dir(&skill(studio).join("assets").join("starter-remotion"), &t)?;
     }
-    if !status(studio).remotion {
+    if !status_now(studio).remotion {
         say("Installing Remotion (once)");
         run(node_tool("npm").args(["install", "--no-audit", "--no-fund"]).current_dir(&t), Duration::from_secs(1800), None)?;
     }
     say("Preparing Remotion's browser");
     run(node_tool("npx").args(["remotion", "browser", "ensure"]).current_dir(&t), Duration::from_secs(1800), None)?;
+    FRESH.store(true, std::sync::atomic::Ordering::SeqCst);
     Ok(())
 }
 
