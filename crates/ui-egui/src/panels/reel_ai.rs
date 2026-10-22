@@ -42,7 +42,7 @@ pub struct AiDraft {
 
 impl Default for AiDraft {
     fn default() -> Self {
-        AiDraft { links: String::new(), wants: Wants::default(), template: String::new(), format: Format::Reel, queue: true, analyzer: true, flick: false, flick_review: true }
+        AiDraft { links: String::new(), wants: Wants::default(), template: String::new(), format: Format::Reel, queue: false, analyzer: true, flick: false, flick_review: true }
     }
 }
 
@@ -63,6 +63,8 @@ pub(super) struct Run {
     pub long: bool,
     /// Found by the virality analyzer.
     pub analyzed: bool,
+    /// Make the Reels as soon as the parts are found (the Create panel's AI Reels).
+    pub auto_make: bool,
     /// Klap's shorts for comparison: each with its downloaded file, or why it failed.
     pub klap: Option<Result<Vec<(filmcraft_studio::klap::Clip, Option<std::path::PathBuf>)>, String>>,
 }
@@ -200,7 +202,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         {
             let wants = app.ui.reel.ai.wants.clone();
             let options = app.ui.reel.download.clone();
-            find(&ctx.s, ch, links, wants, app.ui.reel.ai.analyzer, options, None, &runs);
+            find(&ctx.s, ch, links, Vec::new(), wants, app.ui.reel.ai.analyzer, false, options, None, &runs);
             app.ui.reel.ai.links.clear();
         }
 
@@ -255,28 +257,45 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
 }
 
 /// Downloads each link and asks the AI for its parts, on a worker.
+/// Downloads each link (workspace clips are already here), then finds the parts on a worker;
+/// with `auto` the Reels are made as soon as the parts are found.
 #[allow(clippy::too_many_arguments)]
-fn find(
+pub(super) fn find(
     s: &Studio,
     channel: i64,
     links: Vec<String>,
+    files: Vec<(std::path::PathBuf, String)>,
     wants: Wants,
     analyzer: bool,
+    auto: bool,
     options: filmcraft_studio::ytdlp::Options,
     save_to: Option<std::path::PathBuf>,
     runs: &Runs,
 ) {
     let ids: Vec<u64> = {
         let mut l = lock(runs);
-        links
-            .iter()
-            .map(|url| {
-                let id = super::next_id();
-                let import = Import { url: url.clone(), options: options.clone(), no_draft: true, save_to: save_to.clone(), ..Default::default() };
-                l.insert(0, Run { id, channel, import, stage: "Waiting".into(), long: wants.mode == Mode::Long, analyzed: analyzer && wants.mode != Mode::Long, ..Default::default() });
-                id
-            })
-            .collect()
+        let mut ids = Vec::new();
+        let flags = |import: Import| Run {
+            id: super::next_id(),
+            channel,
+            import,
+            stage: "Waiting".into(),
+            long: wants.mode == Mode::Long,
+            analyzed: analyzer && wants.mode != Mode::Long,
+            auto_make: auto,
+            ..Default::default()
+        };
+        for url in &links {
+            let run = flags(Import { url: url.clone(), options: options.clone(), no_draft: true, save_to: save_to.clone(), ..Default::default() });
+            ids.push(run.id);
+            l.insert(0, run);
+        }
+        for (file, title) in &files {
+            let run = flags(Import { file: Some(file.clone()), title: title.clone(), stage: "Done".into(), ..Default::default() });
+            ids.push(run.id);
+            l.insert(0, run);
+        }
+        ids
     };
     let st = s.clone();
     let runs = runs.clone();
@@ -296,7 +315,14 @@ fn find(
                     x.stage = if j.stage == "Downloading" { format!("Downloading {:.0}%", j.progress) } else { j.stage.clone() };
                 })
             };
-            let done = filmcraft_studio::ytdlp::run(&st, channel, job, &update);
+            // A workspace clip is here already; a link is downloaded first.
+            let done = if job.url.is_empty() && job.file.as_ref().is_some_and(|f| f.is_file()) {
+                let mut j = job.clone();
+                j.duration = j.file.as_ref().and_then(|f| filmcraft_studio::thumbnails::duration(&st, f).ok());
+                j
+            } else {
+                filmcraft_studio::ytdlp::run(&st, channel, job, &update)
+            };
             if let Some(e) = done.error.clone() {
                 set(&|x| {
                     x.error = Some(e.clone());
@@ -306,7 +332,7 @@ fn find(
             }
             set(&|x| x.stage = "The AI is choosing the parts".into());
             let meta = done.metadata.clone().unwrap_or_default();
-            let (mut segments, fallback) = match done.file.clone().filter(|_| analyzer && wants.mode != Mode::Long) {
+            let (segments, fallback) = match done.file.clone().filter(|_| analyzer && wants.mode != Mode::Long) {
                 Some(file) => {
                     let say = |m: &str| {
                         let m = m.to_string();
@@ -326,29 +352,11 @@ fn find(
                 }
                 None => filmcraft_studio::autopilot::plan(&st, channel, &meta, done.duration.unwrap_or(0.0), &wants),
             };
-            // The hook edits, made into clips beside the download.
-            let mut failed = None;
-            if let Some(file) = done.file.clone() {
-                for (i, seg) in segments.iter_mut().enumerate() {
-                    // A hook edit, or a 9:16 crop on the subject.
-                    if seg.pieces.len() < 2 && seg.focus_x.is_none() {
-                        continue;
-                    }
-                    set(&|x| x.stage = format!("Editing part {} (hook first)", i + 1));
-                    match filmcraft_studio::autopilot::assemble(&st, &file, seg) {
-                        Ok(f) => seg.file = Some(f),
-                        Err(e) => {
-                            seg.pieces.clear();
-                            failed = Some(e.to_string());
-                        }
-                    }
-                }
-            }
-            let fallback = fallback.or(failed.map(|e| format!("the hook edit was skipped: {e}")));
+            // The edit goes on the timeline as cuts (made with the Reel), nothing is rendered here.
             set(&|x| {
                 x.segments = segments.iter().cloned().map(|s| (s, true)).collect();
                 x.fallback = fallback.clone();
-                x.stage = format!("{} part(s) to review", segments.len());
+                x.stage = if x.auto_make { format!("{} part(s) found: making the Reels", segments.len()) } else { format!("{} part(s) to review", segments.len()) };
             });
         }
         Done::Notice(("AI: the parts are ready to review".into(), true))
@@ -400,17 +408,15 @@ fn review(app: &mut FilmcraftApp, ui: &mut egui::Ui, ctx: &super::Ctx, runs: &Ru
                 // New times: the plain range, without the AI's edit.
                 if (a.changed() || b.changed()) && !seg.pieces.is_empty() {
                     seg.pieces.clear();
-                    seg.file = None;
                 }
                 ui.label(RichText::new(format!("{:.0} s", seg.seconds())).small().color(t.text_dim));
             });
-            if let (Some(hook), true) = (seg.pieces.first().copied(), seg.file.is_some()) {
+            if let (Some(hook), true) = (seg.pieces.first().copied(), seg.pieces.len() > 1) {
                 let cut = (seg.end - seg.start - seg.seconds() + (hook.end - hook.start)).max(0.0);
-                let mut keep = seg.file.is_some();
+                let mut keep = true;
                 ui.horizontal_wrapped(|ui| {
                     if ui.checkbox(&mut keep, "").changed() && !keep {
                         seg.pieces.clear();
-                        seg.file = None;
                     }
                     ui.label(
                         RichText::new(format!(
@@ -431,8 +437,8 @@ fn review(app: &mut FilmcraftApp, ui: &mut egui::Ui, ctx: &super::Ctx, runs: &Ru
                 ui.horizontal_wrapped(|ui| {
                     ui.label(RichText::new(format!("Virality {score:.0}")).strong().color(colour));
                     ui.label(RichText::new(parts).small().color(t.text_dim));
-                    if seg.focus_x.is_some() && seg.file.is_some() {
-                        ui.label(RichText::new("· cropped 9:16 on the subject").small().color(t.text_dim));
+                    if seg.focus_x.is_some() {
+                        ui.label(RichText::new("· framed on the subject").small().color(t.text_dim));
                     }
                 });
             }
@@ -478,6 +484,135 @@ fn review(app: &mut FilmcraftApp, ui: &mut egui::Ui, ctx: &super::Ctx, runs: &Ru
             x.segments = run.segments;
         }
         x.made = run.made;
+    }
+}
+
+/// Every frame: a run asked to make its Reels as soon as its parts are found makes them (one
+/// run per frame, in the workspace that is open).
+pub(super) fn auto_make(app: &mut FilmcraftApp) {
+    let runs = rt().ai_runs.clone();
+    let ready = lock(&runs).iter().find(|r| r.auto_make && r.made == 0 && r.error.is_none() && !r.segments.is_empty()).cloned();
+    let Some(run) = ready else { return };
+    let ctx = {
+        let mut r = rt();
+        let Some(s) = super::studio(&mut r) else { return };
+        let Some(brand) = r.brand.clone() else { return };
+        super::Ctx { s, info: None, channel: app.ui.reel.channel_id.or(r.loaded_channel), brand }
+    };
+    if ctx.channel != Some(run.channel) {
+        if let Some(x) = lock(&runs).iter_mut().find(|x| x.id == run.id) {
+            x.stage = "Open this video's workspace to make its Reels".into();
+        }
+        return;
+    }
+    let n = make_reels(app, &ctx, &run);
+    if let Some(x) = lock(&runs).iter_mut().find(|x| x.id == run.id) {
+        x.made = n.max(1);
+        x.auto_make = false;
+        x.stage = format!("{n} Reel(s) made: open them from the Project panel");
+    }
+}
+
+/// Settings of the Create panel's AI Reels.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct Maker {
+    pub per_video: usize,
+    pub min_seconds: f64,
+    pub max_seconds: f64,
+    /// Workspace clips picked for AI Reels.
+    pub picked: Vec<i64>,
+    pub links: String,
+}
+
+impl Default for Maker {
+    fn default() -> Self {
+        Maker { per_video: 2, min_seconds: 60.0, max_seconds: 90.0, picked: Vec::new(), links: String::new() }
+    }
+}
+
+/// Create ▸ AI Reels: pick workspace clips (or paste links); the AI finds the best part of
+/// each and makes edited Reels (cuts on the timeline, inside the template) to open and refine.
+pub(super) fn maker(app: &mut FilmcraftApp, ui: &mut egui::Ui, ctx: &super::Ctx, clips: &[(i64, std::path::PathBuf, String)]) {
+    let t = app.tokens;
+    let runs = rt().ai_runs.clone();
+    ui.label(
+        RichText::new("Pick trailers below (or paste links): the AI finds the best part of each, edits it on the timeline (hook first, dull shots cut, framed for 9:16) and makes Reels with your template, ready to open and refine.")
+            .small()
+            .color(t.text_dim),
+    );
+    let m = &mut app.ui.reel.maker;
+    ui.add(egui::TextEdit::multiline(&mut m.links).hint_text("Links (optional), one per line").desired_rows(1).desired_width(f32::INFINITY));
+    ui.horizontal_wrapped(|ui| {
+        ui.label(RichText::new("Reels per video").small());
+        ui.selectable_value(&mut m.per_video, 1, "1");
+        ui.selectable_value(&mut m.per_video, 2, "2");
+        ui.label(RichText::new("· length").small());
+        ui.add(egui::DragValue::new(&mut m.min_seconds).range(15.0..=180.0).suffix(" s"));
+        ui.label("–");
+        ui.add(egui::DragValue::new(&mut m.max_seconds).range(15.0..=180.0).suffix(" s"));
+        if m.min_seconds > m.max_seconds {
+            m.min_seconds = m.max_seconds;
+        }
+    });
+    let flick_ready = {
+        let st = filmcraft_studio::flick::status(&ctx.s);
+        st.skill && st.remotion
+    };
+    ui.horizontal_wrapped(|ui| {
+        ui.add_enabled(flick_ready, egui::Checkbox::new(&mut app.ui.reel.ai.flick, "Add Flick motion scenes"));
+        if app.ui.reel.ai.flick {
+            ui.checkbox(&mut app.ui.reel.ai.flick_review, "Review Flick's plan first");
+        }
+        ui.checkbox(&mut app.ui.reel.ai.queue, "Render into the library too");
+    });
+    let picked: Vec<(std::path::PathBuf, String)> =
+        clips.iter().filter(|(id, _, _)| app.ui.reel.maker.picked.contains(id)).map(|(_, p, l)| (p.clone(), l.clone())).collect();
+    let links: Vec<String> = app.ui.reel.maker.links.lines().map(str::trim).filter(|l| l.starts_with("http")).map(str::to_string).collect();
+    let n = picked.len() + links.len();
+    let busy = lock(&runs).iter().any(|r| r.channel == ctx.channel.unwrap_or_default() && r.error.is_none() && (r.auto_make || (r.segments.is_empty() && r.stage != "Done")));
+    ui.horizontal_wrapped(|ui| {
+        let b = ui.add_enabled(ctx.channel.is_some() && n > 0 && n <= 20, egui::Button::new(format!("Make AI Reels ({n} video{})", if n == 1 { "" } else { "s" })));
+        app.auto.add_response("reel.create.aiReels", &b, "Make AI Reels");
+        if n == 0 {
+            ui.label(RichText::new("Tick Pick on the clips to use").small().color(t.text_dim));
+        }
+        if !app.ui.reel.maker.picked.is_empty() && ui.small_button("Clear picks").clicked() {
+            app.ui.reel.maker.picked.clear();
+        }
+        if b.clicked()
+            && let Some(ch) = ctx.channel
+        {
+            let m = app.ui.reel.maker.clone();
+            let wants = Wants {
+                mode: if m.per_video > 1 { Mode::Multiple } else { Mode::Single },
+                max_reels: m.per_video.clamp(1, 2),
+                min_seconds: m.min_seconds,
+                max_seconds: m.max_seconds,
+                notes: String::new(),
+                hook: true,
+            };
+            let options = app.ui.reel.download.clone();
+            find(&ctx.s, ch, links, picked, wants, true, true, options, None, &runs);
+            app.ui.reel.maker.links.clear();
+            app.ui.reel.maker.picked.clear();
+        }
+    });
+    let _ = busy;
+    // Progress of this workspace's AI Reels.
+    let list: Vec<Run> = lock(&runs).iter().filter(|r| Some(r.channel) == ctx.channel).take(12).cloned().collect();
+    for run in list {
+        let title = if run.import.title.is_empty() { run.import.url.clone() } else { run.import.title.clone() };
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new(title).small().strong());
+            match &run.error {
+                Some(e) => ui.label(RichText::new(e).small().color(t.danger)),
+                None => ui.label(RichText::new(&run.stage).small().color(t.text_dim)),
+            };
+            if let Some(best) = run.segments.iter().filter_map(|(s, _)| s.score).fold(None, |a: Option<f64>, b| Some(a.map_or(b, |a| a.max(b)))) {
+                ui.label(RichText::new(format!("best {best:.0}")).small());
+            }
+        });
     }
 }
 
@@ -663,21 +798,21 @@ pub(super) fn make_reels(app: &mut FilmcraftApp, ctx: &super::Ctx, run: &Run) ->
     let many = parts.len() > 1;
     for (i, seg) in parts.into_iter().enumerate() {
         let name = if many { format!("{base} – part {}", i + 1) } else { base.clone() };
-        // The hook edit is its own clip; otherwise the range of the download.
         // The prediction travels with the post, to compare with its results later.
         let mut seg = seg.clone();
         seg.card.virality = seg.score;
         let seg = &seg;
-        let params = match seg.file.as_ref().filter(|f| f.is_file()) {
-            Some(edit) => json!({
-                "name": name, "template": template, "brand": ctx.brand, "channelId": run.channel, "card": seg.card, "format": format.id(),
-                "paths": [edit.to_string_lossy()],
-            }),
-            None => json!({
-                "name": name, "template": template, "brand": ctx.brand, "channelId": run.channel, "card": seg.card, "format": format.id(),
-                "paths": [file.to_string_lossy()], "sourceIn": seg.start, "sourceOut": seg.end,
-            }),
-        };
+        // The edit is the timeline: one clip per cut (hook first), framed on the subject, inside
+        // the template; every cut can be trimmed, moved or removed in the editor.
+        let cuts: Vec<[f64; 2]> =
+            if seg.pieces.is_empty() { vec![[seg.start, seg.end]] } else { seg.pieces.iter().map(|p| [p.start, p.end]).collect() };
+        let mut params = json!({
+            "name": name, "template": template, "brand": ctx.brand, "channelId": run.channel, "card": seg.card, "format": format.id(),
+            "paths": [file.to_string_lossy()], "cuts": cuts,
+        });
+        if let Some(f) = seg.focus_x {
+            params["focusX"] = json!(f);
+        }
         match app.session.execute("reel.new", params) {
             Ok(v) => {
                 made += 1;

@@ -81,6 +81,8 @@ pub struct ReelDraft {
     pub loaded_for: Option<String>,
     /// The AI panel's links and choices.
     pub ai: AiDraft,
+    /// Create ▸ AI Reels: picks and settings.
+    pub maker: ai::Maker,
     /// Make a Reel (9:16) or a Post (4:5).
     pub format: Format,
     pub design_tab: DesignTab,
@@ -458,6 +460,8 @@ fn footage(app: &FilmcraftApp, info: &ReelInfo) -> Option<(std::path::PathBuf, f
 pub fn poll(app: &mut FilmcraftApp, now: f64) {
     // Flick's finished scenes go onto their Reel when it is open.
     motion::tick(app);
+    // AI Reels whose parts are found are made.
+    ai::auto_make(app);
     let mut r = rt();
     let mut finished = Vec::new();
     r.tasks.retain(|(label, rx)| match rx.try_recv() {
@@ -1259,6 +1263,10 @@ pub fn show_create(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 });
             }
         });
+        // AI Reels: the best part of picked clips (or links), edited on the timeline.
+        let all_clips: Vec<(i64, std::path::PathBuf, String)> =
+            rt().media.iter().filter(|m| m.kind == "VIDEO").map(|m| (m.id, m.path.clone(), m.label.clone())).collect();
+        section(ui, "AI Reels", true, |ui| ai::maker(app, ui, &ctx, &all_clips));
         let mut r = rt();
         section(ui, "Workspace clips", true, |ui| {
             ui.label(RichText::new("Downloads stay here between projects.").small().color(t.text_dim))
@@ -1348,6 +1356,17 @@ pub fn show_create(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                                 preview_clip(app, &mut r, m);
                             }
                             ui.horizontal(|ui| {
+                                let mut pick = app.ui.reel.maker.picked.contains(&m.id);
+                                let pk = ui.checkbox(&mut pick, "Pick").on_hover_text("Use this clip in AI Reels (above)");
+                                if ui.is_rect_visible(pk.rect) {
+                                    app.auto.add_response(&format!("reel.clip.pick.{}", m.id), &pk, "Pick for AI Reels");
+                                }
+                                if pk.changed() {
+                                    app.ui.reel.maker.picked.retain(|x| *x != m.id);
+                                    if pick {
+                                        app.ui.reel.maker.picked.push(m.id);
+                                    }
+                                }
                                 let mut is_done = done.contains(&m.id);
                                 let d = ui.checkbox(&mut is_done, "Done");
                                 if ui.is_rect_visible(d.rect) {
@@ -1435,6 +1454,17 @@ pub fn show_create(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                     }
                 });
                 ui.horizontal(|ui| {
+                    let mut pick = app.ui.reel.maker.picked.contains(&m.id);
+                    let pk = ui.checkbox(&mut pick, "Pick").on_hover_text("Use this clip in AI Reels (above)");
+                    if ui.is_rect_visible(pk.rect) {
+                        app.auto.add_response(&format!("reel.clip.pick.{}", m.id), &pk, "Pick for AI Reels");
+                    }
+                    if pk.changed() {
+                        app.ui.reel.maker.picked.retain(|x| *x != m.id);
+                        if pick {
+                            app.ui.reel.maker.picked.push(m.id);
+                        }
+                    }
                     let mut is_done = done.contains(&m.id);
                     let d = ui.checkbox(&mut is_done, "Done");
                     if ui.is_rect_visible(d.rect) {

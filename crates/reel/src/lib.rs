@@ -182,6 +182,9 @@ pub struct ReelInfo {
     /// "reel" (1080×1920, the default) or "post" (1080×1350).
     pub format: String,
     pub post: Option<PostLink>,
+    /// The footage's subject, 0 (left) to 1 (right): a cropped (cover) slot keeps it in view.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub focus_x: Option<f64>,
 }
 
 impl ReelInfo {

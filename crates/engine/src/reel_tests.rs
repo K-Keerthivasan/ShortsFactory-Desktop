@@ -352,3 +352,41 @@ fn exact_tick_source_ranges_are_preserved_and_hostile_ticks_fail() {
     assert!(s.execute("reel.new", json!({"item":main.0,"sourceInTicks":-1,"sourceOutTicks":end})).is_err());
     assert!(s.execute("reel.new", json!({"item":main.0,"sourceInTicks":1.5,"sourceOutTicks":end})).is_err());
 }
+
+#[test]
+fn an_edit_of_several_cuts_is_clips_on_the_timeline_inside_the_template() {
+    let (mut s, r) = reel("fullBleed");
+    let main = s.active_sequence().unwrap().find_item(ClipId(r["mainClip"].as_u64().unwrap())).unwrap().1.item;
+    // hook first (3-4 s of the source), then 0.5-2 s and 5-6 s; the subject on the right
+    let v = s
+        .execute("reel.new", json!({"name": "Edit", "template": "fullBleed", "item": main.0, "cuts": [[3.0, 4.0], [0.5, 2.0], [5.0, 6.0]], "focusX": 0.8}))
+        .unwrap();
+    let footage: Vec<TrackItem> = track_items(&s, 2).into_iter().filter(|i| i.graphic.is_none()).collect();
+    let got: Vec<(f64, f64, f64)> =
+        footage.iter().map(|i| ((i.start.seconds() * 10.0).round() / 10.0, (i.source_in.seconds() * 10.0).round() / 10.0, (i.duration.seconds() * 10.0).round() / 10.0)).collect();
+    assert_eq!(got, vec![(0.0, 3.0, 1.0), (1.0, 0.5, 1.5), (2.5, 5.0, 1.0)], "back to back, in the asked order");
+    assert_eq!(v["reel"]["mainClip"].as_u64(), Some(footage[0].id.0));
+    // the template's overlay spans the whole edit
+    let overlay = track_items(&s, 3).into_iter().find(|i| i.name == "Reel Overlay").unwrap();
+    assert!((overlay.duration.seconds() - 3.5).abs() < 0.05, "{}", overlay.duration.seconds());
+    // every cut is framed on the subject: more is cut from the left than the right
+    let crop = |i: &TrackItem| {
+        let e = i.effects.iter().find(|e| e.effect == "crop").expect("cropped");
+        let f = |k: &str| match e.params.get(k).map(|p| &p.value) {
+            Some(ParamValue::Float(v)) => *v,
+            _ => 0.0,
+        };
+        (f("left"), f("right"))
+    };
+    for i in &footage {
+        let (l, r) = crop(i);
+        assert!(l > r, "left {l} right {r}");
+    }
+    assert_eq!(crate::reel::current(&s).unwrap().focus_x, Some(0.8));
+    // another template keeps the cuts and the framing
+    s.execute("reel.apply", json!({"template": "jkr-cinematic-v2"})).unwrap();
+    let after: Vec<TrackItem> = track_items(&s, 2).into_iter().filter(|i| i.graphic.is_none()).collect();
+    assert_eq!(after.len(), 3);
+    let backdrops = track_items(&s, 0).into_iter().filter(|i| i.name == "Reel Backdrop").count();
+    assert_eq!(backdrops, 3, "a blurred backdrop under each cut");
+}

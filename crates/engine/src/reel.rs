@@ -53,7 +53,7 @@ pub fn commands() -> Vec<CommandSpec> {
             "reel.new",
             "New Reel…",
             M,
-            r#"{"name":str?,"format":"reel"|"post"?,"template":str?,"brand":Brand?,"channelId":n?,"card":Card?,"item":itemId? (project footage to build around),"paths":[str]? (a file; reused when already in the project),"sourceIn":f64?,"sourceOut":f64? (seconds),"sourceInTicks":i64?,"sourceOutTicks":i64? (exact ticks override seconds),"seconds":f64? (length without footage)}"#,
+            r#"{"name":str?,"format":"reel"|"post"?,"template":str?,"brand":Brand?,"channelId":n?,"card":Card?,"item":itemId? (project footage to build around),"paths":[str]? (a file; reused when already in the project),"cuts":[[in,out]]? (source seconds; one clip each, back to back, in this order),"focusX":f64? (0-1, the subject for the crop),"sourceIn":f64?,"sourceOut":f64? (seconds),"sourceInTicks":i64?,"sourceOutTicks":i64? (exact ticks override seconds),"seconds":f64? (length without footage)}"#,
             always,
             new_reel,
         ),
@@ -151,7 +151,7 @@ fn new_reel(s: &mut Session, p: &Value) -> Result<Value> {
         if let Some(i) = item {
             args["item"] = json!(i);
         }
-        for k in ["channelId", "sourceIn", "sourceOut", "sourceInTicks", "sourceOutTicks"] {
+        for k in ["channelId", "sourceIn", "sourceOut", "sourceInTicks", "sourceOutTicks", "cuts", "focusX"] {
             if let Some(v) = p.get(k) {
                 args[k] = v.clone();
             }
@@ -191,6 +191,12 @@ fn effect(id: &str) -> Option<EffectInstance> {
 
 /// Fits the footage into the slot: Motion scales and centres it, Crop trims what overflows.
 fn fit_footage(ti: &mut TrackItem, src: (f64, f64), plan: &ReelPlan) {
+    fit_footage_at(ti, src, plan, None);
+}
+
+/// [`fit_footage`] keeping the subject at `focus_x` (0–1 across the source) in view when the
+/// slot crops the footage's sides.
+fn fit_footage_at(ti: &mut TrackItem, src: (f64, f64), plan: &ReelPlan, focus_x: Option<f64>) {
     let (sw, sh) = src;
     if !(sw > 0.0 && sh > 0.0) {
         return;
@@ -200,6 +206,12 @@ fn fit_footage(ti: &mut TrackItem, src: (f64, f64), plan: &ReelPlan) {
         Fit::Cover => (slot.w / sw).max(slot.h / sh),
         Fit::Contain => (slot.w / sw).min(slot.h / sh),
     };
+    // The visible source width, and where its centre goes: the subject, kept inside the frame.
+    let visible = (slot.w / scale).min(sw);
+    let anchor_x = match (plan.fit, focus_x.filter(|f| f.is_finite())) {
+        (Fit::Cover, Some(f)) => (sw * f.clamp(0.0, 1.0)).clamp(visible / 2.0, sw - visible / 2.0),
+        _ => sw / 2.0,
+    };
     ti.scale_to_frame = false;
     ti.effects.retain(|e| e.effect != "crop");
     if let Some(m) = motion(ti) {
@@ -207,16 +219,17 @@ fn fit_footage(ti: &mut TrackItem, src: (f64, f64), plan: &ReelPlan) {
         set(m, "uniform_scale", ParamValue::Bool(true));
         let (cx, cy) = slot.center();
         set(m, "position", ParamValue::Vec2(Vec2::new(cx, cy)));
-        set(m, "anchor", ParamValue::Vec2(Vec2::new(sw / 2.0, sh / 2.0)));
+        set(m, "anchor", ParamValue::Vec2(Vec2::new(anchor_x, sh / 2.0)));
     }
     if plan.fit == Fit::Cover {
-        let cut_x = ((sw - slot.w / scale) / 2.0 / sw * 100.0).max(0.0);
+        let left = ((anchor_x - visible / 2.0) / sw * 100.0).max(0.0);
+        let right = ((sw - anchor_x - visible / 2.0) / sw * 100.0).max(0.0);
         let cut_y = ((sh - slot.h / scale) / 2.0 / sh * 100.0).max(0.0);
-        if (cut_x > 0.01 || cut_y > 0.01)
+        if (left > 0.01 || right > 0.01 || cut_y > 0.01)
             && let Some(mut crop) = effect("crop")
         {
-            set(&mut crop, "left", ParamValue::Float(cut_x));
-            set(&mut crop, "right", ParamValue::Float(cut_x));
+            set(&mut crop, "left", ParamValue::Float(left));
+            set(&mut crop, "right", ParamValue::Float(right));
             set(&mut crop, "top", ParamValue::Float(cut_y));
             set(&mut crop, "bottom", ParamValue::Float(cut_y));
             ti.effects.push(crop);
@@ -237,6 +250,10 @@ fn apply(s: &mut Session, p: &Value) -> Result<Value> {
     if let Some(c) = p.get("channelId").and_then(Value::as_i64) {
         reel.channel_id = Some(c);
     }
+    if let Some(f) = f64_p(p, "focusX").filter(|f| f.is_finite()) {
+        reel.focus_x = Some(f.clamp(0.0, 1.0));
+    }
+    let focus_x = reel.focus_x;
     let seq_id = s.state.active_sequence.ok_or(EngineError::NoSequence)?;
     let (w, h, rate) = s.active_sequence().map(|q| (q.settings.width, q.settings.height, q.settings.frame_rate)).ok_or(EngineError::NoSequence)?;
     if (w, h) != (REEL_WIDTH, REEL_HEIGHT) && (w, h) != (REEL_WIDTH, filmcraft_reel::POST_HEIGHT) {
@@ -287,19 +304,34 @@ fn apply(s: &mut Session, p: &Value) -> Result<Value> {
                 return Err(EngineError::Other("sourceOutTicks must follow sourceInTicks".into()));
             }
             let len = if to > from { to - from } else { dur - from };
-            let clips = crate::commands::place_item(
-                s,
-                item,
-                TimeRange::new(from, rate.snap(len).max(rate.frame_duration())),
-                Tick::ZERO,
-                vt,
-                at.filter(|_| has_audio),
-                false,
-                "Apply Reel Template",
-                None,
-            )?;
-            let q = s.active_sequence().ok_or(EngineError::NoSequence)?;
-            clips.into_iter().find(|c| q.video_tracks.iter().any(|t| t.items.iter().any(|i| i.id == *c)))
+            // The cuts (source seconds, in play order), else the one range.
+            let cuts: Vec<(Tick, Tick)> = p
+                .get("cuts")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|c| {
+                            let c = c.as_array()?;
+                            let a = Tick::from_seconds_f64(c.first()?.as_f64()?.max(0.0)).min(dur);
+                            let b = Tick::from_seconds_f64(c.get(1)?.as_f64()?.max(0.0)).min(dur);
+                            (b > a).then_some((a, b - a))
+                        })
+                        .take(64)
+                        .collect()
+                })
+                .filter(|v: &Vec<(Tick, Tick)>| !v.is_empty())
+                .unwrap_or_else(|| vec![(from, len)]);
+            let mut cursor = Tick::ZERO;
+            let mut first = None;
+            for (a, n) in cuts {
+                let n = rate.snap(n).max(rate.frame_duration());
+                let clips = crate::commands::place_item(s, item, TimeRange::new(a, n), cursor, vt, at.filter(|_| has_audio), false, "Apply Reel Template", None)?;
+                let q = s.active_sequence().ok_or(EngineError::NoSequence)?;
+                let video = clips.into_iter().find(|c| q.video_tracks.iter().any(|t| t.items.iter().any(|i| i.id == *c)));
+                first = first.or(video);
+                cursor += n;
+            }
+            first
         }
         None => main_clip(s, p, &reel),
     };
@@ -325,7 +357,23 @@ fn apply(s: &mut Session, p: &Value) -> Result<Value> {
         ensure_tracks(pr, seq_id)?;
         let q = pr.sequence(seq_id).ok_or(EngineError::NoSequence)?;
         let found = main_id.and_then(|c| q.find_item(c).map(|(_, i)| i.clone()));
-        let (start, dur) = found.as_ref().map_or((rate.snap(start_at), fallback), |i| (i.start, i.duration));
+        // The Reel's footage: the main clip and every other clip on the Footage track beside it
+        // (an edit of several cuts), all fitted and wrapped by the template as one span.
+        let mut others: Vec<TrackItem> = match (&found, q.video_tracks.get(FOOTAGE)) {
+            (Some(m), Some(tr)) if tr.items.iter().any(|i| i.id == m.id) => {
+                tr.items.iter().filter(|i| i.id != m.id && !MADE.contains(&i.name.as_str()) && i.graphic.is_none()).cloned().collect()
+            }
+            _ => Vec::new(),
+        };
+        others.sort_by_key(|i| i.start);
+        let (start, dur) = match &found {
+            Some(m) => {
+                let a = others.iter().map(|i| i.start).chain(std::iter::once(m.start)).min().unwrap_or(m.start);
+                let b = others.iter().map(|i| i.start + i.duration).chain(std::iter::once(m.start + m.duration)).max().unwrap_or(m.start + m.duration);
+                (a, b - a)
+            }
+            None => (rate.snap(start_at), fallback),
+        };
         let plan = filmcraft_reel::plan_for(&template_id, &reel_brand, &reel_card, dur.seconds(), h).map_err(|e| bad("reel.apply", e))?;
         // Clear what an earlier template made in this span.
         let q = pr.sequence_mut(seq_id).ok_or(EngineError::NoSequence)?;
@@ -334,16 +382,38 @@ fn apply(s: &mut Session, p: &Value) -> Result<Value> {
             tr.items.retain(|i| !(MADE.contains(&i.name.as_str()) && i.range().overlaps(&span)));
         }
         // Footage: onto the Footage track if it is elsewhere, then fitted to the slot.
+        // The other cuts: fitted in place on the Footage track.
+        let q = pr.sequence_mut(seq_id).ok_or(EngineError::NoSequence)?;
+        let mut fitted_others = Vec::new();
+        for o in &others {
+            if let Some(tr) = q.video_tracks.get_mut(FOOTAGE)
+                && let Some(ti) = tr.items.iter_mut().find(|i| i.id == o.id)
+            {
+                fitted_others.push(ti.clone());
+            }
+        }
+        for ti in &mut fitted_others {
+            let size = pr.conformed_source_size(ti.item, (1, 1)).or_else(|| pr.source_size(ti.item).map(|(a, b)| (f64::from(a), f64::from(b))));
+            fit_footage_at(ti, size.unwrap_or((f64::from(w), f64::from(h))), &plan, focus_x);
+        }
+        let q = pr.sequence_mut(seq_id).ok_or(EngineError::NoSequence)?;
+        if let Some(tr) = q.video_tracks.get_mut(FOOTAGE) {
+            for ti in &fitted_others {
+                if let Some(slot) = tr.items.iter_mut().find(|i| i.id == ti.id) {
+                    *slot = ti.clone();
+                }
+            }
+        }
         let mut footage = found;
         if let Some(mut ti) = footage.take() {
             let size = pr.conformed_source_size(ti.item, (1, 1)).or_else(|| pr.source_size(ti.item).map(|(a, b)| (f64::from(a), f64::from(b))));
-            fit_footage(&mut ti, size.unwrap_or((f64::from(w), f64::from(h))), &plan);
+            fit_footage_at(&mut ti, size.unwrap_or((f64::from(w), f64::from(h))), &plan, focus_x);
             let q = pr.sequence_mut(seq_id).ok_or(EngineError::NoSequence)?;
             for tr in &mut q.video_tracks {
                 tr.items.retain(|i| i.id != ti.id);
             }
             let tr = q.video_tracks.get_mut(FOOTAGE).ok_or(EngineError::NoSequence)?;
-            if tr.items.iter().any(|i| i.range().overlaps(&ti.range())) {
+            if tr.items.iter().any(|i| i.range().overlaps(&ti.range()) && !fitted_others.iter().any(|o| o.id == i.id)) {
                 return Err(bad("reel.apply", "the Footage track is not free for this clip; move what is there first"));
             }
             tr.items.push(ti.clone());
@@ -352,7 +422,9 @@ fn apply(s: &mut Session, p: &Value) -> Result<Value> {
         }
         // Backdrop: the same footage, filling the frame, blurred and dimmed, without sound.
         let mut made: Vec<(usize, TrackItem)> = Vec::new();
-        if let (Backdrop::BlurredClip { blur, brightness, saturation }, Some(main)) = (plan.backdrop, footage.as_ref()) {
+        let all_footage: Vec<TrackItem> = footage.iter().cloned().chain(fitted_others.iter().cloned()).collect();
+        for main in all_footage.iter().filter(|_| matches!(plan.backdrop, Backdrop::BlurredClip { .. })) {
+            let Backdrop::BlurredClip { blur, brightness, saturation } = plan.backdrop else { continue };
             let mut bg = main.clone();
             bg.id = ClipId(pr.alloc_id());
             bg.link = None;

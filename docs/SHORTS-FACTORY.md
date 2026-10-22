@@ -247,6 +247,21 @@ Built as the **AI** panel (beside Reel Studio), with approval before anything is
 | Approve, then publish now or schedule, from the same panel | Built |
 | The same workflow for agents over MCP (`studio.download`, `studio.plan`, `reel.new`, `studio.sendToLibrary`, …) | Built — see [MCP.md](MCP.md) |
 
+## 11a. AI Reels in Create (the Reels maker)
+
+Create ▸ **AI Reels**: tick **Pick** on workspace clips (trailers and the like; one or a batch,
+up to 20) or paste links, choose **Reels per video** (1 or 2) and the length (default 60–90 s),
+and **Make AI Reels**. For each video the virality analyzer (below) finds the best part, cuts it
+on shot changes with the strongest moment first as the hook, leaves out black frames, logos,
+rating cards and slates, and the Reels are made at once as ordinary Reel projects: one clip per
+cut on the Footage track (back to back, hook first), framed on the subject for 9:16, inside the
+workspace's template with the AI's headline, supporting line, caption and hashtags. Everything
+stays editable: trim, slip, move or delete any cut, change the template (the cuts and framing
+are kept), rewrite the card. **Add Flick motion scenes** adds Flick's animated overlays to each;
+**Render into the library too** (off by default) renders them straight away. Progress shows under
+the button; the AI panel keeps the same runs for a closer review. MCP: `reel.new` takes
+`cuts` ([[in, out], ...] source seconds, in play order) and `focusX` (0–1).
+
 ## 11b. Virality analyzer (local first)
 
 AI panel ▸ **Virality analyzer** (on by default) finds the moments of a downloaded video on

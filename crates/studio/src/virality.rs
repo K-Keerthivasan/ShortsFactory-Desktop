@@ -54,6 +54,8 @@ pub struct Candidate {
     /// The loudest second (a hook guess).
     pub peak: f64,
     pub visual: Option<Vision>,
+    /// Shot changes inside it (seconds), for cutting on shots.
+    pub shots: Vec<f64>,
 }
 
 /// What the vision model saw.
@@ -191,6 +193,49 @@ pub fn loudness(studio: &Studio, video: &Path) -> Result<Vec<f64>> {
         .collect())
 }
 
+/// Black stretches (FFmpeg's blackdetect: at least 0.2 s nearly black), as (start, end).
+pub fn black_spans(studio: &Studio, video: &Path) -> Result<Vec<(f64, f64)>> {
+    let o = quiet(
+        Command::new(ffmpeg(studio)?)
+            .args(["-hide_banner", "-i"])
+            .arg(video)
+            .args(["-an", "-vf", "scale=160:-2,blackdetect=d=0.2:pix_th=0.10", "-f", "null", "-"]),
+    )
+    .output()?;
+    let text = String::from_utf8_lossy(&o.stderr);
+    Ok(text
+        .lines()
+        .filter(|l| l.contains("black_start:"))
+        .filter_map(|l| {
+            let get = |k: &str| l.split(k).nth(1)?.split_whitespace().next()?.parse::<f64>().ok();
+            Some((get("black_start:")?, get("black_end:")?))
+        })
+        .collect())
+}
+
+/// Ranges without the black stretches in them (pieces shorter than half a second dropped).
+pub fn without(pieces: &[Piece], black: &[(f64, f64)]) -> Vec<Piece> {
+    let mut out = Vec::new();
+    for p in pieces {
+        let mut parts = vec![*p];
+        for (a, b) in black {
+            parts = parts
+                .into_iter()
+                .flat_map(|x| {
+                    if *b <= x.start || *a >= x.end {
+                        vec![x]
+                    } else {
+                        vec![Piece { start: x.start, end: a.max(x.start) }, Piece { start: b.min(x.end), end: x.end }]
+                    }
+                })
+                .filter(|x| x.end - x.start >= 0.5)
+                .collect();
+        }
+        out.extend(parts);
+    }
+    out
+}
+
 /// Scene-cut times (FFmpeg's scene score over 0.35).
 pub fn cuts(studio: &Studio, video: &Path) -> Result<Vec<f64>> {
     let o = quiet(
@@ -248,7 +293,8 @@ pub fn candidates(lines: &[(f64, String)], loud: &[f64], cuts: &[f64], duration:
         let cut_rate = (cuts.iter().filter(|c| **c >= s && **c < e).count() as f64 / (e - s) * 5.0).min(1.0);
         let hook = (HOOK_WORDS.iter().filter(|h| first.contains(*h)).count() as f64 / 2.0).min(1.0);
         let signal = if lines.is_empty() { 0.45 * energy + 0.3 * punch + 0.25 * cut_rate } else { 0.25 * pace + 0.2 * energy + 0.15 * punch + 0.15 * cut_rate + 0.25 * hook };
-        all.push(Candidate { start: s, end: e, text: text.chars().take(1500).collect(), signal, peak: peak_t, visual: None });
+        let shots: Vec<f64> = cuts.iter().copied().filter(|c| *c > s && *c < e).take(60).collect();
+        all.push(Candidate { start: s, end: e, text: text.chars().take(1500).collect(), signal, peak: peak_t, visual: None, shots });
     }
     all.sort_by(|a, b| b.signal.total_cmp(&a.signal));
     let mut out: Vec<Candidate> = Vec::new();
@@ -276,14 +322,15 @@ pub fn vision_provider(studio: &Studio) -> (String, String) {
     (p, model)
 }
 
-/// A 2×2 grid of four frames of `a`..`b`, as JPEG bytes.
+/// A grid of frames of `a`..`b` (2×2, or 3×3 for moments over 30 s), as JPEG bytes.
 fn grid(studio: &Studio, video: &Path, a: f64, b: f64) -> Result<Vec<u8>> {
     let span = (b - a).max(1.0);
+    let (n, tile, width) = if span > 30.0 { (9.0, "3x3", 320) } else { (4.0, "2x2", 384) };
     let o = quiet(
         Command::new(ffmpeg(studio)?)
             .args(["-hide_banner", "-loglevel", "error", "-ss", &format!("{a:.3}"), "-t", &format!("{span:.3}"), "-i"])
             .arg(video)
-            .args(["-an", "-vf", &format!("fps={:.5},scale=384:-2,tile=2x2", 4.0 / span), "-frames:v", "1", "-q:v", "4", "-f", "mjpeg", "-"]),
+            .args(["-an", "-vf", &format!("fps={:.5},scale={width}:-2,tile={tile}", n / span), "-frames:v", "1", "-q:v", "4", "-f", "mjpeg", "-"]),
     )
     .output()?;
     if o.stdout.len() < 100 {
@@ -292,7 +339,7 @@ fn grid(studio: &Studio, video: &Path, a: f64, b: f64) -> Result<Vec<u8>> {
     Ok(o.stdout)
 }
 
-const VISION_PROMPT: &str = "These are four frames, in reading order, of one moment of a video that may become a vertical short (Reel/Short/TikTok). Rate how strong and readable the pictures are for a scroll-stopping short from 0 to 10 (faces, action, clear subject, contrast count; static slides, darkness or clutter do not). Give the horizontal centre of the main subject from 0 (left edge) to 1 (right edge), for cropping the frame to 9:16. Describe what is happening in one sentence. Reply with only JSON: {\"visual\": number, \"subjectX\": number, \"what\": string}.";
+const VISION_PROMPT: &str = "These are frames, in reading order, of one moment of a video that may become a vertical short (Reel/Short/TikTok). Rate how strong and readable the pictures are for a scroll-stopping short from 0 to 10 (faces, action, clear subject, contrast count; static slides, darkness or clutter do not). Give the horizontal centre of the main subject from 0 (left edge) to 1 (right edge), for cropping the frame to 9:16. Describe what is happening in one sentence, and name any studio logo, age-rating card, release-date slate or black frame you see. Reply with only JSON: {\"visual\": number, \"subjectX\": number, \"what\": string}.";
 
 fn b64(bytes: &[u8]) -> String {
     const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -395,7 +442,7 @@ fn rank_schema() -> Value {
     })
 }
 
-const RANK_INSTRUCTION: &str = "You are a short-form video editor scoring candidate moments of a long video for their potential as vertical Reels/Shorts/TikToks. For each candidate you get its times, transcript, signal score (pace, loudness, cuts, hook words, 0-1) and what a vision model saw. Pick up to the asked number of moments, best first. For each: \"candidate\" is its number; \"start\"/\"end\" may tighten it to sentence bounds inside the candidate; score 0-10 each of hook (first seconds stop the scroll), emotion (surprise, humour, tension, awe), clarity (makes sense alone), visual, share (people send it on or comment); \"score\" is the overall 0-100 virality prediction, calibrated (most moments are 40-70; reserve 85+ for rare standouts). \"hooks\" are three different opening lines for the on-screen text, each under 60 characters, in the channel voice. \"keep\" lists the ranges to play in order: first the 1-5 second hook (the strongest moment, shown first as a teaser), then the rest of the moment in time order without dead air, filler or repeats; empty when no edit is needed. Write the card as for a single post. \"why\" names the main reason in one line.";
+const RANK_INSTRUCTION: &str = "You are a short-form video editor scoring candidate moments of a long video (often a game or film trailer) for their potential as vertical Reels/Shorts/TikToks. For each candidate you get its times, transcript (trailers often have little or none: then judge from the shots, the loudness peaks and what the vision model saw), signal score (pace, loudness, cuts, hook words, 0-1), its shot changes and what a vision model saw. Cut on shot changes. In trailers leave out studio logos, age-rating cards, release-date slates, long title cards, black frames and slow fades, unless the title reveal is the payoff; open on the most striking shot. Name characters, games and people only as the title, description or transcript names them, and never guess anyone's gender: use their name or "they". Pick up to the asked number of moments, best first. For each: \"candidate\" is its number; \"start\"/\"end\" may tighten it to sentence bounds inside the candidate; score 0-10 each of hook (first seconds stop the scroll), emotion (surprise, humour, tension, awe), clarity (makes sense alone), visual, share (people send it on or comment); \"score\" is the overall 0-100 virality prediction, calibrated (most moments are 40-70; reserve 85+ for rare standouts). \"hooks\" are three different opening lines for the on-screen text, each under 60 characters, in the channel voice. \"keep\" lists the ranges to play in order: first the 1-5 second hook (the strongest moment, shown first as a teaser), then the rest of the moment in time order without dead air, filler or repeats; empty when no edit is needed. Write the card as for a single post. \"why\" names the main reason in one line.";
 
 /// Ranks candidates with the workspace's AI. `None` when there is no AI (mock).
 fn rank(studio: &Studio, channel: i64, meta: Option<&Value>, cands: &[Candidate], w: &Wants) -> Result<Option<Vec<Segment>>> {
@@ -404,7 +451,7 @@ fn rank(studio: &Studio, channel: i64, meta: Option<&Value>, cands: &[Candidate]
         .iter()
         .enumerate()
         .map(|(i, c)| {
-            json!({"candidate": i, "start": c.start, "end": c.end, "signal": (c.signal * 100.0).round() / 100.0, "loudestAt": c.peak,
+            json!({"candidate": i, "start": c.start, "end": c.end, "signal": (c.signal * 100.0).round() / 100.0, "loudestAt": c.peak, "shots": c.shots,
                    "transcript": c.text, "vision": c.visual.as_ref().map(|v| json!({"visual": v.visual, "what": v.what}))})
         })
         .collect();
@@ -506,6 +553,7 @@ pub fn analyze(studio: &Studio, channel: i64, video: &Path, meta: Option<&Value>
     say("Measuring loudness and scene cuts");
     let loud = loudness(studio, video).unwrap_or_default();
     let cuts = cuts(studio, video).unwrap_or_default();
+    let black = black_spans(studio, video).unwrap_or_default();
     let mut cands = candidates(&lines, &loud, &cuts, a.duration, &w, (w.max_reels * 3).clamp(4, 10));
     if cands.is_empty() {
         return err("no part of the video fits the asked length");
@@ -544,6 +592,14 @@ pub fn analyze(studio: &Studio, channel: i64, video: &Path, meta: Option<&Value>
         }
     };
     let mut segs = crate::autopilot::clean(ranked, a.duration, &w);
+    // Black frames never play: they come out of the cuts (in play order, after the edit is tidy).
+    for s in &mut segs {
+        let base = if s.pieces.is_empty() { vec![Piece { start: s.start, end: s.end }] } else { s.pieces.clone() };
+        let clean = without(&base, &black);
+        if clean != base && !clean.is_empty() {
+            s.pieces = clean;
+        }
+    }
     // Each moment keeps its words, for Flick's scenes.
     for s in &mut segs {
         s.lines = lines
