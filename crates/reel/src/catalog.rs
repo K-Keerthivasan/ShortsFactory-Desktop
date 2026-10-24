@@ -79,6 +79,12 @@ fn caption_block(c: &Ctx<'_>, size: f64, width: f64, gap: f64) -> f64 {
 
 /// Words on a solid card above the footage: the footage starts below the words (never under
 /// them) and keeps at least 760 px; a long headline is set smaller to make room.
+/// A 16:9 footage slot `width` wide, centred across the frame and on its middle (960 px).
+fn centred_slot(width: f64) -> Rect {
+    let h = (width * 9.0 / 16.0).round();
+    Rect::new(((1080.0 - width) / 2.0).round(), (960.0 - h / 2.0).round(), width, h)
+}
+
 fn quote_card(c: &Ctx<'_>) -> ReelPlan {
     let (x, y, width) = (64.0, 340.0, 820.0);
     let cap_h = caption_block(c, 32.0, width, 22.0);
@@ -130,23 +136,22 @@ fn full_bleed(c: &Ctx<'_>) -> ReelPlan {
 
 /// A big headline on the card, the footage below it, the supporting line under the footage.
 fn headline(c: &Ctx<'_>) -> ReelPlan {
+    let slot = centred_slot(952.0);
+    // Text keeps clear of Instagram's right rail (to 884 px); the footage may be wider.
     let width = 820.0;
     let title_y = 220.0 + 72.0 + 46.0;
     let caption = c.card.caption.trim();
-    let caption_h = if caption.is_empty() { 0.0 } else { 34.0 + c.measure("caption", caption, 31.0, width, 0.0) };
-    // The footage keeps at least 600 px: the headline gets what is left.
-    let (size, title_h) = c.fit_title(92.0, width, -6.0, (1420.0 - caption_h - 600.0 - 44.0 - title_y).max(120.0));
-    let slot_y = title_y + title_h + 44.0;
-    let slot_h = (1420.0 - caption_h - slot_y).max(600.0);
-    let mut b = Builder::new(c, Rect::new(64.0, slot_y, width, slot_h));
+    // The headline fills what is above the centred footage.
+    let (size, _) = c.fit_title(92.0, width, -6.0, (slot.y - 36.0 - title_y).max(90.0));
+    let mut b = Builder::new(c, slot);
     b.gradient(Z::Under, "Card", Rect::FULL, c.card_bg, c.background, 75.0);
     b.brand_row(64.0, 220.0, 72.0, 32.0, 28.0);
     let t = b.text(Z::Over, "Title", c.title(), 64.0, title_y, width, size, Style { weight: "ExtraBold", leading: -6.0, ..Style::regular() });
     b.control("title", "Headline", t, "text");
     b.reveal(t, 0.0, 0.6, 18.0);
-    b.rect(Z::Over, "Accent rule", Rect::new(64.0, slot_y + slot_h - 5.0, width, 5.0), c.accent, 0.0);
+    b.rect(Z::Over, "Accent rule", Rect::new(slot.x, slot.y + slot.h - 5.0, slot.w, 5.0), c.accent, 0.0);
     if !caption.is_empty() {
-        let cap = b.text(Z::Over, "Caption", caption, 64.0, slot_y + slot_h + 34.0, width, 31.0, Style { align: 1, opacity: 88.0, ..Style::regular() });
+        let cap = b.text(Z::Over, "Caption", caption, 64.0, slot.y + slot.h + 34.0, width, 31.0, Style { align: 1, opacity: 88.0, ..Style::regular() });
         b.control("caption", "Caption", cap, "text");
     }
     b.finish()
@@ -164,51 +169,51 @@ fn bullets(b: &mut Builder<'_, '_>, x: f64, mut y: f64, width: f64, size: f64) -
 }
 
 fn numbered(c: &Ctx<'_>) -> ReelPlan {
-    let mut b = Builder::new(c, Rect::new(0.0, 180.0, 1080.0, 700.0));
+    let slot = centred_slot(1080.0);
+    let mut b = Builder::new(c, slot);
     b.rect(Z::Under, "Card", Rect::FULL, c.card_bg, 0.0);
-    b.gradient(Z::Over, "Fade", Rect::new(0.0, 0.0, 1080.0, 1062.0), with_alpha(BLACK, 0.0), c.card_bg, 90.0);
+    // The footage melts into the card above and below.
+    b.gradient(Z::Over, "Fade in", Rect::new(0.0, slot.y, 1080.0, 120.0), c.card_bg, with_alpha(c.card_bg, 0.0), 90.0);
+    b.gradient(Z::Over, "Fade out", Rect::new(0.0, slot.y + slot.h - 160.0, 1080.0, 160.0), with_alpha(c.card_bg, 0.0), c.card_bg, 90.0);
+    b.brand_row(64.0, 214.0, 56.0, 28.0, 24.0);
     let badge = b.text(
         Z::Over,
         "Badge",
         &c.badge(),
-        56.0,
-        220.0,
+        64.0,
+        300.0,
         300.0,
         30.0,
         Style { tracking: 70.0, plate: Some(([1.0, 1.0, 1.0, 0.12], 12.0, 30.0)), ..Style::mono() },
     );
     b.control("badge", "Badge", badge, "text");
-    let points: f64 = c.bullets().iter().enumerate().map(|(i, l)| c.measure(&format!("point{}", i + 1), l, 33.0, 764.0, 0.0) + 16.0).sum();
-    let (size, title_h) = c.fit_title(72.0, 820.0, -4.0, (1330.0 - 900.0 - 26.0 - points).max(90.0));
-    let t = b.text(Z::Over, "Title", c.title(), 64.0, 900.0, 820.0, size, Style { weight: "ExtraBold", leading: -4.0, ..Style::regular() });
+    let title_y = 300.0 + 30.0 + 30.0;
+    let (size, _) = c.fit_title(72.0, 820.0, -4.0, (slot.y - 24.0 - title_y).max(90.0));
+    let t = b.text(Z::Over, "Title", c.title(), 64.0, title_y, 820.0, size, Style { weight: "ExtraBold", leading: -4.0, ..Style::regular() });
     b.control("title", "Headline", t, "text");
-    let y = 900.0 + title_h + 26.0;
-    bullets(&mut b, 64.0, y, 820.0, 33.0);
-    b.logo = Some(LogoSpot { center: (100.0, 1390.0), size: 54.0, opacity: 100.0 });
-    let h = b.text(Z::Over, "Handle", &c.brand.handle_line(), 148.0, 1374.0, 700.0, 30.0, Style { opacity: 70.0, ..Style::regular() });
-    b.control("handle", "Handle", h, "text");
+    bullets(&mut b, 64.0, slot.y + slot.h + 24.0, 820.0, 30.0);
     b.finish()
 }
 
 fn framed(c: &Ctx<'_>) -> ReelPlan {
+    let slot = centred_slot(952.0);
+    // Text keeps clear of Instagram's right rail (to 884 px); the footage may be wider.
+    let width = 820.0;
     let caption = c.card.caption.trim();
-    let cap_h = if caption.is_empty() { 0.0 } else { 16.0 + c.measure("caption", caption, 28.0, 820.0, 0.0) };
-    let (size, title_h) = c.fit_title(56.0, 820.0, 0.0, 330.0 - cap_h);
-    let footer = 30.0 + title_h + cap_h + 24.0;
-    let slot_y = 320.0;
-    let slot = Rect::new(64.0, slot_y, 820.0, (1420.0 - slot_y - footer).max(300.0));
+    let ty = slot.y + slot.h + 30.0;
+    let cap_h = if caption.is_empty() { 0.0 } else { 14.0 + c.measure("caption", caption, 26.0, width, 0.0) };
+    let (size, title_h) = c.fit_title(56.0, width, 0.0, (1420.0 - ty - cap_h).max(60.0));
     let mut b = Builder::new(c, slot);
     b.rect(Z::Under, "Card", Rect::FULL, c.card_bg, 0.0);
-    b.rect(Z::Over, "Top rule", Rect::new(64.0, 200.0, 820.0, 6.0), c.accent, 0.0);
+    b.rect(Z::Over, "Top rule", Rect::new(slot.x, 200.0, slot.w, 6.0), c.accent, 0.0);
     b.logo = Some(LogoSpot { center: (100.0, 260.0), size: 66.0, opacity: 100.0 });
     let h = b.text(Z::Over, "Handle", &c.brand.handle_line(), 450.0, 246.0, 434.0, 28.0, Style { align: 2, opacity: 80.0, ..Style::regular() });
     b.control("handle", "Handle", h, "text");
     b.outline(Z::Over, "Frame", slot, with_alpha(c.accent, 0.33), 2.0, 20.0);
-    let ty = slot.y + slot.h + 30.0;
-    let t = b.text(Z::Over, "Title", c.title(), 64.0, ty, 820.0, size, Style { weight: "ExtraBold", align: 1, ..Style::regular() });
+    let t = b.text(Z::Over, "Title", c.title(), 64.0, ty, width, size, Style { weight: "ExtraBold", align: 1, ..Style::regular() });
     b.control("title", "Headline", t, "text");
     if !caption.is_empty() {
-        let cap = b.text(Z::Over, "Caption", caption, 64.0, ty + title_h + 16.0, 820.0, 28.0, Style { align: 1, opacity: 72.0, ..Style::mono() });
+        let cap = b.text(Z::Over, "Caption", caption, 64.0, ty + title_h + 14.0, width, 26.0, Style { align: 1, opacity: 72.0, ..Style::mono() });
         b.control("caption", "Caption", cap, "text");
     }
     b.finish()
@@ -216,26 +221,28 @@ fn framed(c: &Ctx<'_>) -> ReelPlan {
 
 fn brief(c: &Ctx<'_>) -> ReelPlan {
     let contact = c.brand.contact_line.trim();
-    let slot_y = if contact.is_empty() { 200.0 } else { 280.0 };
-    let mut b = Builder::new(c, Rect::new(0.0, slot_y, 1080.0, 620.0));
+    let slot = centred_slot(1080.0);
+    let mut b = Builder::new(c, slot);
     b.rect(Z::Under, "Card", Rect::FULL, c.card_bg, 0.0);
-    b.gradient(Z::Over, "Fade in", Rect::new(0.0, slot_y, 1080.0, 170.0), c.card_bg, with_alpha(c.card_bg, 0.0), 90.0);
-    b.gradient(Z::Over, "Fade out", Rect::new(0.0, slot_y + 470.0, 1080.0, 292.0), with_alpha(c.card_bg, 0.0), c.card_bg, 90.0);
-    if !contact.is_empty() {
-        let l = b.text(Z::Over, "Contact", contact, 64.0, 220.0, 820.0, 24.0, Style { align: 1, tracking: 40.0, opacity: 75.0, ..Style::regular() });
-        b.control("contact", "Contact Line", l, "text");
-    }
-    let top = slot_y + 620.0 + 10.0;
-    let badge = b.text(Z::Over, "Badge", &c.badge(), 66.0, top, 400.0, 30.0, Style { color: Some(c.accent), tracking: 100.0, ..Style::mono() });
-    b.control("badge", "Badge", badge, "text");
-    let points: f64 = c.bullets().iter().enumerate().map(|(i, l)| c.measure(&format!("point{}", i + 1), l, 31.0, 764.0, 0.0) + 16.0).sum();
-    let (size, title_h) = c.fit_title(68.0, 820.0, -4.0, (1330.0 - top - 48.0 - 24.0 - points).max(90.0));
-    let t = b.text(Z::Over, "Title", c.title(), 64.0, top + 48.0, 820.0, size, Style { weight: "ExtraBold", leading: -4.0, ..Style::regular() });
-    b.control("title", "Headline", t, "text");
-    bullets(&mut b, 64.0, top + 48.0 + title_h + 24.0, 820.0, 31.0);
-    b.logo = Some(LogoSpot { center: (100.0, 1390.0), size: 52.0, opacity: 100.0 });
-    let n = b.text(Z::Over, "Channel", &c.channel(), 148.0, 1370.0, 700.0, 30.0, Style::bold());
+    b.gradient(Z::Over, "Fade in", Rect::new(0.0, slot.y, 1080.0, 140.0), c.card_bg, with_alpha(c.card_bg, 0.0), 90.0);
+    b.gradient(Z::Over, "Fade out", Rect::new(0.0, slot.y + slot.h - 180.0, 1080.0, 180.0), with_alpha(c.card_bg, 0.0), c.card_bg, 90.0);
+    // The channel at the top, then the contact line, the badge and the headline above the footage.
+    b.logo = Some(LogoSpot { center: (92.0, 228.0), size: 52.0, opacity: 100.0 });
+    let n = b.text(Z::Over, "Channel", &c.channel(), 136.0, 212.0, 700.0, 30.0, Style::bold());
     b.control("channel", "Channel Name", n, "text");
+    let mut y = 276.0;
+    if !contact.is_empty() {
+        let l = b.text(Z::Over, "Contact", contact, 64.0, y, 820.0, 24.0, Style { tracking: 40.0, opacity: 75.0, ..Style::regular() });
+        b.control("contact", "Contact Line", l, "text");
+        y += 44.0;
+    }
+    let badge = b.text(Z::Over, "Badge", &c.badge(), 66.0, y, 400.0, 30.0, Style { color: Some(c.accent), tracking: 100.0, ..Style::mono() });
+    b.control("badge", "Badge", badge, "text");
+    let title_y = y + 48.0;
+    let (size, _) = c.fit_title(68.0, 820.0, -4.0, (slot.y - 24.0 - title_y).max(90.0));
+    let t = b.text(Z::Over, "Title", c.title(), 64.0, title_y, 820.0, size, Style { weight: "ExtraBold", leading: -4.0, ..Style::regular() });
+    b.control("title", "Headline", t, "text");
+    bullets(&mut b, 64.0, slot.y + slot.h + 24.0, 820.0, 30.0);
     b.finish()
 }
 

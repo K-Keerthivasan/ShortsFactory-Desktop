@@ -32,6 +32,8 @@ use crate::FilmcraftApp;
 mod ai;
 #[path = "reel_motion.rs"]
 mod motion;
+#[path = "reel_layers.rs"]
+mod layers;
 #[path = "reel_delivery.rs"]
 mod delivery;
 #[path = "reel_gaps.rs"]
@@ -152,6 +154,7 @@ pub enum DesignTab {
     Card,
     Ai,
     Caption,
+    Layers,
     Motion,
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1563,6 +1566,7 @@ pub fn show_design(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
             (DesignTab::Card, "card", "Card"),
             (DesignTab::Ai, "ai", "Use AI"),
             (DesignTab::Caption, "caption", "Caption & hashtags"),
+            (DesignTab::Layers, "layers", "Layers"),
             (DesignTab::Motion, "motion", "Motion (Flick)"),
         ],
     );
@@ -1589,6 +1593,7 @@ pub fn show_design(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 }
             },
             DesignTab::Caption => card(app, ui, is_reel, CardPart::Caption),
+            DesignTab::Layers => layers::show(app, ui),
             DesignTab::Motion => match &ctx {
                 Some(c) => motion::show(app, ui, &c.s),
                 None => {

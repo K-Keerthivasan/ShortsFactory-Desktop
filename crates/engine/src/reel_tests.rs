@@ -390,3 +390,36 @@ fn an_edit_of_several_cuts_is_clips_on_the_timeline_inside_the_template() {
     let backdrops = track_items(&s, 0).into_iter().filter(|i| i.name == "Reel Backdrop").count();
     assert_eq!(backdrops, 3, "a blurred backdrop under each cut");
 }
+
+#[test]
+fn every_layer_the_layout_made_stays_editable() {
+    let (mut s, r) = reel("headline");
+    let overlay = track_items(&s, 3).into_iter().find(|i| i.name == "Reel Overlay").unwrap();
+    let layers = filmcraft_project::graphic::layer_indices(&overlay.effects);
+    assert!(!layers.is_empty());
+    // the headline: moved, resized, recoloured, rewritten, hidden and shown
+    let title = layers.iter().position(|&i| overlay.effects[i].effect == filmcraft_project::graphic::TEXT_LAYER).unwrap();
+    for props in [json!({"position": [100.0, 400.0]}), json!({"size": 50.0}), json!({"fill_color": "#ff0000"}), json!({"opacity": 60.0}), json!({"enabled": false})] {
+        s.execute("graphics.set", json!({"clip": overlay.id.0, "layer": title, "props": props})).unwrap();
+    }
+    s.execute("graphics.setText", json!({"clip": overlay.id.0, "layer": title, "text": "Edited"})).unwrap();
+    let after = track_items(&s, 3).into_iter().find(|i| i.name == "Reel Overlay").unwrap();
+    let e = &after.effects[layers[title]];
+    assert_eq!(e.params["position"].value, ParamValue::Vec2(filmcraft_geom::Vec2::new(100.0, 400.0)));
+    assert_eq!(e.params["size"].value, ParamValue::Float(50.0));
+    assert_eq!(e.params["opacity"].value, ParamValue::Float(60.0));
+    assert!(!e.enabled);
+    assert_eq!(e.params["text"].value, ParamValue::Text("Edited".into()));
+    // a shape layer resizes
+    if let Some(shape) = layers.iter().position(|&i| overlay.effects[i].effect == filmcraft_project::graphic::SHAPE_LAYER) {
+        s.execute("graphics.set", json!({"clip": overlay.id.0, "layer": shape, "props": {"size": [300.0, 20.0]}})).unwrap();
+    }
+    // the footage moves and scales
+    let main = r["mainClip"].as_u64().unwrap();
+    s.execute("effects.setParam", json!({"clip": main, "effect": "motion", "param": "scale", "value": 150.0})).unwrap();
+    let foot = s.active_sequence().unwrap().find_item(ClipId(main)).unwrap().1.clone();
+    let m = foot.effects.iter().find(|e| e.effect == "motion").unwrap();
+    assert_eq!(m.params["scale"].value, ParamValue::Float(150.0));
+    // and it all undoes
+    s.execute("edit.undo", json!({})).unwrap();
+}
