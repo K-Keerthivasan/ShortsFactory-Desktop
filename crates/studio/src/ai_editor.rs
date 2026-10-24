@@ -38,7 +38,37 @@ fn home() -> Option<PathBuf> {
     std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")).map(PathBuf::from)
 }
 
-/// The command-line tool beside the app (the MCP server).
+/// The MCP server the clients start: a copy of the command-line tool in the app's tools folder,
+/// so a running Claude or Codex session never locks the app's own files (an update replaces
+/// the app; [`refresh_server`] brings the copy up to date when no session holds it).
+pub fn server_path(studio: &Studio) -> PathBuf {
+    crate::ytdlp::tools_dir(studio).join("editor-mcp").join(if cfg!(windows) { "filmcraft-cli.exe" } else { "filmcraft-cli" })
+}
+
+/// Copies the tool beside the app to [`server_path`] when it differs. Returns the server path.
+pub fn refresh_server(studio: &Studio) -> Result<PathBuf> {
+    let src = cli().ok_or_else(|| StudioError::Other("filmcraft-cli was not found beside the app".into()))?;
+    let dst = server_path(studio);
+    let same = |a: &Path, b: &Path| {
+        let (Ok(x), Ok(y)) = (std::fs::metadata(a), std::fs::metadata(b)) else { return false };
+        x.len() == y.len() && x.modified().ok() <= y.modified().ok()
+    };
+    if !same(&src, &dst) {
+        std::fs::create_dir_all(dst.parent().unwrap_or(Path::new(".")))?;
+        // A running session holds the old copy: then it stays until the next start.
+        let tmp = dst.with_extension("new");
+        std::fs::copy(&src, &tmp)?;
+        if std::fs::rename(&tmp, &dst).is_err() {
+            let _ = std::fs::remove_file(&tmp);
+            if !dst.is_file() {
+                return err("could not place the editor's MCP server");
+            }
+        }
+    }
+    Ok(dst)
+}
+
+/// The command-line tool beside the app.
 pub fn cli() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let p = exe.parent()?.join(if cfg!(windows) { "filmcraft-cli.exe" } else { "filmcraft-cli" });
@@ -144,7 +174,7 @@ fn write_with_backup(file: &Path, text: &str) -> Result<()> {
 /// in Claude Code, the Claude desktop app and Codex, and the editing skill. Returns a line per
 /// step. Blocking (a few seconds).
 pub fn setup(studio: &Studio) -> Result<Vec<String>> {
-    let cli = cli().ok_or_else(|| StudioError::Other("filmcraft-cli was not found beside the app".into()))?;
+    let cli = refresh_server(studio)?;
     let cli_s = cli.to_string_lossy().into_owned();
     let port = crate::settings::CLAUDE_PORT;
     let mut log = Vec::new();

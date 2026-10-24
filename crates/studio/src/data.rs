@@ -428,6 +428,15 @@ impl Studio {
         Ok(c.last_insert_rowid())
     }
 
+    /// The link a workspace video was downloaded from (yt-dlp downloads keep it), by its file.
+    pub fn source_url_for(&self, channel: i64, file: &Path) -> Option<String> {
+        let want = file.canonicalize().ok()?;
+        let c = self.connect().ok()?;
+        let mut q = c.prepare("SELECT file_path, source_url FROM media_assets WHERE channel_id = ?1 AND source_url LIKE 'http%'").ok()?;
+        let rows: Vec<(String, String)> = q.query_map([channel], |r| Ok((r.get(0)?, r.get(1)?))).ok()?.filter_map(|r| r.ok()).collect();
+        rows.into_iter().find(|(p, _)| self.resolve_storage(p).ok().and_then(|f| f.canonicalize().ok()).as_ref() == Some(&want)).map(|(_, u)| u)
+    }
+
     /// Recover earlier downloads from an explicitly selected or project Downloads folder.
     /// Keep files where they are and never add them to the editing project.
     pub fn scan_download_folder(&self, channel: i64, folder: &Path) -> Result<usize> {

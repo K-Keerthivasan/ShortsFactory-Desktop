@@ -101,8 +101,14 @@ fn main() -> eframe::Result {
     // Started by an agent (`--control`): the window does not take the keyboard. "Let Claude
     // edit" (Plugin Settings > AI) starts the control server for the user's own session too.
     let agent_started = launch.control_port.is_some();
-    if launch.control_port.is_none() && filmcraft_studio::Studio::open_default().is_ok_and(|s| s.app_settings().claude_editor) {
-        launch.control_port = Some(filmcraft_studio::settings::CLAUDE_PORT);
+    if let Ok(s) = filmcraft_studio::Studio::open_default()
+        && s.app_settings().claude_editor
+    {
+        if launch.control_port.is_none() {
+            launch.control_port = Some(filmcraft_studio::settings::CLAUDE_PORT);
+        }
+        // The AI editors' MCP server copy follows the app's updates.
+        let _ = filmcraft_studio::ai_editor::refresh_server(&s);
     }
     let data_root = launch.data_dir.clone().or_else(default_data_dir);
     let log_dir = data_root.as_ref().map(|d| d.join(logging::LOG_DIR));

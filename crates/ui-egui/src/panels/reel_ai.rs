@@ -331,7 +331,29 @@ pub(super) fn find(
                 continue;
             }
             set(&|x| x.stage = "The AI is choosing the parts".into());
-            let meta = done.metadata.clone().unwrap_or_default();
+            // A video downloaded earlier gets its link's details again (captions, chapters,
+            // title, uploader) so it is analyzed as well as a fresh link; no re-download.
+            let mut meta = done.metadata.clone().unwrap_or_default();
+            if meta.is_null()
+                && let Some(file) = done.file.as_ref()
+                && let Some(url) = st.source_url_for(channel, file)
+            {
+                set(&|x| x.stage = "Reading the video's details from its link".into());
+                if let Ok(m) = filmcraft_studio::ytdlp::analyze(&st, &url, &done.options) {
+                    meta = m;
+                }
+            }
+            // No link kept: YouTube's match for its title, if the length agrees.
+            if meta.is_null()
+                && done.file.is_some()
+                && let Some(d) = done.duration
+            {
+                set(&|x| x.stage = "Looking up the video's details by its title".into());
+                if let Some(m) = filmcraft_studio::ytdlp::find_by_title(&st, &done.title, d, &done.options) {
+                    meta = m;
+                }
+            }
+            let meta = meta;
             let (segments, fallback) = match done.file.clone().filter(|_| analyzer && wants.mode != Mode::Long) {
                 Some(file) => {
                     let say = |m: &str| {

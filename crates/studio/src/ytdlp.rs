@@ -190,6 +190,20 @@ fn base(studio: &Studio, o: &Options) -> Result<Command> {
 }
 
 /// A link's details (title, duration, uploader, description), without downloading.
+/// A video's details by its title: YouTube's top match, used only when its length is within
+/// two seconds of `duration` (so another video's captions are never borrowed).
+pub fn find_by_title(studio: &Studio, title: &str, duration: f64, o: &Options) -> Option<Value> {
+    let title: String = title.chars().filter(|c| !c.is_control()).take(150).collect();
+    if title.trim().len() < 8 || !duration.is_finite() {
+        return None;
+    }
+    let out = base(studio, o).ok()?.args(["-J", "--", &format!("ytsearch1:{}", title.trim())]).stdin(Stdio::null()).output().ok()?;
+    let v: Value = serde_json::from_slice(&out.stdout).ok()?;
+    let first = v.get("entries").and_then(Value::as_array).and_then(|e| e.first()).cloned()?;
+    let d = first.get("duration").and_then(Value::as_f64)?;
+    ((d - duration).abs() <= 2.0).then_some(first)
+}
+
 pub fn analyze(studio: &Studio, url: &str, o: &Options) -> Result<Value> {
     let out = base(studio, o)?.args(["-J", "--", url]).stdin(Stdio::null()).output()?;
     if !out.status.success() {
