@@ -261,12 +261,11 @@ fn logo_only(c: &Ctx<'_>) -> ReelPlan {
 fn design_slot(id: &str) -> Rect {
     match id {
         // The words sit above the footage (in the blurred or dark field), so the footage is
-        // never covered and keeps the frame's width.
-        "jkr-cinematic-v2" => Rect::new(40.0, 660.0, 1000.0, 1060.0),
+        // never covered and keeps the frame's width. A label above the words starts it lower.
         "jkr-esports-v2" => Rect::new(40.0, 680.0, 1000.0, 1060.0),
-        "jkr-editorial-v2" | "jkr-technical-v2" | "jkr-story-v2" => Rect::new(56.0, 290.0, 968.0, 1280.0),
-        "jkr-hud-v2" | "jkr-retro-v2" | "jkr-cyber-v2" => Rect::new(40.0, 240.0, 1000.0, 1440.0),
-        "jkr-neon-v2" => Rect::new(56.0, 240.0, 968.0, 1440.0),
+        "jkr-cinematic-v2" | "jkr-editorial-v2" | "jkr-technical-v2" | "jkr-story-v2" | "jkr-hud-v2" | "jkr-retro-v2" | "jkr-cyber-v2" | "jkr-neon-v2" => {
+            Rect::new(40.0, 660.0, 1000.0, 1060.0)
+        }
         _ => Rect::FULL,
     }
 }
@@ -376,8 +375,9 @@ fn title_style(r: &Recipe, c: &Ctx<'_>) -> Style<'static> {
 }
 
 fn design(c: &Ctx<'_>) -> ReelPlan {
-    let r = recipe(c);
     let slot = design_slot(c.id);
+    // A design with a footage box keeps its words outside it.
+    let r = Recipe { above: slot.h < 1920.0, ..recipe(c) };
     let mut b = Builder::new(c, slot);
     // Behind the slot: the footage itself, blurred, or a dark field.
     if r.blur_background {
@@ -430,7 +430,8 @@ fn design(c: &Ctx<'_>) -> ReelPlan {
     let caption_h = if caption.is_empty() { 0.0 } else { 18.0 + cap_text_h };
     // Words take at most ~560 px, so most of the footage stays clear; longer headlines are set smaller.
     // Words above the footage fill the field between the brand row (or label) and the slot.
-    let above_y = if r.top { 330.0 + 46.0 } else { 330.0 };
+    // A score line or a glowing rule above the words needs room under the brand row.
+    let above_y = if r.top { 330.0 + 46.0 } else if matches!(r.decorations, "arcade" | "glow") { 366.0 } else { 330.0 };
     let room = if r.above { slot.y - 40.0 - above_y - caption_h } else { 560.0 - caption_h };
     let (size, title_h) = c.fit_title(r.max_size, width, style.leading, room.max(120.0));
     let base = if r.above { above_y + title_h + caption_h } else { 1420.0 };
