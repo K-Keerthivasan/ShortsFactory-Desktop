@@ -45,13 +45,19 @@ fn hex(c: [f32; 4]) -> String {
     format!("#{:02x}{:02x}{:02x}", b(c[0]), b(c[1]), b(c[2]))
 }
 
-/// The clips of the open Reel that carry its parts, top track first: (track name, clip).
-fn parts(app: &FilmcraftApp) -> Vec<(String, TrackItem)> {
+/// The open Reel's parts, top track first: (track name, a clip, every clip it stands for).
+/// A graphic clip is its own part (its layers are listed); the media clips of a track (the cuts
+/// of the footage, their backdrops) are one part, edited together.
+fn parts(app: &FilmcraftApp) -> Vec<(String, TrackItem, Vec<u64>)> {
     let Some(q) = app.session.active_sequence() else { return Vec::new() };
     let mut out = Vec::new();
     for tr in q.video_tracks.iter().rev() {
-        for it in &tr.items {
-            out.push((tr.name.clone(), it.clone()));
+        let media: Vec<&TrackItem> = tr.items.iter().filter(|i| graphic::layer_indices(&i.effects).is_empty()).collect();
+        if let Some(first) = media.first() {
+            out.push((tr.name.clone(), (*first).clone(), media.iter().map(|i| i.id.0).collect()));
+        }
+        for it in tr.items.iter().filter(|i| !graphic::layer_indices(&i.effects).is_empty()) {
+            out.push((tr.name.clone(), it.clone(), vec![it.id.0]));
         }
     }
     out
@@ -69,10 +75,14 @@ pub(super) fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui) {
             .color(t.text_dim),
     );
     let mut actions: Vec<(&'static str, serde_json::Value)> = Vec::new();
-    for (track, it) in parts(app) {
+    for (track, it, clips) in parts(app) {
         let layers = graphic::layer_indices(&it.effects);
         let clip = it.id.0;
-        let title = if layers.is_empty() { format!("{} · {track}", it.name) } else { format!("{} · {track} · {} layer(s)", it.name, layers.len()) };
+        let title = match (layers.is_empty(), clips.len()) {
+            (true, 1) => format!("{track} · {}", it.name),
+            (true, n) => format!("{track} · {n} cuts (edited together)"),
+            (false, _) => format!("{} · {track} · {} layer(s)", it.name, layers.len()),
+        };
         egui::CollapsingHeader::new(RichText::new(title).strong()).id_salt(("reel-layers", clip)).default_open(it.name == "Reel Overlay").show(ui, |ui| {
             if layers.is_empty() {
                 // A media clip (the footage, the logo, a backdrop): its Motion.
@@ -87,12 +97,17 @@ pub(super) fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui) {
                     let a = ui.add(egui::DragValue::new(&mut x).speed(2.0));
                     ui.label("Y");
                     let b = ui.add(egui::DragValue::new(&mut y).speed(2.0));
+                    // Every cut of the track moves and scales together.
                     if a.changed() || b.changed() {
-                        actions.push(("effects.setParam", json!({"clip": clip, "effect": "motion", "param": "position", "value": [x, y], "merge": format!("pos-{clip}")})));
+                        for c in &clips {
+                            actions.push(("effects.setParam", json!({"clip": c, "effect": "motion", "param": "position", "value": [x, y], "merge": format!("pos-{clip}")})));
+                        }
                     }
                     ui.label("Scale");
                     if ui.add(egui::DragValue::new(&mut scale).speed(0.5).range(1.0..=1000.0).suffix(" %")).changed() {
-                        actions.push(("effects.setParam", json!({"clip": clip, "effect": "motion", "param": "scale", "value": scale, "merge": format!("scale-{clip}")})));
+                        for c in &clips {
+                            actions.push(("effects.setParam", json!({"clip": c, "effect": "motion", "param": "scale", "value": scale, "merge": format!("scale-{clip}")})));
+                        }
                     }
                 });
                 return;

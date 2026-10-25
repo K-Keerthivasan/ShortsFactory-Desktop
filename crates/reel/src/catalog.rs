@@ -260,8 +260,12 @@ fn logo_only(c: &Ctx<'_>) -> ReelPlan {
 /// The family's fixed slot: styles never change the crop geometry.
 fn design_slot(id: &str) -> Rect {
     match id {
-        "jkr-cinematic-v2" | "jkr-editorial-v2" | "jkr-technical-v2" | "jkr-story-v2" => Rect::new(56.0, 290.0, 968.0, 1280.0),
-        "jkr-esports-v2" | "jkr-hud-v2" | "jkr-retro-v2" | "jkr-cyber-v2" => Rect::new(40.0, 240.0, 1000.0, 1440.0),
+        // The words sit above the footage (in the blurred or dark field), so the footage is
+        // never covered and keeps the frame's width.
+        "jkr-cinematic-v2" => Rect::new(40.0, 660.0, 1000.0, 1060.0),
+        "jkr-esports-v2" => Rect::new(40.0, 680.0, 1000.0, 1060.0),
+        "jkr-editorial-v2" | "jkr-technical-v2" | "jkr-story-v2" => Rect::new(56.0, 290.0, 968.0, 1280.0),
+        "jkr-hud-v2" | "jkr-retro-v2" | "jkr-cyber-v2" => Rect::new(40.0, 240.0, 1000.0, 1440.0),
         "jkr-neon-v2" => Rect::new(56.0, 240.0, 968.0, 1440.0),
         _ => Rect::FULL,
     }
@@ -285,6 +289,8 @@ struct Recipe {
     look: Look,
     max_size: f64,
     top: bool,
+    /// The words sit above the footage slot, never over it.
+    above: bool,
     blur_background: bool,
     background: Option<(Rgba, Rgba)>,
     frame: &'static str,
@@ -299,6 +305,7 @@ fn recipe(c: &Ctx<'_>) -> Recipe {
         look: Look::Keyword,
         max_size: 76.0,
         top: false,
+        above: false,
         blur_background: false,
         background: Some((dark, dark)),
         frame: "none",
@@ -307,11 +314,12 @@ fn recipe(c: &Ctx<'_>) -> Recipe {
         progress: false,
     };
     match c.id {
-        "jkr-cinematic-v2" => Recipe { look: Look::Editorial, max_size: 86.0, blur_background: true, background: None, frame: "floating", ..base },
+        "jkr-cinematic-v2" => Recipe { look: Look::Editorial, max_size: 86.0, above: true, blur_background: true, background: None, frame: "floating", ..base },
         "jkr-esports-v2" => Recipe {
             look: Look::Condensed,
             max_size: 88.0,
             top: true,
+            above: true,
             background: Some((with_alpha(c.accent, 1.0), dark)),
             frame: "cutCorner",
             decorations: "technical",
@@ -421,11 +429,19 @@ fn design(c: &Ctx<'_>) -> ReelPlan {
     let cap_text_h = if caption.is_empty() { 0.0 } else { c.measure("caption", caption, 32.0, width, 0.0) };
     let caption_h = if caption.is_empty() { 0.0 } else { 18.0 + cap_text_h };
     // Words take at most ~560 px, so most of the footage stays clear; longer headlines are set smaller.
-    let (size, title_h) = c.fit_title(r.max_size, width, style.leading, (560.0 - caption_h).max(120.0));
-    let base = 1420.0;
-    let y = if r.top { 330.0 + 46.0 } else { base - caption_h - title_h };
-    // A dark backing where the words sit, from just above them to the frame's edge.
-    if r.top {
+    // Words above the footage fill the field between the brand row (or label) and the slot.
+    let above_y = if r.top { 330.0 + 46.0 } else { 330.0 };
+    let room = if r.above { slot.y - 40.0 - above_y - caption_h } else { 560.0 - caption_h };
+    let (size, title_h) = c.fit_title(r.max_size, width, style.leading, room.max(120.0));
+    let base = if r.above { above_y + title_h + caption_h } else { 1420.0 };
+    let y = if r.above || r.top { above_y } else { base - caption_h - title_h };
+    // A dark backing where the words sit, from just above them to the frame's edge. Words
+    // above the footage get it only over their own field.
+    if r.above {
+        if !r.blur_background {
+            b.rect(Z::Over, "Top shade", Rect::new(0.0, 0.0, 1080.0, slot.y), with_alpha(BLACK, 0.55), 0.0);
+        }
+    } else if r.top {
         let bottom = y + title_h + caption_h + 60.0;
         b.rect(Z::Over, "Top shade", Rect::new(0.0, 0.0, 1080.0, bottom), with_alpha(BLACK, 0.78), 0.0);
         b.gradient(Z::Over, "Top fade", Rect::new(0.0, bottom, 1080.0, 240.0), with_alpha(BLACK, 0.78), with_alpha(BLACK, 0.0), 90.0);
@@ -508,7 +524,7 @@ fn design(c: &Ctx<'_>) -> ReelPlan {
         b.bottom_at(cap, base);
         cap
     });
-    if !r.top {
+    if !r.top && !r.above {
         match cap {
             Some(cap) => b.pin(t, cap, [false, false, false, true], [0.0, 0.0, 0.0, -(cap_text_h + 18.0)]),
             None => b.bottom_at(t, base),
