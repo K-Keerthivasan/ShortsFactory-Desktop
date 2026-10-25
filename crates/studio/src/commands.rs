@@ -452,10 +452,65 @@ pub fn register() {
                 }
             },
         ),
-        spec("studio.transcribe", "Transcribe with Whisper", r#"{"file":str} — the video's words in lines [[seconds, text], ...] (local Whisper)"#, false, |_, p| {
+        spec(
+            "studio.captions",
+            "Captions from Speech or Script",
+            r##"{"action":"make"|"style"|"presets"|"heard"|"remotion","channel":n? (its caption look),"preset":str?,"look":{font?,size?,color:"#RRGGBB"?,outline?,outlineColor?,background?,backgroundColor:"#RRGGBBAA"?,uppercase?,words?,lines?,position:"lower|middle|upper"?}?,"script":str? (the text to show: aligned to the speech, or read out over a video with none),"words":[{start,end,text}]? (sequence seconds: your own corrected words; skips Whisper),"path":str? (remotion: where the JSON goes)} — short social captions on the open sequence's "Social captions" track (replaced each time; editable; burned in on export)"##,
+            true,
+            |s, p| {
+                let look = || -> Result<crate::captions::Look> {
+                    let mut base = match p.get("preset").and_then(Value::as_str) {
+                        Some(name) => crate::captions::preset(name).ok_or_else(|| bad(format!("unknown preset `{name}`")))?,
+                        None => match p.get("channel").and_then(Value::as_i64) {
+                            Some(ch) => studio()?.profile(ch).map_err(err)?.captions,
+                            None => crate::captions::Look::default(),
+                        },
+                    };
+                    if let Some(over) = p.get("look").and_then(Value::as_object) {
+                        let mut v = serde_json::to_value(&base).map_err(|e| bad(e.to_string()))?;
+                        if let Some(o) = v.as_object_mut() {
+                            for (k, x) in over {
+                                o.insert(k.clone(), x.clone());
+                            }
+                        }
+                        base = serde_json::from_value(v).map_err(|e| bad(format!("look: {e}")))?;
+                    }
+                    base.check().map_err(err)?;
+                    Ok(base)
+                };
+                let script = p.get("script").and_then(Value::as_str);
+                match text(p, "action")? {
+                    "presets" => Ok(json!(crate::captions::PRESETS.iter().map(|n| json!({"name": n, "look": crate::captions::preset(n)})).collect::<Vec<_>>())),
+                    "heard" => Ok(json!(crate::captions::heard(s).into_iter().map(|(i, f, t)| json!({"item": i, "file": f, "transcript": t})).collect::<Vec<_>>())),
+                    "style" => {
+                        let l = look()?;
+                        crate::captions::restyle(s, &l).map_err(err)?;
+                        to_value(l)
+                    }
+                    "make" => {
+                        let words = match p.get("words") {
+                            Some(w) => Some(serde_json::from_value::<Vec<crate::captions::Timed>>(w.clone()).map_err(|e| bad(format!("words: {e}")))?),
+                            None => None,
+                        };
+                        let l = look()?;
+                        let mut out = crate::captions::make(s, &l, script, words).map_err(err)?;
+                        out["look"] = to_value(&l)?;
+                        Ok(out)
+                    }
+                    "remotion" => {
+                        let path = std::path::PathBuf::from(text(p, "path")?);
+                        let n = crate::captions::export_remotion(s, script, &path).map_err(err)?;
+                        Ok(json!({"path": path, "words": n}))
+                    }
+                    other => Err(bad(format!("unknown action `{other}`"))),
+                }
+            },
+        ),
+        spec("studio.transcribe", "Transcribe with Whisper", r#"{"file":str} — the video's words in lines [[seconds, text], ...] and timed words [[start, end, word], ...] (local Whisper)"#, false, |_, p| {
             let file = std::path::PathBuf::from(text(p, "file")?);
-            let lines = crate::virality::whisper_here(&file).map_err(err)?;
-            Ok(json!({"lines": lines.iter().map(|(t, l)| json!([t, l])).collect::<Vec<_>>()}))
+            let words = crate::virality::whisper_words_here(&file).map_err(err)?;
+            let lines = crate::virality::lines_once(&words);
+            Ok(json!({"lines": lines.iter().map(|(t, l)| json!([t, l])).collect::<Vec<_>>(), "words": words.iter().map(|(a, b, w)| json!([a, b, w])).collect::<Vec<_>>()}))
         }),
         spec("studio.viralityResults", "Virality vs Results", r#"{"channel":n} — published posts with a virality prediction and their real views, likes and comments, and the rank correlation"#, false, |_, p| {
             let s = studio()?;
@@ -535,7 +590,9 @@ fn send_to_library(s: &mut Session, p: &Value) -> Result<Value> {
     } else {
         "Social Vertical 1080×1920"
     });
-    s.execute("export.quick", json!({"preset": preset, "path": path.to_string_lossy(), "range": "entire", "wait": true}))?;
+    // A Reel's captions are part of the picture.
+    let burn = s.active_sequence().is_some_and(|q| q.caption_tracks.iter().any(|t| t.enabled && !t.captions.is_empty()));
+    s.execute("export.quick", json!({"preset": preset, "path": path.to_string_lossy(), "range": "entire", "wait": true, "burnCaptions": burn}))?;
     let thumb = path.with_extension("png");
     let _ = s.execute("file.exportFrame", json!({"path": thumb.to_string_lossy(), "format": "png", "time": filmcraft_reel::secs(1.0).0}));
     let duration = s.active_sequence().map_or(0.0, |q| q.duration().seconds());

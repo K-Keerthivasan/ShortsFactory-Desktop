@@ -24,7 +24,9 @@ Read before writing: inspect the project and sequence first, and check a command
 ## The process (stop at each ★ for the user's go-ahead)
 
 1. **Brief.** Ask what the video is, who it is for, the platform (Reel/Short 9:16, Post 4:5, long
-   16:9), target length, the workspace (brand) and any style wishes, unless already given.
+   16:9), target length, the workspace (brand) and any style wishes, unless already given. The
+   workspace's channel profile (`studio.channel` `{"action":"get","channel":n}`) has its kind,
+   voice, audience, hashtags, Reel length and caption look: follow it.
 2. **Watch.** Import or locate the footage (`project_inspect`). Transcribe it
    (`transcript.generate`), read it (`transcript.inspect`), and look at frames across it
    (`render_frame`) to know what is on screen.
@@ -38,9 +40,20 @@ Read before writing: inspect the project and sequence first, and check a command
 5. **Framing.** Keep the subject in the 9:16 frame on every cut; add punch-ins (slow 100→110 %
    scale keyframes, `effects.setKeyframe` on Motion) on key lines and reactions, never constant
    zoom. Cut on action or on the beat of speech.
-6. **Captions.** Burned-in, readable captions from the transcript: a captions track
-   (`captions.*`), 1–3 words per caption for shorts, styled in the brand (`captions.setStyle`),
-   kept clear of the template's headline area and platform UI (bottom ~20 % and right edge).
+6. **Captions.** `studio.captions` makes short social captions on the "Social captions" track
+   (replaced each time; burned in on export): `{"action":"heard"}` lists what is heard and
+   whether it has a transcript; `{"action":"make","channel":n}` listens (local Whisper, word
+   timed) and uses the channel's caption look; pass `script` to show known text (aligned to the
+   speech, or read out over a written video with none), or your own corrected `words`
+   (`[{start,end,text}]`, sequence seconds) after reading `transcript.inspect` - fix names and
+   misheard words, split on the rhythm of speech, 1–3 words per caption for shorts. `look`
+   overrides (font, size, color, outline, background, uppercase, words, lines, position
+   upper|middle|lower); `{"action":"style"}` restyles without changing the words;
+   `{"action":"presets"}` lists the looks. Keep captions clear of faces, the template's words and
+   the platform UI (bottom ~20 % and right edge). For animated word-by-word captions,
+   `{"action":"remotion","path":…}` writes the words in Remotion's caption format; build them
+   with Remotion (Flick, `studio.flick`, or a Remotion MCP) as a transparent overlay on its own
+   track, and hide the plain track (`captions.setTrack` enabled false).
 7. **Design.** The workspace template's card (`reel.setCard`: headline = the hook in a few
    words), titles or lower thirds where they help (`graphics.*`, Essential Graphics templates),
    the logo. Optional Flick motion scenes (`studio.flick`) for animated explanations.

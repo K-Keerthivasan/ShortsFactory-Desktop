@@ -1,11 +1,11 @@
-//! AI editors: Claude and Codex (ChatGPT's coding agent) driving the running app.
+//! AI editors: Claude, Codex (ChatGPT's coding agent) and Hermes driving the running app.
 //!
 //! One MCP server serves both: `filmcraft-cli mcp --bridge 127.0.0.1:<port>` exposes every
 //! editor command (`command_run`, `command_batch`, `sequence_inspect`, `render_frame`,
 //! `ui_screenshot` …) of the app that is open, so the agent edits on the real timeline. [`setup`]
 //! turns on "Let Claude edit" (the app's localhost control server, next start), registers the
-//! server as `shorts-factory` with Claude Code, the Claude desktop app (when installed) and Codex,
-//! and installs the `shorts-factory-edit` skill (the quality-edit playbook) for Claude and Codex.
+//! server as `shorts-factory` with Claude Code, the Claude desktop app (when installed), Codex and
+//! Hermes, and installs the `shorts-factory-edit` skill (the quality-edit playbook) for each.
 //! [`launch`] opens an agent session on a project with a brief.
 
 use std::path::{Path, PathBuf};
@@ -31,6 +31,7 @@ pub struct Status {
     pub claude_code: bool,
     pub claude_desktop: bool,
     pub codex: bool,
+    pub hermes: bool,
     pub skill: bool,
 }
 
@@ -89,6 +90,15 @@ fn codex_config() -> Option<PathBuf> {
     dir.is_dir().then(|| dir.join("config.toml"))
 }
 
+/// Hermes Agent's home (`HERMES_HOME`, else `%LOCALAPPDATA%\hermes` on Windows, else `~/.hermes`).
+fn hermes_home() -> Option<PathBuf> {
+    if let Some(h) = std::env::var_os("HERMES_HOME") {
+        return Some(PathBuf::from(h));
+    }
+    let dir = if cfg!(windows) { std::env::var_os("LOCALAPPDATA").map(|a| PathBuf::from(a).join("hermes")) } else { home().map(|h| h.join(".hermes")) }?;
+    dir.is_dir().then_some(dir)
+}
+
 fn has_server(json_file: &Path) -> bool {
     std::fs::read_to_string(json_file).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).is_some_and(|v| v.pointer(&format!("/mcpServers/{SERVER}")).is_some())
 }
@@ -101,6 +111,7 @@ pub fn status(studio: &Studio) -> Status {
         claude_code: h.as_ref().is_some_and(|h| has_server(&h.join(".claude.json"))),
         claude_desktop: claude_desktop_config().is_some_and(|f| has_server(&f)),
         codex: codex_config().and_then(|f| std::fs::read_to_string(f).ok()).is_some_and(|t| t.contains(&format!("[mcp_servers.{SERVER}]"))),
+        hermes: hermes_home().and_then(|h| std::fs::read_to_string(h.join("config.yaml")).ok()).is_some_and(|t| t.contains(SERVER)),
         skill: h.is_some_and(|h| h.join(".claude").join("skills").join("shorts-factory-edit").join("SKILL.md").is_file()),
     }
 }
@@ -206,7 +217,20 @@ pub fn setup(studio: &Studio) -> Result<Vec<String>> {
         }
         None => log.push("Codex: not installed (skipped)".into()),
     }
+    // Hermes: its own CLI keeps its config; at most a minute (it checks the server).
+    let hermes = studio.var("HERMES_BIN").unwrap_or("hermes").to_string();
+    let _ = run_for(Command::new(&hermes).args(["mcp", "remove", SERVER]), 30);
+    match run_for(Command::new(&hermes).args(["mcp", "add", SERVER, "--command"]).arg(&cli).args(["--args", "mcp", "--bridge", &format!("127.0.0.1:{port}")]), 60) {
+        Some(true) => log.push("Hermes: the shorts-factory server is added".into()),
+        Some(false) => log.push("Hermes: not added (run `hermes mcp add` yourself)".into()),
+        None => log.push("Hermes: not installed (skipped)".into()),
+    }
     let h = home().ok_or_else(|| StudioError::Other("no home folder".into()))?;
+    if let Some(hh) = hermes_home() {
+        let d = hh.join("skills").join("creative").join("shorts-factory-edit");
+        std::fs::create_dir_all(&d)?;
+        std::fs::write(d.join("SKILL.md"), SKILL)?;
+    }
     for dir in [h.join(".claude").join("skills"), h.join(".codex").join("skills")] {
         if dir.parent().is_some_and(Path::is_dir) {
             let d = dir.join("shorts-factory-edit");
@@ -218,22 +242,41 @@ pub fn setup(studio: &Studio) -> Result<Vec<String>> {
     Ok(log)
 }
 
-/// Opens a Claude Code or Codex session in a terminal on `dir` (the project's folder), with
+/// Runs a command with no input for at most `secs` seconds: `Some(succeeded)`, `None` when it
+/// could not start.
+fn run_for(c: &mut Command, secs: u64) -> Option<bool> {
+    let mut child = quiet(c).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().ok()?;
+    let started = std::time::Instant::now();
+    loop {
+        if let Ok(Some(st)) = child.try_wait() {
+            return Some(st.success());
+        }
+        if started.elapsed().as_secs() >= secs {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Some(false);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+}
+
+/// Opens a Claude Code, Codex or Hermes session in a terminal on `dir` (the project's folder), with
 /// `brief` written there and handed to the agent.
 pub fn launch(studio: &Studio, agent: &str, dir: &Path, brief: &str) -> Result<()> {
     std::fs::create_dir_all(dir)?;
     let file = dir.join("ai-edit-brief.md");
     std::fs::write(&file, brief)?;
     let prompt = "Use the shorts-factory-edit skill and the shorts-factory MCP server to edit in the running Shorts Factory Desktop app. Read ai-edit-brief.md in this folder first and follow it.";
-    let bin = match agent {
-        "codex" => studio.var("CODEX_BIN").unwrap_or("codex").to_string(),
-        _ => studio.var("CLAUDE_BIN").unwrap_or("claude").to_string(),
+    let (bin, args): (String, Vec<&str>) = match agent {
+        "codex" => (studio.var("CODEX_BIN").unwrap_or("codex").to_string(), vec![prompt]),
+        "hermes" => (studio.var("HERMES_BIN").unwrap_or("hermes").to_string(), vec!["chat", "-s", "shorts-factory-edit", "-q", prompt]),
+        _ => (studio.var("CLAUDE_BIN").unwrap_or("claude").to_string(), vec![prompt]),
     };
     if cfg!(windows) {
         // A new console window the user can talk to the agent in.
-        Command::new("cmd").args(["/C", "start", "Shorts Factory editor", "/D"]).arg(dir).arg(&bin).arg(prompt).spawn()?;
+        Command::new("cmd").args(["/C", "start", "Shorts Factory editor", "/D"]).arg(dir).arg(&bin).args(&args).spawn()?;
     } else {
-        Command::new(&bin).arg(prompt).current_dir(dir).spawn()?;
+        Command::new(&bin).args(&args).current_dir(dir).spawn()?;
     }
     Ok(())
 }

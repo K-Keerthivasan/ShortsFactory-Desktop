@@ -49,11 +49,13 @@ pub struct Profile {
     /// AI Reels' length.
     pub reel_min_seconds: f64,
     pub reel_max_seconds: f64,
+    /// The channel's caption look (Design > Captions).
+    pub captions: crate::captions::Look,
 }
 
 impl Default for Profile {
     fn default() -> Self {
-        Profile { kind: "story".into(), voice: String::new(), audience: String::new(), hashtags: Vec::new(), reel_min_seconds: 60.0, reel_max_seconds: 90.0 }
+        Profile { kind: "story".into(), voice: String::new(), audience: String::new(), hashtags: Vec::new(), reel_min_seconds: 60.0, reel_max_seconds: 90.0, captions: Default::default() }
     }
 }
 
@@ -102,6 +104,7 @@ impl Profile {
         if !(self.reel_min_seconds.is_finite() && self.reel_max_seconds.is_finite() && 5.0 <= self.reel_min_seconds && self.reel_min_seconds <= self.reel_max_seconds && self.reel_max_seconds <= 600.0) {
             return err("Reel length: a minimum of at least 5 s, no more than the maximum (up to 600 s)");
         }
+        self.captions.check()?;
         if self.voice.chars().count() > 4000 || self.audience.chars().count() > 500 {
             return err("The voice is limited to 4000 characters and the audience to 500");
         }

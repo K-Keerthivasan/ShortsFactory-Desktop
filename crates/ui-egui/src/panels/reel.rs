@@ -34,6 +34,8 @@ mod ai;
 mod motion;
 #[path = "reel_layers.rs"]
 mod layers;
+#[path = "reel_captions.rs"]
+mod captions;
 #[path = "reel_delivery.rs"]
 mod delivery;
 #[path = "reel_gaps.rs"]
@@ -92,6 +94,8 @@ pub struct ReelDraft {
     pub ai: AiDraft,
     /// Create ▸ AI Reels: picks and settings.
     pub maker: ai::Maker,
+    /// Design ▸ Captions: the look and the script.
+    pub captions: captions::Draft,
     /// Make a Reel (9:16) or a Post (4:5).
     pub format: Format,
     pub design_tab: DesignTab,
@@ -162,6 +166,7 @@ pub enum DesignTab {
     Ai,
     Caption,
     Layers,
+    Captions,
     Motion,
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -472,6 +477,7 @@ fn footage(app: &FilmcraftApp, info: &ReelInfo) -> Option<(std::path::PathBuf, f
 pub fn poll(app: &mut FilmcraftApp, now: f64) {
     // Flick's finished scenes go onto their Reel when it is open.
     motion::tick(app);
+    captions::tick(app);
     // AI Reels whose parts are found are made.
     ai::auto_make(app);
     let mut r = rt();
@@ -1227,11 +1233,11 @@ pub fn show_create(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 }
             }
             let on = filmcraft_studio::ai_editor::status(&ctx.s).enabled;
-            for (agent, label) in [("claude", "Edit with Claude"), ("codex", "Edit with Codex")] {
+            for (agent, label) in [("claude", "Edit with Claude"), ("codex", "Edit with Codex"), ("hermes", "Edit with Hermes")] {
                 let b = ui.add_enabled(on, egui::Button::new(label)).on_disabled_hover_text("Set up AI editors in Plugin Settings ▸ AI, then restart the app");
                 app.auto.add_response(&format!("reel.create.editWith.{agent}"), &b, label);
                 if b.clicked() {
-                    edit_with_agent(app, &ctx, agent);
+                    edit_with_agent(app, &ctx, agent, "");
                 }
             }
             let b = ui.button("Download videos");
@@ -1583,6 +1589,7 @@ pub fn show_design(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
             (DesignTab::Ai, "ai", "Use AI"),
             (DesignTab::Caption, "caption", "Caption & hashtags"),
             (DesignTab::Layers, "layers", "Layers"),
+            (DesignTab::Captions, "captions", "Captions"),
             (DesignTab::Motion, "motion", "Motion (Flick)"),
         ],
     );
@@ -1610,6 +1617,12 @@ pub fn show_design(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
             },
             DesignTab::Caption => card(app, ui, is_reel, CardPart::Caption),
             DesignTab::Layers => layers::show(app, ui),
+            DesignTab::Captions => match &ctx {
+                Some(c) => captions::show(app, ui, c),
+                None => {
+                    ui.label(RichText::new("Captions need the Shorts Factory library.").small().color(t.text_dim));
+                }
+            },
             DesignTab::Motion => match &ctx {
                 Some(c) => motion::show(app, ui, &c.s),
                 None => {
@@ -1793,6 +1806,10 @@ fn advance_queue(app: &mut FilmcraftApp, r: &mut Runtime) {
     }
     let preset = if q.info.format == "post" { "Match Source – Adaptive High Bitrate" } else { "Social Vertical 1080×1920" };
     let mut params = json!({"preset":preset,"path":path.to_string_lossy(),"range":"entire","sequence":q.sequence});
+    // A Reel's captions are part of the picture.
+    if app.session.project.sequence(filmcraft_project::ItemId(q.sequence)).is_some_and(|s| s.caption_tracks.iter().any(|t| t.enabled && !t.captions.is_empty())) {
+        params["burnCaptions"] = json!(true);
+    }
     if let Some((start, end)) = q.range {
         params["range"] = json!("custom");
         params["startTime"] = json!(start);
@@ -3399,9 +3416,9 @@ fn cloud_youtube_settings(app: &mut FilmcraftApp, ui: &mut egui::Ui, s: &Studio)
 /// Plugin Settings ▸ AI ▸ AI editors: Claude and Codex driving this app through one MCP server.
 fn ai_editors(app: &mut FilmcraftApp, ui: &mut egui::Ui, s: &Studio) {
     let t = app.tokens;
-    ui.label(RichText::new("AI editors (Claude and Codex)").strong());
+    ui.label(RichText::new("AI editors (Claude, Codex and Hermes)").strong());
     ui.label(
-        RichText::new("Claude and Codex (ChatGPT's coding agent) can edit in this app through one MCP server, shorts-factory: every editor command, the timeline, captions, effects, frames and screenshots. Set up registers it with Claude Code, the Claude app and Codex, installs the quality-edit playbook (skill), and turns on the app's local control server (port 9876, from the next start).")
+        RichText::new("Claude and Codex (ChatGPT's coding agent) can edit in this app through one MCP server, shorts-factory: every editor command, the timeline, captions, effects, frames and screenshots. Set up registers it with Claude Code, the Claude app, Codex and Hermes, installs the quality-edit playbook (skill), and turns on the app's local control server (port 9876, from the next start).")
             .small()
             .color(t.text_dim),
     );
@@ -3409,11 +3426,12 @@ fn ai_editors(app: &mut FilmcraftApp, ui: &mut egui::Ui, s: &Studio) {
     let mark = |b: bool| if b { "✓" } else { "–" };
     ui.label(
         RichText::new(format!(
-            "{} control server · {} Claude Code · {} Claude app · {} Codex · {} skill",
+            "{} control server · {} Claude Code · {} Claude app · {} Codex · {} Hermes · {} skill",
             mark(st.enabled),
             mark(st.claude_code),
             mark(st.claude_desktop),
             mark(st.codex),
+            mark(st.hermes),
             mark(st.skill)
         ))
         .small(),
@@ -3444,7 +3462,7 @@ fn ai_editors(app: &mut FilmcraftApp, ui: &mut egui::Ui, s: &Studio) {
 }
 
 /// Opens Claude or Codex on the open project with a brief.
-fn edit_with_agent(app: &mut FilmcraftApp, ctx: &Ctx, agent: &str) {
+fn edit_with_agent(app: &mut FilmcraftApp, ctx: &Ctx, agent: &str, task: &str) {
     let dir = match filmcraft_studio::project_folder(app.session.path.as_deref(), "AI edit") {
         Ok(d) => d,
         Err(e) => {
@@ -3463,14 +3481,20 @@ fn edit_with_agent(app: &mut FilmcraftApp, ctx: &Ctx, agent: &str) {
 - Workspace (brand): {workspace} (channel id {})
 - Format: {}
 
-Ask me what this video is and what I want before you change anything, then follow the shorts-factory-edit skill.
+{}
 ",
         app.session.path.as_deref().unwrap_or("(not saved yet)"),
         ctx.channel.map(|c| c.to_string()).unwrap_or_default(),
         app.ui.reel.format.label(),
+        if task.is_empty() { "Ask me what this video is and what I want before you change anything, then follow the shorts-factory-edit skill." } else { task },
     );
+    let name = match agent {
+        "codex" => "Codex",
+        "hermes" => "Hermes",
+        _ => "Claude",
+    };
     app.ui.status = match filmcraft_studio::ai_editor::launch(&ctx.s, agent, &dir, &brief) {
-        Ok(()) => format!("{} is starting in a new window: talk to it there; it edits this project live.", if agent == "codex" { "Codex" } else { "Claude" }),
+        Ok(()) => format!("{name} is starting in a new window: talk to it there; it edits this project live."),
         Err(e) => format!("Could not start {agent}: {e}"),
     };
 }

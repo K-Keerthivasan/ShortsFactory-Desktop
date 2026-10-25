@@ -22,7 +22,7 @@ filmcraft-cli exec studio.workspaces
 | `studio.publishNow`, `studio.schedule` | Direct Instagram / YouTube; `schedule` queues Instagram locally and uploads YouTube now with YouTube's own publish time |
 | `studio.cloudSchedule`, `studio.cloud`, `studio.calendar` | Supabase + B2 scheduling and the calendar |
 
-## One server for Claude and Codex (set up from the app)
+## One server for Claude, Codex and Hermes (set up from the app)
 
 Plugin Settings ▸ AI ▸ **AI editors** ▸ **Set up AI editors** (MCP: `studio.aiEditor`
 `{"action":"setup"}`) does it all once:
@@ -31,13 +31,14 @@ Plugin Settings ▸ AI ▸ **AI editors** ▸ **Set up AI editors** (MCP: `studi
   its next start (**Turn off the control server** undoes it);
 - registers the same server, `shorts-factory` → `filmcraft-cli mcp --bridge 127.0.0.1:9876`,
   with **Claude Code** (user scope), the **Claude desktop app** (`claude_desktop_config.json`)
-  and **Codex** (`~/.codex/config.toml`), keeping every other setting (the previous files are
-  kept as `.bak`);
+  , **Codex** (`~/.codex/config.toml`) and **Hermes** (`hermes mcp add`), keeping every other
+  setting (the previous files are kept as `.bak`);
 - installs the **`shorts-factory-edit` skill**, the quality-edit playbook (brief, watch, cut plan
   for approval, rough cut, framing, captions, design, sound, colour, review, deliver), for
-  Claude (`~/.claude/skills`) and Codex (`~/.codex/skills`).
+  Claude (`~/.claude/skills`), Codex (`~/.codex/skills`) and Hermes (its `skills/creative`).
 
-Then Create ▸ **Edit with Claude** / **Edit with Codex** opens the agent in a terminal on the open
+Then Create ▸ **Edit with Claude** / **Codex** / **Hermes** (and Design ▸ Captions ▸ **Captions
+with …**) opens the agent in a terminal on the open
 project with a brief (`AI edit/ai-edit-brief.md` in the project's folder); talk to it there and
 watch it edit the live timeline. The ChatGPT app itself only connects to MCP servers on the
 internet (HTTPS), not to local ones; Codex is ChatGPT's agent that uses this local server.

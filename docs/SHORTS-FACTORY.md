@@ -326,6 +326,42 @@ files are in the project's `Motion` folder (`flick-<time>/`: `transcript.json`,
 `flick-plan.md`, `remotion-brief.md`, `scene-spec.json`, `remotion/`, `scenes/`). MCP:
 `studio.flick` (`status`, `setup`, `run`).
 
+## 11d. Channel profiles (customisable channels)
+
+Every workspace is a channel with its own profile (Plugin Settings ▸ Channel profile), so a new
+channel is configured, not coded:
+
+- **Kind**: stories (gaming, tech, human interest), business advice, explainers, personal /
+  creator, or custom. The kind gives the AI its voice; write your own voice to replace it.
+- **Audience** and **hashtags** the AI always uses; **AI Reels length** (Create ▸ AI Reels takes
+  it when the workspace is picked); the **caption look** (Design ▸ Captions).
+- **Theme** presets for the brand colours (Brand ▸ Theme), with the layout, font and logo as before.
+- **New workspace** starts blank (with a kind) or as a copy of another workspace's brand, layout,
+  theme and voice (not its logo, media, accounts or publishing). Workspaces can be renamed.
+
+Workspaces made before profiles keep reading as they did (the K2Short template = business).
+`studio.channel` (get, set, kinds, themes, create, rename) gives the same to the AI editors.
+
+## 11e. Captions (recorded or written videos)
+
+Design ▸ Captions puts short social captions on the open sequence's **Social captions** track:
+
+1. Pick a style (Bold pop, Yellow punch, Clean box, Subtitles, Minimal) and adjust it: font,
+   size, colour, outline, box, capitals, words per caption, 1-2 lines, upper/middle/lower.
+2. **Make captions**: the app listens to the sequence's footage with local Whisper (in a separate
+   process, word-timed; the app keeps working) and splits what is said into captions, a new one
+   after a sentence or a pause. The words also become the clips' transcripts (text-based editing).
+3. Optional **text to show**: a script or corrected names are aligned to the speech's timing; for
+   a written video with no speech the text is read out at a reading pace.
+4. Edit any caption in the Captions panel or the Program monitor; **Apply this style** restyles
+   without changing the words; **Save as the channel's style** keeps the look for the workspace.
+   Making them again replaces only this track. Reel renders burn the captions in.
+
+**Captions with Claude / Codex / Hermes** opens the AI editor on the project with a captions
+task: it reads the transcript, fixes names and misheard words, and places corrected captions
+through `studio.captions` (or builds animated word-by-word captions with Remotion from
+**Export words for Remotion**, `captions.remotion.json` in Remotion's caption format).
+
 ## 12. Account health and token notifications
 
 | Feature | Status |

@@ -765,7 +765,7 @@ fn channel_profiles_are_per_workspace_and_replace_the_hard_coded_voices() {
     assert_eq!(Profile::from_settings(&json!({"template": "K2Short"})).kind, "business");
     assert_eq!(Profile::from_settings(&json!({})).kind, "story");
     let before = s.settings_json(1).unwrap();
-    let p = Profile { kind: "custom".into(), voice: "Write like a calm science teacher.".into(), audience: "curious teens".into(), hashtags: vec!["science".into()], reel_min_seconds: 30.0, reel_max_seconds: 45.0 };
+    let p = Profile { kind: "custom".into(), voice: "Write like a calm science teacher.".into(), audience: "curious teens".into(), hashtags: vec!["science".into()], reel_min_seconds: 30.0, reel_max_seconds: 45.0, captions: Default::default() };
     s.save_profile(1, &p).unwrap();
     assert_eq!(s.profile(1).unwrap(), p);
     let after = s.settings_json(1).unwrap();
@@ -791,4 +791,58 @@ fn channel_profiles_are_per_workspace_and_replace_the_hard_coded_voices() {
     assert!(s.brand(ch.id).unwrap().logo_path.is_none());
     s.rename_workspace(ch.id, "Renamed").unwrap();
     assert!(s.channels().unwrap().iter().any(|c| c.id == ch.id && c.name == "Renamed"));
+}
+
+#[test]
+fn captions_split_speech_align_a_script_and_land_on_their_own_track() {
+    use crate::captions::{Look, Timed, TRACK, align_script, group, make, preset, read_script};
+    let w = |a: f64, b: f64, t: &str| Timed { start: a, end: b, text: t.into() };
+    let speech = vec![w(0.0, 0.3, "so"), w(0.3, 0.6, "today"), w(0.6, 0.9, "we"), w(0.9, 1.2, "test"), w(1.2, 1.5, "kkvasan's"), w(1.5, 1.9, "app."), w(3.0, 3.4, "it"), w(3.4, 3.8, "works")];
+    let look = Look { words: 3, ..preset("Bold pop").unwrap() };
+    let caps = group(&speech, &look);
+    // Three words at most, a new caption after a sentence and after a pause; in capitals.
+    assert_eq!(caps.iter().map(|c| c.text.as_str()).collect::<Vec<_>>(), ["SO TODAY WE", "TEST KKVASAN'S APP.", "IT WORKS"]);
+    assert!(caps.windows(2).all(|p| p[0].end <= p[1].start), "{caps:?}");
+    // A script corrects what was heard and keeps the speech's timing.
+    let fixed = align_script(&speech, "So today we test Keerthi's app. It works!");
+    assert_eq!(fixed.len(), 8);
+    assert_eq!(fixed[4].text, "Keerthi's");
+    assert!((fixed[4].start - 1.2).abs() < 1e-9 && (fixed[7].start - 3.4).abs() < 1e-9, "{fixed:?}");
+    // A written video: the script at a reading pace, inside the video.
+    let read = read_script("one two three four five six", 0.0, 10.0);
+    assert_eq!(read.len(), 6);
+    assert!(read[5].end <= 10.0 && read[5].end > 2.0);
+    assert!(Look { position: "sideways".into(), ..Look::default() }.check().is_err());
+
+    let mut s = filmcraft_engine::Session::default();
+    s.execute("reel.new", json!({"template": "quoteCard", "seconds": 8})).unwrap();
+    let r = make(&mut s, &look, None, Some(speech.clone())).unwrap();
+    assert_eq!(r["captions"], 3);
+    // Making them again replaces the track, never adds another; written text works with no speech.
+    make(&mut s, &Look { words: 2, ..look.clone() }, Some("Written words only, shown in time"), None).unwrap();
+    let q = s.active_sequence().unwrap();
+    let ours: Vec<_> = q.caption_tracks.iter().filter(|t| t.name == TRACK).collect();
+    assert_eq!(ours.len(), 1);
+    assert_eq!(ours[0].captions[0].text, "WRITTEN WORDS");
+    assert_eq!(ours[0].style.size, look.size);
+    // One undo removes them.
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(s.active_sequence().unwrap().caption_tracks.iter().filter(|t| t.name == TRACK).next().map(|t| t.captions.len()), Some(3));
+}
+
+/// Renders each caption style over a Reel to `target/caption-frames` (to look at).
+#[test]
+#[ignore]
+fn caption_frames() {
+    use crate::captions::{PRESETS, Timed, make, preset};
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/caption-frames");
+    std::fs::create_dir_all(&dir).unwrap();
+    let words: Vec<Timed> = "this changes how you edit every single short you make".split(' ').enumerate().map(|(i, w)| Timed { start: i as f64 * 0.35, end: i as f64 * 0.35 + 0.3, text: w.into() }).collect();
+    for name in PRESETS {
+        let mut s = filmcraft_engine::Session::default();
+        s.execute("reel.new", json!({"template": "jkr-cinematic-v2", "seconds": 8})).unwrap();
+        make(&mut s, &preset(name).unwrap(), None, Some(words.clone())).unwrap();
+        let path = dir.join(format!("{}.png", name.replace(' ', "-").to_lowercase()));
+        s.execute("file.exportFrame", json!({"path": path.to_string_lossy(), "format": "png", "time": filmcraft_reel::secs(0.4).0})).unwrap();
+    }
 }
