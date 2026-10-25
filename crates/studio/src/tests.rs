@@ -756,3 +756,39 @@ args = ["mcp", "--bridge", "127.0.0.1:9876"]"#), "{out}");
     assert!(json_with_server("not json", "cli", 1).is_err());
     assert!(crate::ai_editor::SKILL.starts_with("---\nname: shorts-factory-edit"));
 }
+
+#[test]
+fn channel_profiles_are_per_workspace_and_replace_the_hard_coded_voices() {
+    use crate::channel_profile::{Profile, THEMES, apply_theme};
+    let s = fixture("channel-profile");
+    // Before profiles: the K2 template meant a business channel, anything else a story one.
+    assert_eq!(Profile::from_settings(&json!({"template": "K2Short"})).kind, "business");
+    assert_eq!(Profile::from_settings(&json!({})).kind, "story");
+    let before = s.settings_json(1).unwrap();
+    let p = Profile { kind: "custom".into(), voice: "Write like a calm science teacher.".into(), audience: "curious teens".into(), hashtags: vec!["science".into()], reel_min_seconds: 30.0, reel_max_seconds: 45.0 };
+    s.save_profile(1, &p).unwrap();
+    assert_eq!(s.profile(1).unwrap(), p);
+    let after = s.settings_json(1).unwrap();
+    assert_eq!(after["enabledPlatforms"], before["enabledPlatforms"]);
+    let instruction = s.profile(1).unwrap().instruction();
+    assert!(instruction.starts_with("Write like a calm science teacher.") && instruction.contains("curious teens") && instruction.contains("#science"), "{instruction}");
+    // A custom kind needs its voice; lengths must make sense.
+    assert!(s.save_profile(1, &Profile { voice: String::new(), ..p.clone() }).is_err());
+    assert!(s.save_profile(1, &Profile { reel_min_seconds: 90.0, reel_max_seconds: 60.0, ..p.clone() }).is_err());
+    // Business channels keep the earlier app's template; switching back clears it.
+    s.save_profile(1, &Profile { kind: "business".into(), ..Default::default() }).unwrap();
+    assert_eq!(s.settings_json(1).unwrap()["template"], "K2Short");
+    s.save_profile(1, &p).unwrap();
+    assert!(s.settings_json(1).unwrap().get("template").is_none());
+    // A new workspace copies another's brand and profile, not its logo.
+    let mut brand = s.brand(1).unwrap();
+    assert!(apply_theme(&mut brand, THEMES[1].0));
+    s.save_brand(1, &brand).unwrap();
+    let ch = s.create_workspace_from("copy-channel", "Copy", Some(1), None).unwrap();
+    assert_eq!(s.profile(ch.id).unwrap(), p);
+    assert_eq!(s.brand(ch.id).unwrap().primary_color, THEMES[1].1[0]);
+    assert_eq!(s.brand(ch.id).unwrap().channel_name, "Copy");
+    assert!(s.brand(ch.id).unwrap().logo_path.is_none());
+    s.rename_workspace(ch.id, "Renamed").unwrap();
+    assert!(s.channels().unwrap().iter().any(|c| c.id == ch.id && c.name == "Renamed"));
+}

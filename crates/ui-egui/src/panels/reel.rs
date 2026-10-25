@@ -66,6 +66,13 @@ pub struct ReelDraft {
     pub workspace_name: String,
     pub workspace_slug: String,
     pub brand_edit: Option<Brand>,
+    /// The workspace's channel profile being edited.
+    pub profile_edit: Option<filmcraft_studio::channel_profile::Profile>,
+    /// New workspace: start from this workspace's brand and profile.
+    pub workspace_from: Option<i64>,
+    /// New workspace: its kind (when not copied).
+    pub workspace_kind: String,
+    pub workspace_rename: String,
     pub rename_story: Option<i64>,
     pub rename_title: String,
     pub show_archived: bool,
@@ -319,6 +326,7 @@ struct Runtime {
     studio: Option<Result<Studio, String>>,
     channels: Vec<Channel>,
     brand: Option<Brand>,
+    profile: Option<filmcraft_studio::channel_profile::Profile>,
     media: Vec<MediaRow>,
     articles: Vec<Article>,
     accounts: Vec<Account>,
@@ -424,6 +432,7 @@ fn load_channel(r: &mut Runtime, channel: i64) {
             filmcraft_text::fonts::add_source(&filmcraft_text::fonts::DirectorySource { dirs: vec![folder.join("assets/brand/fonts")] });
         }
         r.brand = Some(s.brand(channel)?);
+        r.profile = Some(s.profile(channel)?);
         r.media = s.media(channel)?;
         r.articles = s.articles(channel, 60)?;
         r.accounts = s.accounts(channel)?;
@@ -877,6 +886,13 @@ fn prelude(app: &mut FilmcraftApp, ui: &mut egui::Ui) -> Option<Ctx> {
         app.ui.reel.rename_story = None;
         load_channel(&mut r, c);
         app.ui.reel.brand_edit = r.brand.clone();
+        app.ui.reel.profile_edit = r.profile.clone();
+        app.ui.reel.workspace_rename.clear();
+        // AI Reels take the channel's lengths.
+        if let Some(p) = &r.profile {
+            app.ui.reel.maker.min_seconds = p.reel_min_seconds;
+            app.ui.reel.maker.max_seconds = p.reel_max_seconds;
+        }
         app.ui.reel.accounts = r.accounts.iter().filter(|a| a.enabled && a.status == "CONNECTED").map(|a| a.id).collect();
         // The open Reel takes the workspace's brand.
         if let (Some(b), Some(_)) = (r.brand.clone(), info.as_ref()) {
@@ -2649,6 +2665,18 @@ fn settings(app: &mut FilmcraftApp, ui: &mut egui::Ui, channel: Option<i64>, s: 
     });
     section(ui, "Brand", true, |ui| {
         let edit = app.ui.reel.brand_edit.get_or_insert_with(|| brand.clone());
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("Theme").small());
+            for (name, c) in filmcraft_studio::channel_profile::THEMES {
+                let swatch = filmcraft_reel::color(c[0], [0.5, 0.5, 0.5, 1.0]);
+                let fill = egui::Color32::from_rgb((swatch[0] * 255.0) as u8, (swatch[1] * 255.0) as u8, (swatch[2] * 255.0) as u8);
+                let b = ui.add(egui::Button::new(RichText::new(*name).small()).fill(fill.gamma_multiply(0.35))).on_hover_text("Use this theme's colours (then Save workspace brand)");
+                app.auto.add_response(&format!("reel.brand.theme.{name}"), &b, name);
+                if b.clicked() {
+                    filmcraft_studio::channel_profile::apply_theme(edit, name);
+                }
+            }
+        });
         let field_width = (ui.available_width() - 125.0).max(80.0);
         egui::Grid::new("reel-brand-fields").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
             for (id, label, value) in [
@@ -2720,6 +2748,7 @@ fn settings(app: &mut FilmcraftApp, ui: &mut egui::Ui, channel: Option<i64>, s: 
             }
         }
     });
+    channel_profile(app, ui, channel, s);
     section(ui, "New workspace", false, |ui| {
         ui.label("Workspace name");
         let r = ui.add(egui::TextEdit::singleline(&mut app.ui.reel.workspace_name).desired_width(f32::INFINITY));
@@ -2727,10 +2756,32 @@ fn settings(app: &mut FilmcraftApp, ui: &mut egui::Ui, channel: Option<i64>, s: 
         ui.label("Folder slug (for example my-channel)");
         let r = ui.add(egui::TextEdit::singleline(&mut app.ui.reel.workspace_slug).desired_width(f32::INFINITY));
         app.auto.add_response("reel.workspace.slug", &r, "Workspace slug");
+        let channels = rt().channels.clone();
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Start from");
+            let from_name = app.ui.reel.workspace_from.and_then(|id| channels.iter().find(|c| c.id == id)).map(|c| format!("a copy of {}", c.name)).unwrap_or_else(|| "a new channel".into());
+            egui::ComboBox::from_id_salt("reel-workspace-from").selected_text(from_name).show_ui(ui, |ui| {
+                ui.selectable_value(&mut app.ui.reel.workspace_from, None, "a new channel");
+                for c in &channels {
+                    ui.selectable_value(&mut app.ui.reel.workspace_from, Some(c.id), format!("a copy of {} (brand, theme, layout, voice)", c.name));
+                }
+            });
+            if app.ui.reel.workspace_from.is_none() {
+                ui.label("Kind");
+                if app.ui.reel.workspace_kind.is_empty() {
+                    app.ui.reel.workspace_kind = "story".into();
+                }
+                kind_combo(ui, "reel-workspace-kind", &mut app.ui.reel.workspace_kind);
+            }
+        });
         let b = ui.button("Create workspace");
         app.auto.add_response("reel.workspace.create", &b, "Create workspace");
         if b.clicked() {
-            match s.create_workspace(app.ui.reel.workspace_slug.trim(), &app.ui.reel.workspace_name) {
+            let from = app.ui.reel.workspace_from;
+            // A custom kind starts as the story voice until its voice is written.
+            let kind = if app.ui.reel.workspace_kind == "custom" || app.ui.reel.workspace_kind.is_empty() { "story".to_string() } else { app.ui.reel.workspace_kind.clone() };
+            let profile = filmcraft_studio::channel_profile::Profile { kind, ..Default::default() };
+            match s.create_workspace_from(app.ui.reel.workspace_slug.trim(), &app.ui.reel.workspace_name, from, from.is_none().then_some(&profile)) {
                 Ok(ch) => {
                     let mut r = rt();
                     match s.channels() {
@@ -2744,6 +2795,107 @@ fn settings(app: &mut FilmcraftApp, ui: &mut egui::Ui, channel: Option<i64>, s: 
                 Err(e) => app.ui.status = e.to_string(),
             }
         }
+    });
+}
+
+fn kind_combo(ui: &mut egui::Ui, id: &str, kind: &mut String) -> egui::Response {
+    let label = filmcraft_studio::channel_profile::KINDS.iter().find(|k| k.0 == kind.as_str()).map(|k| k.1).unwrap_or("Choose");
+    egui::ComboBox::from_id_salt(id)
+        .selected_text(label)
+        .show_ui(ui, |ui| {
+            for (id, label, _) in filmcraft_studio::channel_profile::KINDS {
+                ui.selectable_value(kind, id.to_string(), *label);
+            }
+        })
+        .response
+}
+
+/// Plugin Settings > Channel profile: the workspace's kind, the AI's voice, the audience,
+/// hashtags and AI Reels' length; and its name.
+fn channel_profile(app: &mut FilmcraftApp, ui: &mut egui::Ui, channel: Option<i64>, s: &Studio) {
+    let t = app.tokens;
+    section(ui, "Channel profile", true, |ui| {
+        let Some(ch) = channel else {
+            ui.label(RichText::new("Choose a workspace first.").small().color(t.text_dim));
+            return;
+        };
+        ui.label(
+            RichText::new("What this channel is and how its AI writes. Every workspace has its own, so add channels with their own layout, theme and voice.")
+                .small()
+                .color(t.text_dim),
+        );
+        let saved = rt().profile.clone().unwrap_or_default();
+        let edit = app.ui.reel.profile_edit.get_or_insert_with(|| saved.clone());
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Kind");
+            let r = kind_combo(ui, "reel-profile-kind", &mut edit.kind);
+            app.auto.add_response("reel.profile.kind", &r, "Channel kind");
+        });
+        let built_in = filmcraft_studio::channel_profile::Profile::kind_voice(&edit.kind);
+        ui.label(RichText::new("Voice (how the AI writes; empty uses the kind's own)").small());
+        let r = ui.add(egui::TextEdit::multiline(&mut edit.voice).hint_text(built_in).desired_rows(3).desired_width(f32::INFINITY));
+        app.auto.add_response("reel.profile.voice", &r, "Channel voice");
+        ui.horizontal(|ui| {
+            ui.label("Audience");
+            let r = ui.add(egui::TextEdit::singleline(&mut edit.audience).hint_text("e.g. gamers 16-30 who follow new releases").desired_width(f32::INFINITY));
+            app.auto.add_response("reel.profile.audience", &r, "Channel audience");
+        });
+        ui.horizontal(|ui| {
+            ui.label("Hashtags");
+            let id = egui::Id::new(("reel-profile-tags", ch));
+            let mut tags: String = ui.data_mut(|d| d.get_temp(id)).unwrap_or_else(|| edit.hashtags.join(" "));
+            let r = ui.add(egui::TextEdit::singleline(&mut tags).hint_text("#gaming #trailer").desired_width(f32::INFINITY));
+            app.auto.add_response("reel.profile.hashtags", &r, "Channel hashtags");
+            if r.changed() {
+                edit.hashtags = tags.split([' ', ',']).map(|h| h.trim().trim_start_matches('#')).filter(|h| !h.is_empty()).map(|h| format!("#{h}")).collect();
+                ui.data_mut(|d| d.insert_temp(id, tags));
+            }
+        });
+        ui.horizontal_wrapped(|ui| {
+            ui.label("AI Reels length");
+            ui.add(egui::DragValue::new(&mut edit.reel_min_seconds).range(5.0..=600.0).suffix(" s"));
+            ui.label("-");
+            ui.add(egui::DragValue::new(&mut edit.reel_max_seconds).range(5.0..=600.0).suffix(" s"));
+            if edit.reel_min_seconds > edit.reel_max_seconds {
+                edit.reel_min_seconds = edit.reel_max_seconds;
+            }
+        });
+        let changed = *edit != saved;
+        let b = ui.add_enabled(changed, egui::Button::new("Save channel profile"));
+        app.auto.add_response("reel.profile.save", &b, "Save channel profile");
+        if b.clicked() {
+            let p = edit.clone();
+            match s.save_profile(ch, &p) {
+                Ok(()) => {
+                    load_channel(&mut rt(), ch);
+                    app.ui.reel.maker.min_seconds = p.reel_min_seconds;
+                    app.ui.reel.maker.max_seconds = p.reel_max_seconds;
+                    app.ui.status = "Channel profile saved: the AI writes in this voice from now on.".into();
+                }
+                Err(e) => app.ui.status = e.to_string(),
+            }
+        }
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.label("Name");
+            let current = rt().channels.iter().find(|c| c.id == ch).map(|c| c.name.clone()).unwrap_or_default();
+            if app.ui.reel.workspace_rename.is_empty() {
+                app.ui.reel.workspace_rename = current.clone();
+            }
+            ui.add(egui::TextEdit::singleline(&mut app.ui.reel.workspace_rename).desired_width(220.0));
+            let b = ui.add_enabled(app.ui.reel.workspace_rename.trim() != current && !app.ui.reel.workspace_rename.trim().is_empty(), egui::Button::new("Rename"));
+            if b.clicked() {
+                match s.rename_workspace(ch, &app.ui.reel.workspace_rename) {
+                    Ok(()) => {
+                        let mut r = rt();
+                        r.channels = s.channels().unwrap_or_default();
+                        r.loaded_channel = None;
+                        app.ui.status = "Workspace renamed".into();
+                    }
+                    Err(e) => app.ui.status = e.to_string(),
+                }
+            }
+        });
     });
 }
 

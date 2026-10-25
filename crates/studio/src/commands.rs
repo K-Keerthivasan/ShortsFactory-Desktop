@@ -418,6 +418,40 @@ pub fn register() {
                 other => Err(bad(format!("unknown action `{other}`"))),
             }
         }),
+        spec(
+            "studio.channel",
+            "Channel Profile",
+            r#"{"action":"get"|"set"|"kinds"|"themes"|"create"|"rename","channel":n?,"profile":{kind,voice?,audience?,hashtags?,reelMinSeconds?,reelMaxSeconds?}?,"slug":str?,"name":str?,"from":n? (copy brand and profile)} — a workspace's channel kind, AI voice, audience and Reel defaults; new workspaces"#,
+            true,
+            |_, p| {
+                let s = studio()?;
+                let profile = || -> Result<crate::channel_profile::Profile> {
+                    serde_json::from_value(p.get("profile").cloned().unwrap_or(Value::Null)).map_err(|e| bad(format!("profile: {e}")))
+                };
+                match text(p, "action")? {
+                    "get" => {
+                        let ch = int(p, "channel")?;
+                        Ok(json!({"profile": s.profile(ch).map_err(err)?, "brand": s.brand(ch).map_err(err)?}))
+                    }
+                    "set" => {
+                        let ch = int(p, "channel")?;
+                        s.save_profile(ch, &profile()?).map_err(err)?;
+                        to_value(s.profile(ch).map_err(err)?)
+                    }
+                    "kinds" => Ok(json!(crate::channel_profile::KINDS.iter().map(|k| json!({"id": k.0, "label": k.1, "voice": k.2})).collect::<Vec<_>>())),
+                    "themes" => Ok(json!(crate::channel_profile::THEMES.iter().map(|t| json!({"name": t.0, "colors": t.1})).collect::<Vec<_>>())),
+                    "create" => {
+                        let given = if p.get("profile").is_some() { Some(profile()?) } else { None };
+                        to_value(s.create_workspace_from(text(p, "slug")?, text(p, "name")?, p.get("from").and_then(Value::as_i64), given.as_ref()).map_err(err)?)
+                    }
+                    "rename" => {
+                        s.rename_workspace(int(p, "channel")?, text(p, "name")?).map_err(err)?;
+                        Ok(json!({"ok": true}))
+                    }
+                    other => Err(bad(format!("unknown action `{other}`"))),
+                }
+            },
+        ),
         spec("studio.transcribe", "Transcribe with Whisper", r#"{"file":str} — the video's words in lines [[seconds, text], ...] (local Whisper)"#, false, |_, p| {
             let file = std::path::PathBuf::from(text(p, "file")?);
             let lines = crate::virality::whisper_here(&file).map_err(err)?;
