@@ -846,3 +846,62 @@ fn caption_frames() {
         s.execute("file.exportFrame", json!({"path": path.to_string_lossy(), "format": "png", "time": filmcraft_reel::secs(0.4).0})).unwrap();
     }
 }
+
+#[test]
+fn research_finds_the_subject_of_a_video_title() {
+    use crate::research::subject;
+    assert_eq!(subject("Brushland - Official Release Date Trailer | PC Gaming Show"), "Brushland");
+    assert_eq!(subject("Hollow Knight: Silksong (Official Gameplay Trailer) [4K]"), "Hollow Knight: Silksong");
+    assert_eq!(subject("Street Fighter 6 – Year 3 Teaser"), "Street Fighter 6");
+    assert_eq!(subject("The Game"), "The Game");
+}
+
+/// Looks real subjects up on the internet (Steam, Wikipedia; the web with BRAVE_API_KEY).
+#[test]
+#[ignore]
+fn research_live() {
+    let s = fixture("research-live");
+    for title in ["Brushland - Official Trailer", "Hollow Knight: Silksong Gameplay Trailer"] {
+        let mut notes = Vec::new();
+        let found = crate::research::gather(&s, &crate::research::Hints { title: title.into(), ..Default::default() }, &mut notes);
+        for f in &found {
+            println!("[{}] {} — {}\n    {}", f.kind, f.title, f.url, f.text.chars().take(200).collect::<String>());
+        }
+        println!("notes: {notes:?}");
+        assert!(!found.is_empty(), "nothing found for {title}");
+    }
+}
+
+/// The fact-check with the local model (Ollama): a false claim is removed, the true ones stay.
+#[test]
+#[ignore]
+fn fact_check_live_local() {
+    let mut s = fixture("fact-check-live");
+    s.env.insert("AI_PROVIDER".into(), "ollama".into());
+    s.set_ai_provider("ollama").unwrap();
+    let mut notes = Vec::new();
+    let sources = crate::research::gather(&s, &crate::research::Hints { title: "Brushland - Official Trailer".into(), ..Default::default() }, &mut notes);
+    let mut card = filmcraft_reel::Card {
+        title: "Brushland, Ubisoft's painted kingdom-builder, launches on PS5 in March.".into(),
+        caption: "A fairytale kingdom you paint tile by tile".into(),
+        instagram_caption: "Brushland by Ubisoft hits PS5 in March! Paint your own kingdom.".into(),
+        hashtags: vec!["#Brushland".into(), "#Ubisoft".into(), "#PS5".into()],
+        ..Default::default()
+    };
+    let started = std::time::Instant::now();
+    crate::research::fact_check(&s, &mut card, &sources, "A painted fairytale kingdom-builder trailer: tiles are painted and the village grows.").unwrap();
+    println!("{:.0}s\n{card:#?}", started.elapsed().as_secs_f64());
+    for w in ["Ubisoft", "PS5", "March"] {
+        assert!(!format!("{} {} {:?}", card.title, card.instagram_caption, card.hashtags).contains(w), "{w}: {card:?}");
+    }
+    assert!(card.fact_check.starts_with("Removed"), "{}", card.fact_check);
+}
+
+#[test]
+fn fact_check_terms_catch_names_no_source_mentions() {
+    use crate::research::{Source, foreign_terms};
+    let steam = Source { kind: "steam".into(), title: "Brushland on Steam".into(), url: String::new(), text: "Developer: Transhuman Design. Release: Coming soon.".into() };
+    let t = foreign_terms(&["Brushland, Ubisoft's kingdom-builder, launches on PS5 in March".into()], &[steam.clone()], "a painted kingdom");
+    assert_eq!(t, ["Ubisoft", "PS5", "March"]);
+    assert!(foreign_terms(&["Made by Transhuman Design".into()], &[steam], "").is_empty());
+}

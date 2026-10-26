@@ -290,6 +290,8 @@ pub const EDITABLE_ENV: &[&str] = &[
     "HERMES_TIMEOUT_MS",
     "AI_FALLBACK",
     "NVIDIA_API_KEY",
+    "BRAVE_API_KEY",
+    "RESEARCH",
     "NVIDIA_MODEL",
     "NVIDIA_VISION_MODEL",
     "VISION_PROVIDER",

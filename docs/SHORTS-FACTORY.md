@@ -362,6 +362,26 @@ task: it reads the transcript, fixes names and misheard words, and places correc
 through `studio.captions` (or builds animated word-by-word captions with Remotion from
 **Export words for Remotion**, `captions.remotion.json` in Remotion's caption format).
 
+## 11f. Research and fact-checking (any AI, local too)
+
+The AI never needs internet access of its own: the app researches the subject and hands the model
+what it found, so Ollama models work the same as hosted ones.
+
+1. **Research** (Use AI ▸ Write the card, and every AI Reel): from the video's title and uploader
+   the app reads the video's own page (description, link), Steam's store (games: developer,
+   publisher, release date, genres), Wikipedia (the exact title only, never a namesake) and the
+   web through the **Brave Search API** (`BRAVE_API_KEY`, Plugin Settings ▸ AI; free tier).
+2. **Write**: the model gets these as numbered SOURCES and may use a fact only when it clearly
+   concerns the same subject; conflicting facts are left out.
+3. **Fact-check**: the model lists every claim (makers, platforms, dates, numbers, names) and
+   judges each against the sources and what the video itself says and shows; the app also
+   rejects any claim naming something no source mentions. Unsupported claims are removed (a
+   rewrite, then the app checks the names are really gone; hashtags carrying them are dropped).
+4. The card shows **Sources & fact-check** (Design ▸ Card): the links used and what was removed;
+   anything that could not be removed is flagged for you to edit.
+
+`RESEARCH=off` turns the internet lookups off (the fact-check still holds the card to the video).
+
 ## 12. Account health and token notifications
 
 | Feature | Status |

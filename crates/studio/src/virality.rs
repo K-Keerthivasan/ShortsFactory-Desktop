@@ -540,8 +540,8 @@ fn rank_schema() -> Value {
 const RANK_INSTRUCTION: &str = "You are a short-form video editor scoring candidate moments of a long video (often a game or film trailer) for their potential as vertical Reels/Shorts/TikToks. For each candidate you get its times, transcript (trailers often have little or none: then judge from the shots, the loudness peaks and what the vision model saw), signal score (pace, loudness, cuts, hook words, 0-1), its shot changes and what a vision model saw. Cut on shot changes. In trailers leave out studio logos, age-rating cards, release-date slates, long title cards, black frames and slow fades, unless the title reveal is the payoff; open on the most striking shot. Name characters, games and people only as the title, description or transcript names them, and never guess anyone's gender: use their name or \"they\". Pick up to the asked number of moments, best first. For each: \"candidate\" is its number; \"start\"/\"end\" may tighten it to sentence bounds inside the candidate; score 0-10 each of hook (first seconds stop the scroll), emotion (surprise, humour, tension, awe), clarity (makes sense alone), visual, share (people send it on or comment); \"score\" is the overall 0-100 virality prediction, calibrated (most moments are 40-70; reserve 85+ for rare standouts). \"hooks\" are three different opening lines for the on-screen text, each under 60 characters, in the channel voice. \"keep\" lists the ranges to play in order: first the 1-5 second hook (the strongest moment, shown first as a teaser), then the rest of the moment in time order without dead air, filler or repeats; empty when no edit is needed. Write the card as for a single post. \"why\" names the main reason in one line.";
 
 /// Ranks candidates with the workspace's AI. `None` when there is no AI (mock).
-fn rank(studio: &Studio, channel: i64, meta: Option<&Value>, cands: &[Candidate], w: &Wants) -> Result<Option<Vec<Segment>>> {
-    let instruction = [crate::ai::voice(studio, channel)?.as_str(), RANK_INSTRUCTION, crate::ai::CARD_INSTRUCTION].join(" ");
+fn rank(studio: &Studio, channel: i64, meta: Option<&Value>, cands: &[Candidate], w: &Wants, sources: &[crate::research::Source]) -> Result<Option<Vec<Segment>>> {
+    let instruction = [crate::ai::voice(studio, channel)?.as_str(), RANK_INSTRUCTION, crate::ai::CARD_INSTRUCTION, crate::research::RULE].join(" ");
     let list: Vec<Value> = cands
         .iter()
         .enumerate()
@@ -555,6 +555,7 @@ fn rank(studio: &Studio, channel: i64, meta: Option<&Value>, cands: &[Candidate]
         "uploader": meta.and_then(|m| m.get("uploader").or_else(|| m.get("channel"))),
         "wanted": w.max_reels, "minSeconds": w.min_seconds, "maxSeconds": w.max_seconds, "direction": w.notes,
         "candidates": list,
+        "sources": crate::research::for_model(sources),
     });
     let Some(reply) = crate::ai::ask(studio, &instruction, &input, &rank_schema())? else { return Ok(None) };
     let uploader = meta.and_then(|m| m.get("uploader").or_else(|| m.get("channel"))).and_then(Value::as_str).unwrap_or("");
@@ -670,10 +671,32 @@ pub fn analyze(studio: &Studio, channel: i64, video: &Path, meta: Option<&Value>
             a.vision = format!("{provider} {model}");
         }
     }
+    // What the video is, from the internet (its page, Steam, Wikipedia, the web): the model
+    // writes from these and the fact-check holds the cards to them.
+    say("Researching the subject");
+    let hints = meta.map(crate::research::Hints::from_meta).unwrap_or_else(|| crate::research::Hints {
+        title: video.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(),
+        ..Default::default()
+    });
+    let sources = crate::research::gather(studio, &hints, &mut a.notes);
     say("Scoring the moments");
-    let ranked = match rank(studio, channel, meta, &cands, &w) {
-        Ok(Some(s)) if !s.is_empty() => {
+    let ranked = match rank(studio, channel, meta, &cands, &w, &sources) {
+        Ok(Some(mut s)) if !s.is_empty() => {
             a.ranked_by = crate::ai::provider(studio);
+            let n = s.len();
+            for (i, seg) in s.iter_mut().enumerate() {
+                say(&format!("Fact-checking moment {} of {n}", i + 1));
+                // What the video itself says and shows in that moment counts as a source too.
+                let said: Vec<String> = cands
+                    .iter()
+                    .filter(|c| c.end > seg.start && c.start < seg.end)
+                    .map(|c| format!("{} {}", c.text, c.visual.as_ref().map(|v| v.what.as_str()).unwrap_or("")))
+                    .collect();
+                let notes = format!("Video title: {}. Uploader: {}. {}", hints.title, hints.uploader, said.join(" "));
+                if let Err(e) = crate::research::fact_check(studio, &mut seg.card, &sources, &notes) {
+                    a.notes.push(format!("Fact-check skipped: {e}"));
+                }
+            }
             s
         }
         Ok(_) => {
