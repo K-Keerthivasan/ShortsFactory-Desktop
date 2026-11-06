@@ -230,11 +230,17 @@ fn ollama(studio: &Studio, instruction: &str, input: &Value, schema: &Value) -> 
     let model = ollama_model(studio);
     let timeout = studio.var("OLLAMA_TIMEOUT_MS").and_then(|v| v.parse::<u64>().ok()).unwrap_or(300_000);
     let system = [instruction, UNTRUSTED, "Reply with a single JSON object matching the requested schema. No prose, no markdown fences."].join("\n\n");
+    let user = format!("INPUT:\n{input}");
+    // Ollama's default context (often 4096 tokens) silently cuts a long input (a long video's
+    // moments, the research sources): size it to the prompt (~3.5 characters a token) plus the
+    // answer. OLLAMA_NUM_CTX overrides it.
+    let need = (system.len() + user.len() + schema.to_string().len()) / 3 + 4096;
+    let num_ctx = studio.var("OLLAMA_NUM_CTX").and_then(|v| v.parse::<usize>().ok()).unwrap_or_else(|| need.next_power_of_two().clamp(8192, 32768));
     let body = json!({
-        "model": model, "stream": false, "format": schema, "options": {"temperature": 0.4},
+        "model": model, "stream": false, "format": schema, "options": {"temperature": 0.4, "num_ctx": num_ctx},
         "messages": [
             {"role": "system", "content": system},
-            {"role": "user", "content": format!("INPUT:\n{input}")}
+            {"role": "user", "content": user}
         ]
     });
     let agent = ureq::AgentBuilder::new().timeout(Duration::from_millis(timeout)).build();
