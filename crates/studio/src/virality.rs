@@ -354,16 +354,21 @@ const HOOK_WORDS: &[&str] = &[
 /// no transcript, on scene cuts or every few seconds), scored from the signals, best first,
 /// apart from each other.
 pub fn candidates(lines: &[(f64, String)], loud: &[f64], cuts: &[f64], duration: f64, w: &Wants, keep: usize) -> Vec<Candidate> {
-    let (min, max) = (w.min_seconds.max(3.0), w.max_seconds.max(w.min_seconds.max(3.0)));
-    // Where a window may start: lines, else cuts, else every 5 s.
-    let starts: Vec<f64> = if !lines.is_empty() {
-        lines.iter().map(|(t, _)| *t).collect()
-    } else if cuts.len() > 3 {
-        std::iter::once(0.0).chain(cuts.iter().copied()).collect()
-    } else {
-        (0..((duration / 5.0) as usize).max(1)).map(|i| i as f64 * 5.0).collect()
-    };
-    let ends: Vec<f64> = if lines.is_empty() { starts.iter().copied().chain(std::iter::once(duration)).collect() } else { lines.iter().skip(1).map(|(t, _)| *t).chain(std::iter::once(duration)).collect() };
+    // A video shorter than the asked minimum still gives one moment (almost all of it).
+    let min = w.min_seconds.max(3.0).min((duration - 0.5).max(3.0));
+    let max = w.max_seconds.max(min);
+    // Where a window may start and end: lines, and cuts (a trailer has only a few lines, far
+    // apart: lines alone leave no window of the asked length), else every 5 s.
+    let mut starts: Vec<f64> = lines.iter().map(|(t, _)| *t).collect();
+    if cuts.len() > 3 {
+        starts.push(0.0);
+        starts.extend(cuts.iter().copied());
+    } else if lines.is_empty() {
+        starts.extend((0..((duration / 5.0) as usize).max(1)).map(|i| i as f64 * 5.0));
+    }
+    starts.sort_by(f64::total_cmp);
+    starts.dedup_by(|a, b| (*a - *b).abs() < 0.25);
+    let ends: Vec<f64> = starts.iter().copied().filter(|t| *t > 0.0).chain(std::iter::once(duration)).collect();
     let loud_at = |a: f64, b: f64| -> (f64, f64, f64) {
         let (i, j) = (((a * 2.0) as usize).min(loud.len()), ((b * 2.0) as usize).min(loud.len()));
         let part = &loud[i..j.max(i)];
@@ -377,7 +382,12 @@ pub fn candidates(lines: &[(f64, String)], loud: &[f64], cuts: &[f64], duration:
     let overall = if loud.is_empty() { -30.0 } else { loud.iter().sum::<f64>() / loud.len() as f64 };
     let mut all: Vec<Candidate> = Vec::new();
     for &s in &starts {
-        let Some(&e) = ends.iter().filter(|&&e| e - s >= min && e - s <= max).max_by(|a, b| a.total_cmp(b)) else { continue };
+        // The longest window that fits, else the asked maximum from here (when it fits the video).
+        let e = match ends.iter().copied().filter(|&e| e - s >= min && e - s <= max).max_by(f64::total_cmp) {
+            Some(e) => e,
+            None if (s + max).min(duration) - s >= min => (s + max).min(duration),
+            None => continue,
+        };
         let text: String = lines.iter().filter(|(t, _)| *t >= s && *t < e).map(|(_, l)| l.as_str()).collect::<Vec<_>>().join(" ");
         let first: String = lines.iter().filter(|(t, _)| *t >= s && *t < s + 4.0).map(|(_, l)| l.to_lowercase()).collect::<Vec<_>>().join(" ");
         let words = text.split_whitespace().count() as f64;
