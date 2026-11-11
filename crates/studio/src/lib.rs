@@ -12,6 +12,7 @@
 
 pub mod ai;
 pub mod captions;
+pub mod research;
 pub mod channel_profile;
 pub mod autopilot;
 mod clock;

@@ -10,6 +10,7 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+k2-format-gallery = {path = "../format-gallery"}
 filmcraft-reel = { workspace = true }
 # studio.* engine commands (menus, control channel, MCP).
 filmcraft-engine = { workspace = true }

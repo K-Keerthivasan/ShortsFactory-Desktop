@@ -1566,6 +1566,7 @@ pub fn show_design(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     // The tabs stay at the top; only the tab's content scrolls.
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink2(vec2(10.0, 8.0))));
     let ui = &mut child;
+    k2_format_gallery::gallery_button(ui);
     ui.spacing_mut().item_spacing.y = 6.0;
     // Layout, card and caption work on the open Reel without the library; only Use AI needs it.
     let ctx = prelude(app, ui);
@@ -2379,6 +2380,8 @@ fn plugin_settings(app: &mut FilmcraftApp, ctx: &egui::Context) {
                         ("OLLAMA_HOST", "Ollama address", false),
                         ("OLLAMA_MODEL", "Ollama model", false),
                         ("NVIDIA_API_KEY", "NVIDIA API key (build.nvidia.com, free)", true),
+                        ("BRAVE_API_KEY", "Brave Search API key: research and fact-checking on the web (brave.com/search/api, free tier)", true),
+                        ("RESEARCH", "Research and fact-check: on (default) or off", false),
                         ("NVIDIA_MODEL", "NVIDIA model (AI_PROVIDER=nvidia; default nvidia/nemotron-3-super-120b-a12b)", false),
                         ("VISION_PROVIDER", "Vision for the analyzer (ollama, nvidia or off)", false),
                         ("OLLAMA_VISION_MODEL", "Ollama vision model (default gemma3:latest)", false),
@@ -3004,6 +3007,29 @@ fn card(app: &mut FilmcraftApp, ui: &mut egui::Ui, is_reel: bool, part: CardPart
         r.lost_focus()
     }
     let mut changed = false;
+    // Where the AI's facts came from, and what the fact-check took out.
+    if part == CardPart::Card && (!app.ui.reel.card.sources.is_empty() || !app.ui.reel.card.fact_check.is_empty()) {
+        let c = &app.ui.reel.card;
+        let removed = c.fact_check.starts_with("Removed");
+        egui::CollapsingHeader::new(RichText::new(if removed { "Fact-check: claims removed" } else { "Sources & fact-check" }).color(if removed { t.danger } else { t.text }))
+            .id_salt("reel-card-sources")
+            .default_open(removed)
+            .show(ui, |ui| {
+                if !c.fact_check.is_empty() {
+                    ui.label(RichText::new(&c.fact_check).small());
+                }
+                for src in &c.sources {
+                    match src.split_once(" — ") {
+                        Some((title, url)) if url.starts_with("http") => {
+                            ui.hyperlink_to(RichText::new(title).small(), url);
+                        }
+                        _ => {
+                            ui.label(RichText::new(src).small().color(t.text_dim));
+                        }
+                    }
+                }
+            });
+    }
     if part == CardPart::Card {
         let fonts_panel = egui::CollapsingHeader::new("Fonts & text styling").default_open(false).show(ui, |ui| {
             if !filmcraft_text::fonts::system_scanned() {

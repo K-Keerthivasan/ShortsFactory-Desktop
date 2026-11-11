@@ -124,6 +124,12 @@ pub struct Card {
     /// The analyzer's virality prediction (0–100) for the moment this Reel was made from.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub virality: Option<f64>,
+    /// Where the facts came from ("Title — https://…"), found by the app's research.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub sources: Vec<String>,
+    /// What the fact-check changed (unsupported claims it removed), or empty.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub fact_check: String,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
