@@ -1566,6 +1566,7 @@ pub fn show_design(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     // The tabs stay at the top; only the tab's content scrolls.
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink2(vec2(10.0, 8.0))));
     let ui = &mut child;
+    k2_format_gallery::gallery_button(ui);
     ui.spacing_mut().item_spacing.y = 6.0;
     // Layout, card and caption work on the open Reel without the library; only Use AI needs it.
     let ctx = prelude(app, ui);

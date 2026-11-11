@@ -42,6 +42,7 @@ fn spec(id: &'static str, label: &'static str, params: &'static str, journal: bo
 /// Adds the `studio.*` commands to the engine. Call once at start-up, before any command runs.
 pub fn register() {
     filmcraft_engine::host::register([
+        spec("studio.formatGallery","Shared Format Gallery","list returns shared formats; save accepts format with account,series,name and revision (0 for new); apply accepts account,series,name,title,summary,creator,source and optional frame/output PNG",false,|_,p|k2_format_gallery::command(p).map_err(bad)),
         spec("studio.archivePost", "Archive Superseded Library Post", r#"{"channel":n,"story":n} keeps files/history; rejects active jobs"#, true, |_, p| {
             Ok(json!({"previousStatus":studio()?.archive_post(int(p,"channel")?,int(p,"story")?).map_err(err)?}))
         }),
