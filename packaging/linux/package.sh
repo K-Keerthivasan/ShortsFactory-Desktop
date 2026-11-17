@@ -54,6 +54,8 @@ if [ "$SKIP_BUILD" = 0 ]; then
   fi
 fi
 BIN="$CARGO_TARGET_DIR/${CROSS_TARGET:+$CROSS_TARGET/}release"
+# This fork names the app binary shorts-factory-desktop; packages keep the upstream layout (filmcraft).
+if [ -f "$BIN/shorts-factory-desktop" ]; then cp -p "$BIN/shorts-factory-desktop" "$BIN/filmcraft"; fi
 WORK="$CARGO_TARGET_DIR/linux-package"
 STAGE="$WORK/root"
 rm -rf "$WORK"

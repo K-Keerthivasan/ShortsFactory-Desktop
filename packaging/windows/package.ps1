@@ -66,6 +66,9 @@ if (-not $SkipBuild) {
 }
 
 $Bin = Join-Path $TargetDir "$Target\release"
+# This fork names the app binary shorts-factory-desktop.exe; packages keep the upstream name (filmcraft.exe).
+$ForkExe = Join-Path $Bin 'shorts-factory-desktop.exe'
+if (Test-Path $ForkExe) { Copy-Item $ForkExe (Join-Path $Bin 'filmcraft.exe') -Force }
 
 # Check both binaries' PE headers before packaging. Machine (COFF header) must match -Arch, so an
 # x64 build can never ship labelled arm64. Subsystem (optional header): 2 = Windows GUI, 3 = console.

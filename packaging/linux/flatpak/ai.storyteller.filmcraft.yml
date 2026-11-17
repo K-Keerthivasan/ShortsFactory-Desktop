@@ -55,7 +55,7 @@ modules:
         CARGO_NET_OFFLINE: 'true'
     build-commands:
       - cargo --offline build --release --locked -p filmcraft -p filmcraft-cli
-      - install -Dm755 target/release/filmcraft /app/bin/filmcraft
+      - install -Dm755 target/release/shorts-factory-desktop /app/bin/filmcraft
       # The headless CLI and its stdio MCP server, as in the release bundle (#346).
       - install -Dm755 target/release/filmcraft-cli /app/bin/filmcraft-cli
       - install -Dm644 packaging/linux/ai.storyteller.filmcraft.desktop /app/share/applications/ai.storyteller.filmcraft.desktop

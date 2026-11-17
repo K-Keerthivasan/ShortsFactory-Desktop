@@ -55,6 +55,8 @@ rm -rf "$WORK"
 mkdir -p "$WORK"
 
 BIN="$CARGO_TARGET_DIR/release"
+# This fork names the app binary shorts-factory-desktop; packages keep the upstream layout (filmcraft).
+if [ -f "$BIN/shorts-factory-desktop" ]; then cp -p "$BIN/shorts-factory-desktop" "$BIN/filmcraft"; fi
 OUT_DIR="$DIST"
 if [ "$DRY_RUN" = 1 ]; then
   # Stub binaries, and the tarball stays in the work dir so dist/ only ever holds real builds.

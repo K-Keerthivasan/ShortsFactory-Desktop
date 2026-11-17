@@ -61,6 +61,11 @@ if [ "$SKIP_BUILD" = 0 ]; then
   (cd "$ROOT" && cargo build --release --locked -p filmcraft -p filmcraft-cli "${args[@]}")
 fi
 
+# This fork names the app binary shorts-factory-desktop; packages keep the upstream layout (filmcraft).
+for t in "${TARGETS[@]}"; do
+  r="$CARGO_TARGET_DIR/$t/release"
+  if [ -f "$r/shorts-factory-desktop" ]; then cp -p "$r/shorts-factory-desktop" "$r/filmcraft"; fi
+done
 rm -rf "$WORK"
 mkdir -p "$WORK/bin"
 for bin in filmcraft filmcraft-cli; do
